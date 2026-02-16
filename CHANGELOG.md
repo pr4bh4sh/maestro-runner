@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `runFlow: when` conditions with variable expressions (e.g., `${output.element.id}`) were never expanded, causing conditions to always evaluate as false and silently skip conditional blocks
+
 ## [1.0.7] - 2026-02-20
 
 ### Added
