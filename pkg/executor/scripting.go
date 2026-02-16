@@ -421,8 +421,9 @@ func (se *ScriptEngine) ExecuteAssertCondition(ctx context.Context, step *flow.A
 func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition, driver core.Driver) bool {
 	// Check platform (first — no device call needed)
 	if cond.Platform != "" {
+		expandedPlatform := se.ExpandVariables(cond.Platform)
 		if info := driver.GetPlatformInfo(); info != nil {
-			if !strings.EqualFold(cond.Platform, info.Platform) {
+			if !strings.EqualFold(expandedPlatform, info.Platform) {
 				return false
 			}
 		}
@@ -430,7 +431,8 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 
 	// Check visible
 	if cond.Visible != nil {
-		visibleStep := &flow.AssertVisibleStep{Selector: *cond.Visible}
+		expandedSelector := se.expandSelector(cond.Visible)
+		visibleStep := &flow.AssertVisibleStep{Selector: *expandedSelector}
 		result := driver.Execute(visibleStep)
 		if !result.Success {
 			return false
@@ -439,7 +441,8 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 
 	// Check notVisible
 	if cond.NotVisible != nil {
-		notVisibleStep := &flow.AssertNotVisibleStep{Selector: *cond.NotVisible}
+		expandedSelector := se.expandSelector(cond.NotVisible)
+		notVisibleStep := &flow.AssertNotVisibleStep{Selector: *expandedSelector}
 		result := driver.Execute(notVisibleStep)
 		if !result.Success {
 			return false
@@ -530,6 +533,25 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		s.Link = se.ExpandVariables(s.Link)
 	case *flow.PressKeyStep:
 		s.Key = se.ExpandVariables(s.Key)
+	case *flow.RunFlowStep:
+		s.File = se.ExpandVariables(s.File)
+		if s.When != nil {
+			if s.When.Visible != nil {
+				s.When.Visible = se.expandSelector(s.When.Visible)
+			}
+			if s.When.NotVisible != nil {
+				s.When.NotVisible = se.expandSelector(s.When.NotVisible)
+			}
+			if s.When.Script != "" {
+				s.When.Script = se.ExpandVariables(s.When.Script)
+			}
+			if s.When.Platform != "" {
+				s.When.Platform = se.ExpandVariables(s.When.Platform)
+			}
+		}
+		for k, v := range s.Env {
+			s.Env[k] = se.ExpandVariables(v)
+		}
 	}
 }
 

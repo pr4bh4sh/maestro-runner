@@ -583,6 +583,7 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	case *flow.RetryStep:
 		result = fr.executeRetry(s)
 	case *flow.RunFlowStep:
+		fr.script.ExpandStep(step)
 		result = fr.executeRunFlow(s)
 	case *flow.TakeScreenshotStep:
 		fr.script.ExpandStep(step)
