@@ -419,6 +419,15 @@ func (se *ScriptEngine) ExecuteAssertCondition(ctx context.Context, step *flow.A
 
 // CheckCondition evaluates a flow.Condition and returns true if met.
 func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition, driver core.Driver) bool {
+	// Check platform (first — no device call needed)
+	if cond.Platform != "" {
+		if info := driver.GetPlatformInfo(); info != nil {
+			if !strings.EqualFold(cond.Platform, info.Platform) {
+				return false
+			}
+		}
+	}
+
 	// Check visible
 	if cond.Visible != nil {
 		visibleStep := &flow.AssertVisibleStep{Selector: *cond.Visible}

@@ -1490,6 +1490,87 @@ func TestScriptEngine_CheckCondition_AllConditionsMet(t *testing.T) {
 }
 
 // ===========================================
+// CheckCondition platform tests
+// ===========================================
+
+func TestScriptEngine_CheckCondition_PlatformMatch(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	driver := &mockDriver{
+		platformFunc: func() *core.PlatformInfo {
+			return &core.PlatformInfo{Platform: "android"}
+		},
+	}
+
+	cond := flow.Condition{Platform: "Android"}
+	if !se.CheckCondition(context.Background(), cond, driver) {
+		t.Error("CheckCondition() should return true when platform matches (case-insensitive)")
+	}
+}
+
+func TestScriptEngine_CheckCondition_PlatformMismatch(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	driver := &mockDriver{
+		platformFunc: func() *core.PlatformInfo {
+			return &core.PlatformInfo{Platform: "ios"}
+		},
+	}
+
+	cond := flow.Condition{Platform: "Android"}
+	if se.CheckCondition(context.Background(), cond, driver) {
+		t.Error("CheckCondition() should return false when platform doesn't match")
+	}
+}
+
+func TestScriptEngine_CheckCondition_PlatformNilInfo(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	driver := &mockDriver{
+		platformFunc: func() *core.PlatformInfo {
+			return nil
+		},
+	}
+
+	// When PlatformInfo is nil, platform check is skipped (condition passes)
+	cond := flow.Condition{Platform: "Android"}
+	if !se.CheckCondition(context.Background(), cond, driver) {
+		t.Error("CheckCondition() should return true when PlatformInfo is nil")
+	}
+}
+
+func TestScriptEngine_CheckCondition_PlatformWithVisible(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	executed := false
+	driver := &mockDriver{
+		platformFunc: func() *core.PlatformInfo {
+			return &core.PlatformInfo{Platform: "ios"}
+		},
+		executeFunc: func(step flow.Step) *core.CommandResult {
+			executed = true
+			return &core.CommandResult{Success: true}
+		},
+	}
+
+	// Platform doesn't match — visible check should NOT execute
+	cond := flow.Condition{
+		Platform: "Android",
+		Visible:  &flow.Selector{Text: "Login"},
+	}
+	if se.CheckCondition(context.Background(), cond, driver) {
+		t.Error("CheckCondition() should return false when platform doesn't match")
+	}
+	if executed {
+		t.Error("visible check should not execute when platform already failed")
+	}
+}
+
+// ===========================================
 // ExecuteAssertCondition uncovered branches
 // ===========================================
 
