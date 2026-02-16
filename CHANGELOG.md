@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-02-16
+
+### Added
+- `tapOn: point` now supports absolute pixel coordinates (e.g., `point: "286, 819"`) in addition to percentages
+- Coordinate validation: negative values, out-of-bounds pixels, and percentage range (0-100%) are all rejected with clear error messages
+- Screen size cached at session startup instead of fetching on every tap/swipe/scroll
+- `launchApp: environment` for passing environment variables via WDA `launchEnvironment`
+
+### Changed
+- Extracted shared helpers (`ParsePointCoords`, `ParsePercentageCoords`, `RandomString`, `SuccessResult`, etc.) from drivers into `pkg/core`
+- Removed hardcoded 1080x1920 screen size fallback in UIAutomator2 scroll/swipe
+
+### Fixed
+- `launchApp: arguments` silently failed on real iOS devices — early return after session creation, unpopulated env map, activate vs launch, missing variable expansion
+- Removed unused AI flags (`--analyze`, `--api-url`, `--api-key`)
+
+### Contributors
+
+[@mahesh-e27](https://github.com/mahesh-e27)
+1. Reported `tapOn: point` not supporting absolute pixel coordinates ([#6](https://github.com/devicelab-dev/maestro-runner/issues/6))
+2. Spotted unused AI flags (`--analyze`, `--api-url`, `--api-key`)
+
+[@majdukovic](https://github.com/majdukovic)
+1. Reported `launchApp: arguments` not working on real iOS devices ([#7](https://github.com/devicelab-dev/maestro-runner/issues/7))
+
 ## [1.0.4] - 2026-02-13
 
 ### Added
