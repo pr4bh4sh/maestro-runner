@@ -66,6 +66,9 @@ type Driver struct {
 	// Timeouts (0 = use defaults)
 	findTimeout         int // ms, for required elements
 	optionalFindTimeout int // ms, for optional elements
+
+	// Keyboard auto-dismiss: set after inputText/inputRandom, checked on next tap/assert
+	lastStepWasInput bool
 }
 
 // New creates a new UIAutomator2 driver.
@@ -210,6 +213,14 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 			Error:   fmt.Errorf("unknown step type: %T", step),
 			Message: fmt.Sprintf("Step type '%T' is not supported", step),
 		}
+	}
+
+	// Track whether this step was an input step (for keyboard auto-dismiss on next tap/assert)
+	switch step.(type) {
+	case *flow.InputTextStep, *flow.InputRandomStep:
+		d.lastStepWasInput = result.Success
+	default:
+		d.lastStepWasInput = false
 	}
 
 	result.Duration = time.Since(start)

@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"strings"
+
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/report"
 )
@@ -36,7 +38,6 @@ func commandResultToError(r *core.CommandResult) *report.Error {
 		return nil
 	}
 
-	errType := "unknown"
 	message := r.Error.Error()
 
 	// Use message from result if available
@@ -44,8 +45,33 @@ func commandResultToError(r *core.CommandResult) *report.Error {
 		message = r.Message
 	}
 
+	errType := classifyError(message)
+
 	return &report.Error{
 		Type:    errType,
 		Message: message,
+	}
+}
+
+// classifyError determines the error type from the message.
+// Types: assertion, timeout, element_not_found, app_crash, network, unknown
+func classifyError(msg string) string {
+	lower := strings.ToLower(msg)
+
+	switch {
+	case strings.Contains(lower, "not found"):
+		return "element_not_found"
+	case strings.Contains(lower, "keyboard is covering") || strings.Contains(lower, "keyboard is open"):
+		return "element_not_found"
+	case strings.Contains(lower, "not visible") || strings.Contains(lower, "not displayed"):
+		return "assertion"
+	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
+		return "timeout"
+	case strings.Contains(lower, "crash") || strings.Contains(lower, "not responding") || strings.Contains(lower, "not installed"):
+		return "app_crash"
+	case strings.Contains(lower, "connection") || strings.Contains(lower, "refused") || strings.Contains(lower, "unreachable"):
+		return "network"
+	default:
+		return "unknown"
 	}
 }

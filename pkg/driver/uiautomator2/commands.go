@@ -22,6 +22,13 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return d.tapOnPointWithCoords(step.Point)
 	}
 
+	wasInput := d.consumeInputFlag()
+
+	// Quick check: if previous step was input and keyboard is blocking, fail fast
+	if result := d.checkKeyboardBlocking(wasInput, step.Selector); result != nil {
+		return result
+	}
+
 	elem, info, err := d.findElementForTap(step.Selector, step.IsOptional(), step.TimeoutMs)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Element not found: %v", err))
@@ -79,6 +86,12 @@ func (d *Driver) tapOnPointWithCoords(point string) *core.CommandResult {
 }
 
 func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
+	wasInput := d.consumeInputFlag()
+
+	if result := d.checkKeyboardBlocking(wasInput, step.Selector); result != nil {
+		return result
+	}
+
 	elem, info, err := d.findElementForTap(step.Selector, step.IsOptional(), step.TimeoutMs)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Element not found: %v", err))
@@ -100,6 +113,12 @@ func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
 }
 
 func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
+	wasInput := d.consumeInputFlag()
+
+	if result := d.checkKeyboardBlocking(wasInput, step.Selector); result != nil {
+		return result
+	}
+
 	elem, info, err := d.findElementForTap(step.Selector, step.IsOptional(), step.TimeoutMs)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Element not found: %v", err))
@@ -154,6 +173,12 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 // ============================================================================
 
 func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult {
+	wasInput := d.consumeInputFlag()
+
+	if result := d.checkKeyboardBlocking(wasInput, step.Selector); result != nil {
+		return result
+	}
+
 	// Use findElementFast - only need to check element exists (1 HTTP call vs 3)
 	_, info, err := d.findElementFast(step.Selector, step.IsOptional(), step.TimeoutMs)
 	if err != nil {
