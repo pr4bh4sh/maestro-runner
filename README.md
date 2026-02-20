@@ -49,9 +49,9 @@ maestro-runner test --parallel 3 flows/                                 # Parall
 ## Key Features
 
 - **Zero migration** — Runs your existing Maestro YAML flows as-is, no changes needed
-- **Real iOS device testing** — Supports physical iOS devices, not just simulators
-- **Cloud testing** — BrowserStack, Sauce Labs, LambdaTest via Appium driver
-- **React Native & Flutter** — Smart element finding for RN testIDs and Flutter semantics
+- **Real iOS device testing** — Supports physical iOS devices, not just simulators [Guide →](https://devicelab.dev/blog/maestro-ios-real-device-testing)
+- **Cloud testing** — BrowserStack, Sauce Labs, LambdaTest via Appium driver [Guide →](https://devicelab.dev/blog/run-maestro-flows-any-cloud)
+- **React Native & Flutter** — Smart element finding for RN testIDs and Flutter semantics [Guide →](https://devicelab.dev/blog/flutter-testing-maestro-patrol-appium)
 - **Parallel execution** — Dynamic work distribution across devices, not static sharding. Faster devices pick up more tests automatically, so no device sits idle
 - **App install built-in** — `--app-file app.apk` installs the app before testing, so you always test the right build
 - **Wide OS compatibility** — Android 5.0+ (API 21+) and iOS 12.0+, no version restrictions

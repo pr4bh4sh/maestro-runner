@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-02-20
+
+### Added
+- Appium driver: `newSession` option for `launchApp` — creates a fresh Appium session, useful when `clearState` fails on real iOS devices (`mobile: clearApp` unsupported). On iOS real devices with `newSession: true`, `clearState` is skipped since a fresh session already provides clean state ([#14](https://github.com/devicelab-dev/maestro-runner/issues/14))
+  ```yaml
+  - launchApp:
+      appId: com.example.app
+      newSession: true
+  ```
+- Bundled UIAutomator2 server upgraded from v9.9.0 to v9.11.1 with new LaunchApp endpoint (`getLaunchIntentForPackage` + `startActivity`)
+- Android: classify error types in report (`element_not_found`, `timeout`, `assertion`, `keyboard_covering`, etc.) for better debugging
+- Android: detect keyboard covering elements after `inputText`/`inputRandom` — when the soft keyboard covers a target element, taps land on the keyboard instead of the element. Now detects this with a clear error message suggesting `- hideKeyboard`
+- Auto-create iOS simulators when not enough shutdown simulators exist for `--parallel` — created simulators are automatically deleted on shutdown
+- Parallel device selection: in-use detection via WDA port check (iOS) and socket check (Android) to skip devices already claimed by another maestro-runner instance
+
+### Fixed
+- iOS real device: `clearState` no longer kills WDA connection — replaced `go-ios` (`installationproxy`/`zipconduit` over usbmuxd) with `xcrun devicectl` (over Apple's `remoted` daemon), which doesn't interfere with USB port forwarding
+- Android: `scroll` and `scrollUntilVisible` direction was inverted — `scroll down` was scrolling up because `/appium/gestures/scroll` already uses scroll semantics, no inversion needed ([#9](https://github.com/devicelab-dev/maestro-runner/issues/9))
+- Android: `launchApp` failed with "No apps can perform this action" on certain devices — `resolve-activity` was called without `-a android.intent.action.MAIN -c android.intent.category.LAUNCHER` flags. New three-tier launch strategy: (1) UIAutomator2 server `getLaunchIntentForPackage()` on-device, (2) shell fallback with proper flags + `dumpsys` parsing + API-level-aware `am start`, (3) monkey fallback ([#15](https://github.com/devicelab-dev/maestro-runner/issues/15))
+- Android: server APK install now checks version and handles signing conflicts (uninstall + reinstall when version mismatches)
+- `index` selector was ignored in simple (non-relative) selectors — `tapOn: text: X, index: 1` always tapped the first match because native driver APIs return only a single element. Now selectors with a non-zero `index` route through page source parsing, which returns all matches and picks the Nth one
+- `-e` env variables were not expanding in flow config `appId` — `appId: ${APP_ID}` with `-e APP_ID=com.myapp` sent the literal `${APP_ID}` to adb. Now expands using `ExpandVariables()` before setting as a variable ([#12](https://github.com/devicelab-dev/maestro-runner/issues/12))
+- Parallel device selection: devices are now filtered by platform (excludes tvOS/watchOS/xrOS) and in-use devices are skipped ([#11](https://github.com/devicelab-dev/maestro-runner/issues/11))
+- Android: emulator port allocation skipped ports occupied by running emulators
+- CLI: flags must come before flow paths in command examples
+
+### Contributors
+
+[@ditzdragos](https://github.com/ditzdragos)
+1. Reported `launchApp` "No apps can perform this action" on Android ([#15](https://github.com/devicelab-dev/maestro-runner/issues/15))
+
+[@popatre](https://github.com/popatre)
+1. Reported `clearState` failing on real iOS devices via Appium ([#14](https://github.com/devicelab-dev/maestro-runner/issues/14))
+
+[@hyry2024](https://github.com/hyry2024)
+1. Reported `-e` env variables not expanding in flow config `appId` ([#12](https://github.com/devicelab-dev/maestro-runner/issues/12))
+
+[@DouweBos](https://github.com/DouweBos)
+1. Reported parallel device selection issues — non-iOS simulators selected and in-use devices not skipped ([#11](https://github.com/devicelab-dev/maestro-runner/issues/11))
+
+[@janfreund](https://github.com/janfreund)
+1. Reported scroll direction inversion with video evidence ([#9](https://github.com/devicelab-dev/maestro-runner/issues/9))
+
+[@SuperRoach](https://github.com/SuperRoach)
+1. Reported keyboard covering elements after input steps on Android
+2. Reported `index` selector being ignored in simple selectors
+
 ## [1.0.6] - 2026-02-17
 
 ### Fixed
