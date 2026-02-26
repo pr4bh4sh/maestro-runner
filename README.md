@@ -110,7 +110,7 @@ maestro-runner runs Maestro YAML flows on cloud device grids via the Appium driv
 maestro-runner --driver appium --appium-url <HUB_URL> --caps caps.json test flows/
 ```
 
-- **[TestingBot](docs/cloud-providers/testingbot.md)** — Run on TestingBot's real device cloud
+- **[TestingBot](docs/cloud-providers/testingbot.md)** — Setup guide for running on TestingBot's real device cloud
 
 ## Contributing
 
