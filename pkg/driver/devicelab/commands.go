@@ -403,7 +403,15 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		direction = "down"
 	}
 
-	maxScrolls := 10
+	maxScrolls := 20
+	if step.MaxScrolls > 0 {
+		maxScrolls = step.MaxScrolls
+	}
+	timeout := 30 * time.Second
+	if step.TimeoutMs > 0 {
+		timeout = time.Duration(step.TimeoutMs) * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
 
 	width, height, err := d.screenSize()
 	if err != nil {
@@ -412,7 +420,7 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 
 	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
 
-	for i := 0; i < maxScrolls; i++ {
+	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		_, info, err := d.findElement(step.Element, true, 1000)
 		if err == nil && info != nil {
 			return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)

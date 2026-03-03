@@ -2489,3 +2489,60 @@ func TestInputTextAndroidStillUsesActions(t *testing.T) {
 		t.Errorf("Android inputText should use /actions, got %s", lastPath)
 	}
 }
+
+// =============================================================================
+// scrollUntilVisible maxScrolls tests
+// =============================================================================
+
+func TestAppiumScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
+	scrollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if strings.HasSuffix(path, "/source") {
+			// Element never found
+			writeJSON(w, map[string]interface{}{
+				"value": `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2340]">
+    <android.widget.TextView text="Other" bounds="[100,100][300,150]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`,
+			})
+			return
+		}
+
+		if strings.Contains(path, "/actions") && r.Method == "POST" {
+			scrollCount++
+			writeJSON(w, map[string]interface{}{"value": nil})
+			return
+		}
+
+		if strings.Contains(path, "/window/rect") {
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"width": 1080.0, "height": 2340.0, "x": 0.0, "y": 0.0},
+			})
+			return
+		}
+
+		writeJSON(w, map[string]interface{}{"value": nil})
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	step := &flow.ScrollUntilVisibleStep{
+		Element:    flow.Selector{Text: "NonExistent"},
+		Direction:  "down",
+		MaxScrolls: 3,
+		BaseStep:   flow.BaseStep{TimeoutMs: 30000},
+	}
+
+	result := driver.scrollUntilVisible(step)
+	if result.Success {
+		t.Error("Expected failure when element not found")
+	}
+	if scrollCount != 3 {
+		t.Errorf("Expected exactly 3 scrolls (maxScrolls=3), got %d", scrollCount)
+	}
+}

@@ -4061,6 +4061,114 @@ func TestLaunchAppViaShellAmStartErrorWithArgs(t *testing.T) {
 }
 
 // ============================================================================
+// scrollUntilVisible maxScrolls and timeout tests
+// ============================================================================
+
+func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
+	scrollCount := 0
+	client := &MockUIA2Client{
+		sourceFunc: func() (string, error) {
+			// Element never found
+			return `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
+    <android.widget.TextView text="Other" bounds="[100,100][300,150]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`, nil
+		},
+		scrollErr: nil,
+	}
+	// Track scroll calls
+	origScroll := client.scrollCalls
+	_ = origScroll
+
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, nil)
+
+	step := &flow.ScrollUntilVisibleStep{
+		Element:    flow.Selector{Text: "NonExistent"},
+		Direction:  "down",
+		MaxScrolls: 3,
+		BaseStep:   flow.BaseStep{TimeoutMs: 30000}, // long timeout so maxScrolls is the limit
+	}
+
+	result := driver.scrollUntilVisible(step)
+
+	scrollCount = len(client.scrollCalls)
+	if result.Success {
+		t.Error("Expected failure when element not found")
+	}
+	if scrollCount != 3 {
+		t.Errorf("Expected exactly 3 scrolls (maxScrolls=3), got %d", scrollCount)
+	}
+}
+
+func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
+	client := &MockUIA2Client{
+		sourceFunc: func() (string, error) {
+			// Element never found
+			return `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
+    <android.widget.TextView text="Other" bounds="[100,100][300,150]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`, nil
+		},
+	}
+
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, nil)
+
+	step := &flow.ScrollUntilVisibleStep{
+		Element:   flow.Selector{Text: "NonExistent"},
+		Direction: "down",
+		BaseStep:  flow.BaseStep{TimeoutMs: 500}, // very short timeout
+		// maxScrolls defaults to 20 — timeout should kick in first
+	}
+
+	result := driver.scrollUntilVisible(step)
+
+	scrollCount := len(client.scrollCalls)
+	if result.Success {
+		t.Error("Expected failure when element not found")
+	}
+	// With 500ms timeout, we should get far fewer than the default 20 scrolls
+	if scrollCount >= 20 {
+		t.Errorf("Expected timeout to limit scrolls (got %d, default max is 20)", scrollCount)
+	}
+}
+
+func TestScrollUntilVisibleDefaultMaxScrolls(t *testing.T) {
+	client := &MockUIA2Client{
+		sourceFunc: func() (string, error) {
+			return `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
+    <android.widget.TextView text="Other" bounds="[100,100][300,150]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`, nil
+		},
+	}
+
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, nil)
+
+	step := &flow.ScrollUntilVisibleStep{
+		Element:   flow.Selector{Text: "NonExistent"},
+		Direction: "down",
+		BaseStep:  flow.BaseStep{TimeoutMs: 60000}, // long timeout so maxScrolls is the limit
+		// MaxScrolls not set — defaults to 20
+	}
+
+	result := driver.scrollUntilVisible(step)
+
+	scrollCount := len(client.scrollCalls)
+	if result.Success {
+		t.Error("Expected failure when element not found")
+	}
+	if scrollCount != 20 {
+		t.Errorf("Expected default 20 scrolls, got %d", scrollCount)
+	}
+}
+
+// ============================================================================
 // Compile-time interface assertion
 // ============================================================================
 

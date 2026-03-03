@@ -244,6 +244,9 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 
 	deadline := time.Now().Add(timeout)
 	maxScrolls := 20
+	if step.MaxScrolls > 0 {
+		maxScrolls = step.MaxScrolls
+	}
 
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		// Check if element is visible

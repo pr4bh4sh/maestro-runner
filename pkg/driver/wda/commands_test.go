@@ -4490,3 +4490,102 @@ func TestToggleAirplaneModeTapFails(t *testing.T) {
 		t.Error("Expected failure when tap fails")
 	}
 }
+
+// =============================================================================
+// scrollUntilVisible maxScrolls and timeout tests
+// =============================================================================
+
+func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
+	scrollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if strings.Contains(path, "/dragfromtoforduration") {
+			scrollCount++
+			jsonResponse(w, map[string]interface{}{"status": 0})
+			return
+		}
+		if strings.HasSuffix(path, "/source") {
+			// Element never found
+			jsonResponse(w, map[string]interface{}{
+				"value": `<AppiumAUT>
+  <XCUIElementTypeApplication name="TestApp" enabled="true" visible="true" x="0" y="0" width="390" height="844">
+  </XCUIElementTypeApplication>
+</AppiumAUT>`,
+			})
+			return
+		}
+		if strings.Contains(path, "/window/size") {
+			jsonResponse(w, map[string]interface{}{
+				"value": map[string]interface{}{"width": 390.0, "height": 844.0},
+			})
+			return
+		}
+		jsonResponse(w, map[string]interface{}{"status": 0})
+	}))
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	step := &flow.ScrollUntilVisibleStep{
+		Element:    flow.Selector{Text: "NonExistent"},
+		Direction:  "down",
+		MaxScrolls: 3,
+		BaseStep:   flow.BaseStep{TimeoutMs: 30000},
+	}
+	result := driver.scrollUntilVisible(step)
+
+	if result.Success {
+		t.Error("Expected failure when element not found")
+	}
+	if scrollCount != 3 {
+		t.Errorf("Expected exactly 3 scrolls (maxScrolls=3), got %d", scrollCount)
+	}
+}
+
+func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
+	scrollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if strings.Contains(path, "/dragfromtoforduration") {
+			scrollCount++
+			jsonResponse(w, map[string]interface{}{"status": 0})
+			return
+		}
+		if strings.HasSuffix(path, "/source") {
+			jsonResponse(w, map[string]interface{}{
+				"value": `<AppiumAUT>
+  <XCUIElementTypeApplication name="TestApp" enabled="true" visible="true" x="0" y="0" width="390" height="844">
+  </XCUIElementTypeApplication>
+</AppiumAUT>`,
+			})
+			return
+		}
+		if strings.Contains(path, "/window/size") {
+			jsonResponse(w, map[string]interface{}{
+				"value": map[string]interface{}{"width": 390.0, "height": 844.0},
+			})
+			return
+		}
+		jsonResponse(w, map[string]interface{}{"status": 0})
+	}))
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	step := &flow.ScrollUntilVisibleStep{
+		Element:   flow.Selector{Text: "NonExistent"},
+		Direction: "down",
+		BaseStep:  flow.BaseStep{TimeoutMs: 500}, // very short timeout
+	}
+	result := driver.scrollUntilVisible(step)
+
+	if result.Success {
+		t.Error("Expected failure when element not found")
+	}
+	// With 500ms timeout, should get far fewer than default 20 scrolls
+	if scrollCount >= 20 {
+		t.Errorf("Expected timeout to limit scrolls (got %d, default max is 20)", scrollCount)
+	}
+}

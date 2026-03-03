@@ -428,12 +428,17 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		direction = "down"
 	}
 
-	maxScrolls := 10
-	if step.TimeoutMs > 0 {
-		maxScrolls = step.TimeoutMs / 1000 // rough estimate
+	maxScrolls := 20
+	if step.MaxScrolls > 0 {
+		maxScrolls = step.MaxScrolls
 	}
+	timeout := 30 * time.Second
+	if step.TimeoutMs > 0 {
+		timeout = time.Duration(step.TimeoutMs) * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
 
-	for i := 0; i < maxScrolls; i++ {
+	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		info, err := d.findElement(step.Element, true, 1000)
 		if err == nil && info != nil {
 			return successResult("Element found after scrolling", info)
