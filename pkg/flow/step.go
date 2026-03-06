@@ -85,6 +85,13 @@ const (
 	StepSwitchTab StepType = "switchTab"
 	StepCloseTab  StepType = "closeTab"
 
+	// Browser Network Interception (web-only)
+	StepMockNetwork          StepType = "mockNetwork"
+	StepBlockNetwork         StepType = "blockNetwork"
+	StepSetNetworkConditions StepType = "setNetworkConditions"
+	StepWaitForRequest       StepType = "waitForRequest"
+	StepClearNetworkMocks    StepType = "clearNetworkMocks"
+
 	// Media
 	StepTakeScreenshot StepType = "takeScreenshot"
 	StepStartRecording StepType = "startRecording"
@@ -604,6 +611,53 @@ type SwitchTabStep struct {
 
 // CloseTabStep closes the current tab and switches to the previous one.
 type CloseTabStep struct {
+	BaseStep `yaml:",inline"`
+}
+
+// ============================================
+// Browser Network Interception Steps (web-only)
+// ============================================
+
+// MockResponseSpec describes the mock HTTP response.
+type MockResponseSpec struct {
+	Status  int               `yaml:"status"`
+	Headers map[string]string `yaml:"headers"`
+	Body    string            `yaml:"body"`
+}
+
+// MockNetworkStep mocks API responses matching URL pattern and method.
+type MockNetworkStep struct {
+	BaseStep `yaml:",inline"`
+	URL      string           `yaml:"url"`
+	Method   string           `yaml:"method"` // GET, POST, etc. (empty = match all)
+	Response MockResponseSpec `yaml:"response"`
+}
+
+// BlockNetworkStep blocks network requests matching URL patterns.
+type BlockNetworkStep struct {
+	BaseStep `yaml:",inline"`
+	Patterns []string `yaml:"patterns"`
+}
+
+// SetNetworkConditionsStep simulates network throttling or offline mode.
+type SetNetworkConditionsStep struct {
+	BaseStep      `yaml:",inline"`
+	Offline       bool    `yaml:"offline"`
+	Latency       float64 `yaml:"latency"`       // ms
+	DownloadSpeed float64 `yaml:"downloadSpeed"` // KB/s (-1 = no throttle)
+	UploadSpeed   float64 `yaml:"uploadSpeed"`   // KB/s (-1 = no throttle)
+}
+
+// WaitForRequestStep waits for a specific network request to be made.
+type WaitForRequestStep struct {
+	BaseStep `yaml:",inline"`
+	URL      string `yaml:"url"`
+	Method   string `yaml:"method"` // Optional: match specific HTTP method
+	Output   string `yaml:"output"` // Variable name to store request body
+}
+
+// ClearNetworkMocksStep clears all network mocks and blocks.
+type ClearNetworkMocksStep struct {
 	BaseStep `yaml:",inline"`
 }
 

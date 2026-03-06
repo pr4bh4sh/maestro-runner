@@ -1223,6 +1223,244 @@ func labelSuffix(label string) string {
 	return ""
 }
 
+// ============================================
+// Network Interception
+// ============================================
+
+// networkMock describes a single mock rule for intercepted requests.
+type networkMock struct {
+	URLPattern string
+	Method     string // empty = match all methods
+	Status     int
+	Headers    map[string]string
+	Body       string
+}
+
+// mockNetwork adds a mock rule and enables Fetch interception.
+func (d *Driver) mockNetwork(step *flow.MockNetworkStep) *core.CommandResult {
+	if step.URL == "" {
+		return errorResult(fmt.Errorf("mockNetwork: url is required"), "")
+	}
+
+	mock := networkMock{
+		URLPattern: step.URL,
+		Method:     strings.ToUpper(step.Method),
+		Status:     step.Response.Status,
+		Headers:    step.Response.Headers,
+		Body:       step.Response.Body,
+	}
+	if mock.Status == 0 {
+		mock.Status = 200
+	}
+
+	d.networkMu.Lock()
+	d.networkMocks = append(d.networkMocks, mock)
+	d.networkMu.Unlock()
+
+	if err := d.enableFetchInterception(); err != nil {
+		return errorResult(fmt.Errorf("mockNetwork: %w", err), "")
+	}
+
+	return successResult(fmt.Sprintf("Mocked %s %s → %d", step.Method, step.URL, mock.Status), nil)
+}
+
+// blockNetwork adds URL patterns to block and enables Fetch interception.
+func (d *Driver) blockNetwork(step *flow.BlockNetworkStep) *core.CommandResult {
+	if len(step.Patterns) == 0 {
+		return errorResult(fmt.Errorf("blockNetwork: no patterns provided"), "")
+	}
+
+	d.networkMu.Lock()
+	d.networkBlocks = append(d.networkBlocks, step.Patterns...)
+	d.networkMu.Unlock()
+
+	if err := d.enableFetchInterception(); err != nil {
+		return errorResult(fmt.Errorf("blockNetwork: %w", err), "")
+	}
+
+	return successResult(fmt.Sprintf("Blocking %d URL pattern(s)", len(step.Patterns)), nil)
+}
+
+// enableFetchInterception enables CDP Fetch domain and starts the interception handler.
+// Safe to call multiple times — only enables once.
+func (d *Driver) enableFetchInterception() error {
+	d.networkMu.Lock()
+	alreadyEnabled := d.fetchEnabled
+	d.fetchEnabled = true
+	d.networkMu.Unlock()
+
+	if alreadyEnabled {
+		return nil
+	}
+
+	// Enable Fetch domain — intercept all requests
+	if err := (proto.FetchEnable{}).Call(d.page); err != nil {
+		return fmt.Errorf("failed to enable Fetch domain: %w", err)
+	}
+
+	// Start background handler for intercepted requests
+	go d.page.EachEvent(func(e *proto.FetchRequestPaused) bool {
+		d.handleInterceptedRequest(e)
+		select {
+		case <-d.stopCh:
+			return true // stop on driver close
+		default:
+			return false // keep listening
+		}
+	})()
+
+	return nil
+}
+
+// handleInterceptedRequest processes an intercepted request against mocks and blocks.
+func (d *Driver) handleInterceptedRequest(e *proto.FetchRequestPaused) {
+	url := e.Request.URL
+	method := e.Request.Method
+
+	d.networkMu.Lock()
+	mocks := make([]networkMock, len(d.networkMocks))
+	copy(mocks, d.networkMocks)
+	blocks := make([]string, len(d.networkBlocks))
+	copy(blocks, d.networkBlocks)
+	d.networkMu.Unlock()
+
+	// Check blocks first
+	for _, pattern := range blocks {
+		if matchURLPattern(url, pattern) {
+			_ = (proto.FetchFailRequest{
+				RequestID:   e.RequestID,
+				ErrorReason: proto.NetworkErrorReasonBlockedByClient,
+			}).Call(d.page)
+			return
+		}
+	}
+
+	// Check mocks
+	for _, mock := range mocks {
+		if !matchURLPattern(url, mock.URLPattern) {
+			continue
+		}
+		if mock.Method != "" && mock.Method != method {
+			continue
+		}
+
+		// Build response headers
+		var headers []*proto.FetchHeaderEntry
+		for k, v := range mock.Headers {
+			headers = append(headers, &proto.FetchHeaderEntry{Name: k, Value: v})
+		}
+
+		_ = (proto.FetchFulfillRequest{
+			RequestID:       e.RequestID,
+			ResponseCode:    mock.Status,
+			ResponseHeaders: headers,
+			Body:            []byte(mock.Body),
+		}).Call(d.page)
+		return
+	}
+
+	// No match — continue request normally
+	_ = (proto.FetchContinueRequest{
+		RequestID: e.RequestID,
+	}).Call(d.page)
+}
+
+// setNetworkConditions emulates network throttling or offline mode.
+func (d *Driver) setNetworkConditions(step *flow.SetNetworkConditionsStep) *core.CommandResult {
+	// Convert KB/s to bytes/sec (-1 means no throttle)
+	download := step.DownloadSpeed * 1024
+	if step.DownloadSpeed <= 0 {
+		download = -1
+	}
+	upload := step.UploadSpeed * 1024
+	if step.UploadSpeed <= 0 {
+		upload = -1
+	}
+
+	err := (proto.NetworkEmulateNetworkConditions{
+		Offline:            step.Offline,
+		Latency:            step.Latency,
+		DownloadThroughput: download,
+		UploadThroughput:   upload,
+	}).Call(d.page)
+	if err != nil {
+		return errorResult(fmt.Errorf("setNetworkConditions: %w", err), "")
+	}
+
+	if step.Offline {
+		return successResult("Set network to offline", nil)
+	}
+	return successResult(fmt.Sprintf("Set network conditions: latency=%.0fms, download=%.0fKB/s, upload=%.0fKB/s",
+		step.Latency, step.DownloadSpeed, step.UploadSpeed), nil)
+}
+
+// waitForRequest waits for a matching network request to be made.
+func (d *Driver) waitForRequest(step *flow.WaitForRequestStep) *core.CommandResult {
+	if step.URL == "" {
+		return errorResult(fmt.Errorf("waitForRequest: url is required"), "")
+	}
+
+	timeoutMs := step.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 30000
+	}
+
+	// Enable network events
+	if err := (proto.NetworkEnable{}).Call(d.page); err != nil {
+		return errorResult(fmt.Errorf("waitForRequest: %w", err), "")
+	}
+
+	matchMethod := strings.ToUpper(step.Method)
+	doneCh := make(chan string, 1)
+
+	wait := d.page.EachEvent(func(e *proto.NetworkRequestWillBeSent) bool {
+		if !matchURLPattern(e.Request.URL, step.URL) {
+			return false
+		}
+		if matchMethod != "" && e.Request.Method != matchMethod {
+			return false
+		}
+		doneCh <- e.Request.PostData
+		return true // stop listening
+	})
+	go wait()
+
+	select {
+	case body := <-doneCh:
+		result := successResult(fmt.Sprintf("Request matched: %s", step.URL), nil)
+		result.Data = body
+		return result
+	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+		return errorResult(fmt.Errorf("waitForRequest: no request matching %q within %dms", step.URL, timeoutMs), "")
+	}
+}
+
+// clearNetworkMocks disables Fetch interception and clears all mocks and blocks.
+func (d *Driver) clearNetworkMocks() *core.CommandResult {
+	d.networkMu.Lock()
+	d.networkMocks = nil
+	d.networkBlocks = nil
+	wasFetchEnabled := d.fetchEnabled
+	d.fetchEnabled = false
+	d.networkMu.Unlock()
+
+	if wasFetchEnabled {
+		if err := (proto.FetchDisable{}).Call(d.page); err != nil {
+			log.Printf("[browser] clearNetworkMocks: failed to disable Fetch: %v", err)
+		}
+	}
+
+	// Reset network conditions to default
+	_ = (proto.NetworkEmulateNetworkConditions{
+		Offline:            false,
+		Latency:            0,
+		DownloadThroughput: -1,
+		UploadThroughput:   -1,
+	}).Call(d.page)
+
+	return successResult("Cleared all network mocks and conditions", nil)
+}
+
 var firstNames = []string{"Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry"}
 var lastNames = []string{"Smith", "Johnson", "Brown", "Taylor", "Wilson", "Davis", "Clark", "Lewis"}
 

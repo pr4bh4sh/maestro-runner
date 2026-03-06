@@ -53,6 +53,12 @@ type Driver struct {
 	// Tab management
 	tabLabels map[string]*rod.Page // label → page mapping
 
+	// Network interception
+	networkMocks  []networkMock // active mock rules
+	networkBlocks []string      // blocked URL patterns
+	fetchEnabled  bool          // whether Fetch domain is enabled
+	networkMu     sync.Mutex    // protects mocks/blocks
+
 	// Selector validation dedup
 	warnedFields map[string]bool
 
@@ -424,6 +430,18 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.switchTab(s)
 	case *flow.CloseTabStep:
 		result = d.closeTab()
+
+	// Network interception
+	case *flow.MockNetworkStep:
+		result = d.mockNetwork(s)
+	case *flow.BlockNetworkStep:
+		result = d.blockNetwork(s)
+	case *flow.SetNetworkConditionsStep:
+		result = d.setNetworkConditions(s)
+	case *flow.WaitForRequestStep:
+		result = d.waitForRequest(s)
+	case *flow.ClearNetworkMocksStep:
+		result = d.clearNetworkMocks()
 
 	// Unsupported — mobile-only or not applicable to web
 	case *flow.SetAirplaneModeStep, *flow.ToggleAirplaneModeStep:

@@ -236,6 +236,7 @@ func isStepType(key string) bool {
 		StepSetCookies, StepGetCookies, StepSaveAuthState, StepLoadAuthState,
 		StepUploadFile, StepWaitForDownload, StepGrantPermissions, StepResetPermissions,
 		StepOpenTab, StepSwitchTab, StepCloseTab,
+		StepMockNetwork, StepBlockNetwork, StepSetNetworkConditions, StepWaitForRequest, StepClearNetworkMocks,
 		StepTakeScreenshot, StepStartRecording,
 		StepStopRecording, StepAddMedia, StepPressKey, StepWaitForAnimationToEnd,
 		StepDefineVariables:
@@ -728,6 +729,45 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 	case StepCloseTab:
 		var s CloseTabStep
 		s.StepType = StepCloseTab
+		return &s, nil
+
+	case StepMockNetwork:
+		var s MockNetworkStep
+		if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = StepMockNetwork
+		return &s, nil
+
+	case StepBlockNetwork:
+		var s BlockNetworkStep
+		if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = StepBlockNetwork
+		return &s, nil
+
+	case StepSetNetworkConditions:
+		var s SetNetworkConditionsStep
+		if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = StepSetNetworkConditions
+		return &s, nil
+
+	case StepWaitForRequest:
+		var s WaitForRequestStep
+		if valueNode.Kind == yaml.ScalarNode {
+			s.URL = valueNode.Value
+		} else if err := valueNode.Decode(&s); err != nil {
+			return nil, wrapParseError(sourcePath, valueNode.Line, err)
+		}
+		s.StepType = StepWaitForRequest
+		return &s, nil
+
+	case StepClearNetworkMocks:
+		var s ClearNetworkMocksStep
+		s.StepType = StepClearNetworkMocks
 		return &s, nil
 
 	case StepTakeScreenshot:

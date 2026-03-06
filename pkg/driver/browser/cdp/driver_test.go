@@ -113,6 +113,31 @@ func newTestServer() *httptest.Server {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		fmt.Fprint(w, "download content")
 	})
+	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"users": [{"id": 1, "name": "Real User"}]}`)
+	})
+	mux.HandleFunc("/api/submit", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok": true}`)
+	})
+	mux.HandleFunc("/fetch-page", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!DOCTYPE html><html><body>
+			<div id="result"></div>
+			<script>
+				async function fetchAPI(url) {
+					try {
+						const res = await fetch(url);
+						const data = await res.text();
+						document.getElementById('result').textContent = data;
+					} catch(e) {
+						document.getElementById('result').textContent = 'ERROR: ' + e.message;
+					}
+				}
+			</script>
+		</body></html>`)
+	})
 	return httptest.NewServer(mux)
 }
 
@@ -3873,5 +3898,306 @@ func TestMatchURLPattern(t *testing.T) {
 		if got := matchURLPattern(tt.url, tt.pattern); got != tt.want {
 			t.Errorf("matchURLPattern(%q, %q) = %v, want %v", tt.url, tt.pattern, got, tt.want)
 		}
+	}
+}
+
+// ============================================
+// Network Interception Tests
+// ============================================
+
+func TestMockNetwork(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL+"/fetch-page")
+	defer d.Close()
+
+	// Mock the API response
+	result := d.mockNetwork(&flow.MockNetworkStep{
+		URL:    "*/api/users",
+		Method: "GET",
+		Response: flow.MockResponseSpec{
+			Status:  200,
+			Headers: map[string]string{"Content-Type": "application/json"},
+			Body:    `{"users": [{"id": 99, "name": "Mocked User"}]}`,
+		},
+	})
+	if !result.Success {
+		t.Fatalf("mockNetwork failed: %s", result.Message)
+	}
+
+	// Fetch the API from the page — should get mocked response
+	d.page.MustEval(fmt.Sprintf(`() => fetchAPI("%s/api/users")`, ts.URL))
+	time.Sleep(500 * time.Millisecond)
+	text := d.page.MustElement("#result").MustText()
+	if !strings.Contains(text, "Mocked User") {
+		t.Errorf("expected mocked response, got: %s", text)
+	}
+}
+
+func TestMockNetworkEmptyURL(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	result := d.mockNetwork(&flow.MockNetworkStep{})
+	if result.Success {
+		t.Fatal("expected error for empty URL")
+	}
+}
+
+func TestMockNetworkMethodFilter(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL+"/fetch-page")
+	defer d.Close()
+
+	// Mock only POST to /api/users — GET should pass through
+	result := d.mockNetwork(&flow.MockNetworkStep{
+		URL:    "*/api/users",
+		Method: "POST",
+		Response: flow.MockResponseSpec{
+			Status: 200,
+			Body:   `{"mocked": true}`,
+		},
+	})
+	if !result.Success {
+		t.Fatalf("mockNetwork failed: %s", result.Message)
+	}
+
+	// GET request should pass through to real server
+	d.page.MustEval(fmt.Sprintf(`() => fetchAPI("%s/api/users")`, ts.URL))
+	time.Sleep(500 * time.Millisecond)
+	text := d.page.MustElement("#result").MustText()
+	if !strings.Contains(text, "Real User") {
+		t.Errorf("expected real response for GET, got: %s", text)
+	}
+}
+
+func TestBlockNetwork(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL+"/fetch-page")
+	defer d.Close()
+
+	// Block the API endpoint
+	result := d.blockNetwork(&flow.BlockNetworkStep{
+		Patterns: []string{"*/api/users"},
+	})
+	if !result.Success {
+		t.Fatalf("blockNetwork failed: %s", result.Message)
+	}
+
+	// Fetch should fail
+	d.page.MustEval(fmt.Sprintf(`() => fetchAPI("%s/api/users")`, ts.URL))
+	time.Sleep(500 * time.Millisecond)
+	text := d.page.MustElement("#result").MustText()
+	if !strings.Contains(text, "ERROR") {
+		t.Errorf("expected fetch to fail, got: %s", text)
+	}
+}
+
+func TestBlockNetworkEmpty(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	result := d.blockNetwork(&flow.BlockNetworkStep{})
+	if result.Success {
+		t.Fatal("expected error for empty patterns")
+	}
+}
+
+func TestSetNetworkConditionsOffline(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL+"/fetch-page")
+	defer d.Close()
+
+	// Set offline
+	result := d.setNetworkConditions(&flow.SetNetworkConditionsStep{
+		Offline: true,
+	})
+	if !result.Success {
+		t.Fatalf("setNetworkConditions failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "offline") {
+		t.Errorf("expected offline message, got: %s", result.Message)
+	}
+
+	// Reset back to normal
+	result = d.clearNetworkMocks()
+	if !result.Success {
+		t.Fatalf("clearNetworkMocks failed: %s", result.Message)
+	}
+}
+
+func TestSetNetworkConditionsThrottle(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	result := d.setNetworkConditions(&flow.SetNetworkConditionsStep{
+		Latency:       100,
+		DownloadSpeed: 500,
+		UploadSpeed:   100,
+	})
+	if !result.Success {
+		t.Fatalf("setNetworkConditions failed: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "latency=100ms") {
+		t.Errorf("expected latency in message, got: %s", result.Message)
+	}
+}
+
+func TestWaitForRequest(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL+"/fetch-page")
+	defer d.Close()
+
+	// Start waiting for request in background, then trigger it
+	doneCh := make(chan *core.CommandResult, 1)
+	go func() {
+		result := d.waitForRequest(&flow.WaitForRequestStep{
+			BaseStep: flow.BaseStep{TimeoutMs: 5000},
+			URL:      "*/api/users",
+		})
+		doneCh <- result
+	}()
+
+	// Small delay then trigger the fetch
+	time.Sleep(200 * time.Millisecond)
+	d.page.MustEval(fmt.Sprintf(`() => fetchAPI("%s/api/users")`, ts.URL))
+
+	result := <-doneCh
+	if !result.Success {
+		t.Fatalf("waitForRequest failed: %s (err: %v)", result.Message, result.Error)
+	}
+	if !strings.Contains(result.Message, "api/users") {
+		t.Errorf("expected URL in message, got: %s", result.Message)
+	}
+}
+
+func TestWaitForRequestTimeout(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	result := d.waitForRequest(&flow.WaitForRequestStep{
+		BaseStep: flow.BaseStep{TimeoutMs: 500},
+		URL:      "*/api/nonexistent",
+	})
+	if result.Success {
+		t.Fatal("expected timeout error")
+	}
+}
+
+func TestWaitForRequestEmptyURL(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL)
+	defer d.Close()
+
+	result := d.waitForRequest(&flow.WaitForRequestStep{})
+	if result.Success {
+		t.Fatal("expected error for empty URL")
+	}
+}
+
+func TestClearNetworkMocks(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL+"/fetch-page")
+	defer d.Close()
+
+	// Set up a mock
+	d.mockNetwork(&flow.MockNetworkStep{
+		URL: "*/api/users",
+		Response: flow.MockResponseSpec{
+			Status: 200,
+			Body:   `{"mocked": true}`,
+		},
+	})
+
+	// Clear mocks
+	result := d.clearNetworkMocks()
+	if !result.Success {
+		t.Fatalf("clearNetworkMocks failed: %s", result.Message)
+	}
+
+	// Verify mocks are cleared
+	d.networkMu.Lock()
+	mockCount := len(d.networkMocks)
+	blockCount := len(d.networkBlocks)
+	fetchEnabled := d.fetchEnabled
+	d.networkMu.Unlock()
+
+	if mockCount != 0 {
+		t.Errorf("expected 0 mocks, got %d", mockCount)
+	}
+	if blockCount != 0 {
+		t.Errorf("expected 0 blocks, got %d", blockCount)
+	}
+	if fetchEnabled {
+		t.Error("expected fetchEnabled to be false")
+	}
+
+	// Fetch should now get real response (fetch domain re-enabled on next mock)
+	d.page.MustEval(fmt.Sprintf(`() => fetchAPI("%s/api/users")`, ts.URL))
+	time.Sleep(500 * time.Millisecond)
+	text := d.page.MustElement("#result").MustText()
+	if !strings.Contains(text, "Real User") {
+		t.Errorf("expected real response after clearing mocks, got: %s", text)
+	}
+}
+
+func TestMockAndBlockCombined(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	d := newTestDriver(t, ts.URL+"/fetch-page")
+	defer d.Close()
+
+	// Block takes priority — block /api/submit, mock /api/users
+	d.blockNetwork(&flow.BlockNetworkStep{
+		Patterns: []string{"*/api/submit"},
+	})
+	d.mockNetwork(&flow.MockNetworkStep{
+		URL: "*/api/users",
+		Response: flow.MockResponseSpec{
+			Status: 200,
+			Body:   `{"mocked": true}`,
+		},
+	})
+
+	// /api/users should return mocked response
+	d.page.MustEval(fmt.Sprintf(`() => fetchAPI("%s/api/users")`, ts.URL))
+	time.Sleep(500 * time.Millisecond)
+	text := d.page.MustElement("#result").MustText()
+	if !strings.Contains(text, "mocked") {
+		t.Errorf("expected mocked response for /api/users, got: %s", text)
+	}
+
+	// /api/submit should be blocked
+	d.page.MustEval(fmt.Sprintf(`() => fetchAPI("%s/api/submit")`, ts.URL))
+	time.Sleep(500 * time.Millisecond)
+	text = d.page.MustElement("#result").MustText()
+	if !strings.Contains(text, "ERROR") {
+		t.Errorf("expected /api/submit to be blocked, got: %s", text)
 	}
 }

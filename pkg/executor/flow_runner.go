@@ -330,6 +330,15 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 			}
 		}
 
+	// WaitForRequest - execute and store output variable (request body)
+	case *flow.WaitForRequestStep:
+		result = fr.driver.Execute(step)
+		if result.Success && s.Output != "" {
+			if val, ok := result.Data.(string); ok {
+				fr.script.SetVariable(s.Output, val)
+			}
+		}
+
 	// CopyTextFrom - delegate to driver and sync copied text to script engine
 	case *flow.CopyTextFromStep:
 		fr.script.ExpandStep(step) // Expand variables in selector
@@ -668,6 +677,14 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 			}
 		}
 	case *flow.GetCookiesStep:
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
+		if result.Success && s.Output != "" {
+			if val, ok := result.Data.(string); ok {
+				fr.script.SetVariable(s.Output, val)
+			}
+		}
+	case *flow.WaitForRequestStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)
 		if result.Success && s.Output != "" {
