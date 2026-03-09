@@ -82,6 +82,24 @@ func TestParseKeyboardFrame(t *testing.T) {
     isOnScreen=false`,
 			want: nil,
 		},
+		{
+			name: "keyboard hidden by mViewVisibility=0x8 alone (no isOnScreen field)",
+			input: `    mViewVisibility=0x8 mHaveFrame=true
+    touchable region=SkRegion((0,1538,1080,2340))
+    mHasSurface=false`,
+			want: nil,
+		},
+		{
+			name: "SDK 30 touchable region without isOnScreen field",
+			input: `  Window #1 Window{abcdef InputMethod}:
+    mFrame=[0,84][1080,2400]
+    mViewVisibility=0x0 mHaveFrame=true mObscured=false
+    mGivenContentInsets=[0,1292][0,0]
+    mTouchableInsets=3
+    touchable region=SkRegion((0,1428,1080,2340))
+    mHasSurface=true`,
+			want: &core.Bounds{X: 0, Y: 1428, Width: 1080, Height: 912},
+		},
 	}
 
 	for _, tt := range tests {

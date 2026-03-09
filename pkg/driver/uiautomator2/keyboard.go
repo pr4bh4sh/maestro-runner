@@ -20,19 +20,22 @@ var (
 )
 
 // parseKeyboardFrame extracts keyboard bounds from "dumpsys window InputMethod" output.
-// Supports both Android <=12 (mFrame=) and Android 13+ (touchable region + isOnScreen) formats.
 // Returns nil if keyboard is not visible.
 func parseKeyboardFrame(dumpsysOutput string) *core.Bounds {
-	// Strategy 1: Android 13+ — check isOnScreen + touchable region (most accurate).
-	// Must be checked first: Android 13+ output also contains mFrame= but that gives
-	// the full InputMethod window bounds, not the actual keyboard area.
-	if strings.Contains(dumpsysOutput, "isOnScreen=true") {
-		if matches := touchableRegionRegex.FindStringSubmatch(dumpsysOutput); matches != nil {
-			return boundsFromMatches(matches)
-		}
+	// Bail early if the window is explicitly not on screen.
+	if strings.Contains(dumpsysOutput, "isOnScreen=false") ||
+		strings.Contains(dumpsysOutput, "mViewVisibility=0x8") {
+		return nil
 	}
 
-	// Strategy 2: Android <=12 — look for mFrame=
+	// Prefer touchable region — gives the actual keyboard area, not the full
+	// InputMethod window. Available on Android 11+ (SDK 30+). Safe to use here
+	// because the caller already checks mInputShown before calling this function.
+	if matches := touchableRegionRegex.FindStringSubmatch(dumpsysOutput); matches != nil {
+		return boundsFromMatches(matches)
+	}
+
+	// Fallback for older Android (<=10) that lacks touchable region.
 	if matches := mFrameRegex.FindStringSubmatch(dumpsysOutput); matches != nil {
 		return boundsFromMatches(matches)
 	}
