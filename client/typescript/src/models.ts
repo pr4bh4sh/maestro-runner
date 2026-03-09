@@ -47,7 +47,7 @@ export class ElementSelector {
     if (init.leftOf) this.leftOf = new ElementSelector(init.leftOf);
     if (init.rightOf) this.rightOf = new ElementSelector(init.rightOf);
     if (init.containsChild)
-      this.containsChild = new ElementSelector(init.containsChild);
+      {this.containsChild = new ElementSelector(init.containsChild);}
     if (init.insideOf) this.insideOf = new ElementSelector(init.insideOf);
   }
 

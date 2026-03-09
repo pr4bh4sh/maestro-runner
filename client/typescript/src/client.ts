@@ -17,7 +17,8 @@
 
 import * as commands from "./commands";
 import { MaestroError, SessionError, StepError } from "./exceptions";
-import { DeviceInfo, ElementSelector, ExecutionResult } from "./models";
+import type { ElementSelector} from "./models";
+import { DeviceInfo, ExecutionResult } from "./models";
 
 type Step = Record<string, unknown>;
 

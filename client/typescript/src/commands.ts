@@ -1,6 +1,6 @@
 /** Command builders — produce step JSON for the REST API. */
 
-import { ElementSelector } from "./models";
+import type { ElementSelector } from "./models";
 
 type Step = Record<string, unknown>;
 type SelectorValue = string | Record<string, unknown>;
