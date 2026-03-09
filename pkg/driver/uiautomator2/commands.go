@@ -346,23 +346,23 @@ func (d *Driver) hideKeyboard(step *flow.HideKeyboardStep) *core.CommandResult {
 		return successResult("Keyboard not visible, skipped", nil)
 	}
 
-	approach := strings.ToLower(strings.TrimSpace(step.Approach))
+	strategy := strings.ToLower(strings.TrimSpace(step.Strategy))
 
-	// If a specific approach is requested, use only that one.
-	switch approach {
+	// If a specific strategy is requested, use only that one.
+	switch strategy {
 	case "appium":
 		return d.hideKeyboardAppium()
-	case "escape":
+	case "escape", "esc":
 		return d.hideKeyboardEscape()
 	case "back":
 		return d.hideKeyboardBack()
 	case "":
-		// Try all approaches in order.
+		// Try all strategies in order.
 	default:
-		return errorResult(nil, fmt.Sprintf("Unknown hideKeyboard approach: %q (valid: appium, escape, back)", step.Approach))
+		return errorResult(nil, fmt.Sprintf("Unknown hideKeyboard strategy: %q (valid: appium, escape/esc, back)", step.Strategy))
 	}
 
-	// Try all approaches: Appium → ESCAPE → BACK
+	// Try all strategies: Appium → ESCAPE → BACK
 	if r := d.hideKeyboardAppium(); r.Success {
 		return r
 	}

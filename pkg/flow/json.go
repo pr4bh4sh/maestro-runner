@@ -99,6 +99,11 @@ func unmarshalStepByType(stepType StepType, data []byte) (Step, error) {
 		s.StepType = stepType
 		return &s, nil
 
+	case StepIsKeyboardVisible:
+		var s IsKeyboardVisibleStep
+		s.StepType = stepType
+		return &s, nil
+
 	case StepDismissAlert:
 		var s DismissAlertStep
 		s.StepType = stepType

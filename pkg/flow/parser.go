@@ -223,7 +223,7 @@ func isStepType(key string) bool {
 	switch StepType(key) {
 	case StepTapOn, StepDoubleTapOn, StepLongPressOn, StepTapOnPoint,
 		StepSwipe, StepScroll, StepScrollUntilVisible, StepBack, StepHideKeyboard,
-		StepAcceptAlert, StepDismissAlert,
+		StepAcceptAlert, StepDismissAlert, StepIsKeyboardVisible,
 		StepInputText, StepInputRandom, StepInputRandomEmail, StepInputRandomNumber,
 		StepInputRandomPersonName, StepInputRandomText,
 		StepEraseText, StepCopyTextFrom, StepPasteText, StepSetClipboard,
@@ -323,7 +323,7 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 	case StepHideKeyboard:
 		var s HideKeyboardStep
 		if valueNode.Kind == yaml.ScalarNode {
-			s.Approach = valueNode.Value
+			s.Strategy = valueNode.Value
 		} else if valueNode.Kind == yaml.MappingNode {
 			if err := valueNode.Decode(&s); err != nil {
 				return nil, wrapParseError(sourcePath, valueNode.Line, err)
@@ -334,6 +334,9 @@ func decodeStep(stepType StepType, valueNode *yaml.Node, sourcePath string) (Ste
 
 	case StepAcceptAlert:
 		return &AcceptAlertStep{BaseStep: BaseStep{StepType: stepType}}, nil
+
+	case StepIsKeyboardVisible:
+		return &IsKeyboardVisibleStep{BaseStep: BaseStep{StepType: stepType}}, nil
 
 	case StepDismissAlert:
 		return &DismissAlertStep{BaseStep: BaseStep{StepType: stepType}}, nil

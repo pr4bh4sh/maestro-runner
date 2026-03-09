@@ -106,6 +106,9 @@ const (
 	StepStopRecording  StepType = "stopRecording"
 	StepAddMedia       StepType = "addMedia"
 
+	// Queries
+	StepIsKeyboardVisible StepType = "isKeyboardVisible"
+
 	// Other
 	StepSleep                 StepType = "sleep"
 	StepPressKey              StepType = "pressKey"
@@ -228,10 +231,15 @@ type BackStep struct {
 }
 
 // HideKeyboardStep hides the keyboard.
-// Approach can be empty (try all), "appium", "escape", or "back".
+// Strategy can be empty (try all), "appium", "escape", or "back".
 type HideKeyboardStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
-	Approach string `yaml:"approach" json:"approach,omitempty"`
+	Strategy string `yaml:"strategy" json:"strategy,omitempty"`
+}
+
+// IsKeyboardVisibleStep queries whether the soft keyboard is currently shown.
+type IsKeyboardVisibleStep struct {
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // AcceptAlertStep accepts a system alert dialog (taps Allow/OK).

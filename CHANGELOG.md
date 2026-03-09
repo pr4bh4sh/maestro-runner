@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `sleep` command — pause execution for a given number of milliseconds. Supports scalar (`- sleep: 500`) and mapping syntax
+- `isKeyboardVisible` command — query whether the soft keyboard is currently shown. Returns result in `CommandResult.Data` (boolean). Available via YAML, JSON, and REST API
+- `hideKeyboard` strategy field — specify `strategy: appium|escape|esc|back` to force a specific dismissal method instead of trying all three
+- `KeyboardVisible` field added to `StateSnapshot` for richer state introspection
 - REST API server (`maestro-runner server`) — session-based HTTP server for executing Maestro steps via JSON instead of YAML flow files. Supports session management, screenshots, view hierarchy, and device info. Configurable port via `--port` flag or `MAESTRO_SERVER_PORT` env var
   ```bash
   maestro-runner --platform android server --port 9999
