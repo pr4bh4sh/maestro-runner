@@ -136,6 +136,7 @@ Examples:
 		Commands: []*cli.Command{
 			testCommand,
 			wdaCommand,
+			serverCommand,
 		},
 	}
 

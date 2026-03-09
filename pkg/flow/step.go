@@ -118,10 +118,10 @@ type Step interface {
 
 // BaseStep contains common fields for all steps.
 type BaseStep struct {
-	StepType  StepType `yaml:"-"`
-	Optional  bool     `yaml:"optional"`
-	StepLabel string   `yaml:"label"`
-	TimeoutMs int      `yaml:"timeout"`
+	StepType  StepType `yaml:"-" json:"type"`
+	Optional  bool     `yaml:"optional" json:"optional,omitempty"`
+	StepLabel string   `yaml:"label" json:"label,omitempty"`
+	TimeoutMs int      `yaml:"timeout" json:"timeout,omitempty"`
 }
 
 // Type returns the step type.
@@ -142,99 +142,99 @@ func (b *BaseStep) Describe() string { return string(b.StepType) }
 
 // TapOnStep taps on an element.
 type TapOnStep struct {
-	BaseStep              `yaml:",inline"`
-	Selector              Selector `yaml:",inline"`
-	LongPress             bool     `yaml:"longPress"`
-	Repeat                int      `yaml:"repeat"`
-	DelayMs               int      `yaml:"delay"`
-	Point                 string   `yaml:"point"`
-	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange"`
-	WaitUntilVisible      *bool    `yaml:"waitUntilVisible"`
-	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
+	BaseStep              `yaml:",inline" json:",inline"`
+	Selector              Selector `yaml:",inline" json:"selector"`
+	LongPress             bool     `yaml:"longPress" json:"longPress,omitempty"`
+	Repeat                int      `yaml:"repeat" json:"repeat,omitempty"`
+	DelayMs               int      `yaml:"delay" json:"delay,omitempty"`
+	Point                 string   `yaml:"point" json:"point,omitempty"`
+	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange" json:"retryTapIfNoChange,omitempty"`
+	WaitUntilVisible      *bool    `yaml:"waitUntilVisible" json:"waitUntilVisible,omitempty"`
+	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
 // DoubleTapOnStep double taps on an element (alias for tapOn with repeat=2).
 type DoubleTapOnStep struct {
-	BaseStep              `yaml:",inline"`
-	Selector              Selector `yaml:",inline"`
-	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange"`
-	WaitUntilVisible      *bool    `yaml:"waitUntilVisible"`
-	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
+	BaseStep              `yaml:",inline" json:",inline"`
+	Selector              Selector `yaml:",inline" json:"selector"`
+	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange" json:"retryTapIfNoChange,omitempty"`
+	WaitUntilVisible      *bool    `yaml:"waitUntilVisible" json:"waitUntilVisible,omitempty"`
+	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
 // LongPressOnStep long presses on an element (alias for tapOn with longPress=true).
 type LongPressOnStep struct {
-	BaseStep              `yaml:",inline"`
-	Selector              Selector `yaml:",inline"`
-	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange"`
-	WaitUntilVisible      *bool    `yaml:"waitUntilVisible"`
-	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
+	BaseStep              `yaml:",inline" json:",inline"`
+	Selector              Selector `yaml:",inline" json:"selector"`
+	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange" json:"retryTapIfNoChange,omitempty"`
+	WaitUntilVisible      *bool    `yaml:"waitUntilVisible" json:"waitUntilVisible,omitempty"`
+	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
 // TapOnPointStep taps on specific coordinates.
 type TapOnPointStep struct {
-	BaseStep              `yaml:",inline"`
-	X                     int    `yaml:"x"`
-	Y                     int    `yaml:"y"`
-	Point                 string `yaml:"point"`
-	LongPress             bool   `yaml:"longPress"`
-	Repeat                int    `yaml:"repeat"`
-	RetryTapIfNoChange    *bool  `yaml:"retryTapIfNoChange"`
-	WaitToSettleTimeoutMs int    `yaml:"waitToSettleTimeoutMs"`
+	BaseStep              `yaml:",inline" json:",inline"`
+	X                     int    `yaml:"x" json:"x,omitempty"`
+	Y                     int    `yaml:"y" json:"y,omitempty"`
+	Point                 string `yaml:"point" json:"point,omitempty"`
+	LongPress             bool   `yaml:"longPress" json:"longPress,omitempty"`
+	Repeat                int    `yaml:"repeat" json:"repeat,omitempty"`
+	RetryTapIfNoChange    *bool  `yaml:"retryTapIfNoChange" json:"retryTapIfNoChange,omitempty"`
+	WaitToSettleTimeoutMs int    `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
 // SwipeStep performs a swipe gesture.
 type SwipeStep struct {
-	BaseStep              `yaml:",inline"`
-	Direction             string    `yaml:"direction"` // UP, DOWN, LEFT, RIGHT
-	Selector              *Selector `yaml:"selector"`
-	Start                 string    `yaml:"start"`    // "x%, y%"
-	End                   string    `yaml:"end"`      // "x%, y%"
-	StartX                int       `yaml:"startX"`   // Absolute X start
-	StartY                int       `yaml:"startY"`   // Absolute Y start
-	EndX                  int       `yaml:"endX"`     // Absolute X end
-	EndY                  int       `yaml:"endY"`     // Absolute Y end
-	Duration              int       `yaml:"duration"` // Duration in ms
-	Speed                 int       `yaml:"speed"`    // Speed 0-100
-	WaitToSettleTimeoutMs int       `yaml:"waitToSettleTimeoutMs"`
+	BaseStep              `yaml:",inline" json:",inline"`
+	Direction             string    `yaml:"direction" json:"direction,omitempty"` // UP, DOWN, LEFT, RIGHT
+	Selector              *Selector `yaml:"selector" json:"selector,omitempty"`
+	Start                 string    `yaml:"start" json:"start,omitempty"`       // "x%, y%"
+	End                   string    `yaml:"end" json:"end,omitempty"`           // "x%, y%"
+	StartX                int       `yaml:"startX" json:"startX,omitempty"`     // Absolute X start
+	StartY                int       `yaml:"startY" json:"startY,omitempty"`     // Absolute Y start
+	EndX                  int       `yaml:"endX" json:"endX,omitempty"`         // Absolute X end
+	EndY                  int       `yaml:"endY" json:"endY,omitempty"`         // Absolute Y end
+	Duration              int       `yaml:"duration" json:"duration,omitempty"` // Duration in ms
+	Speed                 int       `yaml:"speed" json:"speed,omitempty"`       // Speed 0-100
+	WaitToSettleTimeoutMs int       `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
 // ScrollStep scrolls the screen.
 type ScrollStep struct {
-	BaseStep  `yaml:",inline"`
-	Direction string `yaml:"direction"`
+	BaseStep  `yaml:",inline" json:",inline"`
+	Direction string `yaml:"direction" json:"direction,omitempty"`
 }
 
 // ScrollUntilVisibleStep scrolls until element is visible.
 type ScrollUntilVisibleStep struct {
-	BaseStep              `yaml:",inline"`
-	Element               Selector `yaml:"element"`
-	Direction             string   `yaml:"direction"`
-	MaxScrolls            int      `yaml:"maxScrolls"` // Legacy: max scroll attempts
-	Speed                 int      `yaml:"speed"`
-	VisibilityPercentage  int      `yaml:"visibilityPercentage"`
-	CenterElement         bool     `yaml:"centerElement"`
-	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs"`
+	BaseStep              `yaml:",inline" json:",inline"`
+	Element               Selector `yaml:"element" json:"element"`
+	Direction             string   `yaml:"direction" json:"direction,omitempty"`
+	MaxScrolls            int      `yaml:"maxScrolls" json:"maxScrolls,omitempty"` // Legacy: max scroll attempts
+	Speed                 int      `yaml:"speed" json:"speed,omitempty"`
+	VisibilityPercentage  int      `yaml:"visibilityPercentage" json:"visibilityPercentage,omitempty"`
+	CenterElement         bool     `yaml:"centerElement" json:"centerElement,omitempty"`
+	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
 // BackStep presses back.
 type BackStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // HideKeyboardStep hides the keyboard.
 type HideKeyboardStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // AcceptAlertStep accepts a system alert dialog (taps Allow/OK).
 type AcceptAlertStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // DismissAlertStep dismisses a system alert dialog (taps Don't Allow/Cancel).
 type DismissAlertStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // ============================================
@@ -243,40 +243,40 @@ type DismissAlertStep struct {
 
 // InputTextStep inputs text.
 type InputTextStep struct {
-	BaseStep `yaml:",inline"`
-	Text     string   `yaml:"text"`
-	KeyPress bool     `yaml:"keyPress"` // If true, simulate real key presses (Android native only)
-	Selector Selector `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Text     string   `yaml:"text" json:"text,omitempty"`
+	KeyPress bool     `yaml:"keyPress" json:"keyPress,omitempty"` // If true, simulate real key presses (Android native only)
+	Selector Selector `yaml:",inline" json:"selector,omitempty"`
 }
 
 // InputRandomStep generates random input.
 type InputRandomStep struct {
-	BaseStep `yaml:",inline"`
-	DataType string `yaml:"type"` // TEXT, NUMBER, EMAIL, PERSON_NAME, etc.
-	Length   int    `yaml:"length"`
+	BaseStep `yaml:",inline" json:",inline"`
+	DataType string `yaml:"type" json:"dataType,omitempty"` // TEXT, NUMBER, EMAIL, PERSON_NAME, etc.
+	Length   int    `yaml:"length" json:"length,omitempty"`
 }
 
 // EraseTextStep erases text.
 type EraseTextStep struct {
-	BaseStep   `yaml:",inline"`
-	Characters int `yaml:"characters"`
+	BaseStep   `yaml:",inline" json:",inline"`
+	Characters int `yaml:"characters" json:"charactersToErase,omitempty"`
 }
 
 // CopyTextFromStep copies text from element.
 type CopyTextFromStep struct {
-	BaseStep `yaml:",inline"`
-	Selector Selector `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Selector Selector `yaml:",inline" json:"selector"`
 }
 
 // PasteTextStep pastes text.
 type PasteTextStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // SetClipboardStep sets the clipboard to a specific text value.
 type SetClipboardStep struct {
-	BaseStep `yaml:",inline"`
-	Text     string `yaml:"text"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Text     string `yaml:"text" json:"text,omitempty"`
 }
 
 // ============================================
@@ -285,29 +285,29 @@ type SetClipboardStep struct {
 
 // AssertVisibleStep asserts element is visible.
 type AssertVisibleStep struct {
-	BaseStep `yaml:",inline"`
-	Selector Selector `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Selector Selector `yaml:",inline" json:"selector"`
 }
 
 // AssertNotVisibleStep asserts element is not visible.
 type AssertNotVisibleStep struct {
-	BaseStep `yaml:",inline"`
-	Selector Selector `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Selector Selector `yaml:",inline" json:"selector"`
 }
 
 // AssertTrueStep asserts a script condition is true (alias for assertCondition).
 type AssertTrueStep struct {
-	BaseStep `yaml:",inline"`
-	Script   string `yaml:"condition"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Script   string `yaml:"condition" json:"condition,omitempty"`
 }
 
 // Condition represents a test condition.
 type Condition struct {
-	Visible    *Selector `yaml:"visible"`
-	NotVisible *Selector `yaml:"notVisible"`
-	Script     string    `yaml:"scriptCondition"`
-	Platform   string    `yaml:"platform"`
-	Timeout    int       `yaml:"timeout"` // Timeout in ms for visible/notVisible checks
+	Visible    *Selector `yaml:"visible" json:"visible,omitempty"`
+	NotVisible *Selector `yaml:"notVisible" json:"notVisible,omitempty"`
+	Script     string    `yaml:"scriptCondition" json:"scriptCondition,omitempty"`
+	Platform   string    `yaml:"platform" json:"platform,omitempty"`
+	Timeout    int       `yaml:"timeout" json:"timeout,omitempty"` // Timeout in ms for visible/notVisible checks
 }
 
 // AssertConditionStep asserts a condition.
@@ -340,27 +340,27 @@ func (s *AssertConditionStep) UnmarshalYAML(node *yaml.Node) error {
 
 // AssertNoDefectsWithAIStep uses AI to check for visual defects.
 type AssertNoDefectsWithAIStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // AssertWithAIStep uses AI to verify an assertion.
 type AssertWithAIStep struct {
-	BaseStep  `yaml:",inline"`
-	Assertion string `yaml:"assertion"`
+	BaseStep  `yaml:",inline" json:",inline"`
+	Assertion string `yaml:"assertion" json:"assertion,omitempty"`
 }
 
 // ExtractTextWithAIStep uses AI to extract text from screen.
 type ExtractTextWithAIStep struct {
-	BaseStep `yaml:",inline"`
-	Query    string `yaml:"query"`
-	Variable string `yaml:"variable"` // Variable to store result
+	BaseStep `yaml:",inline" json:",inline"`
+	Query    string `yaml:"query" json:"query,omitempty"`
+	Variable string `yaml:"variable" json:"variable,omitempty"` // Variable to store result
 }
 
 // WaitUntilStep waits for a condition.
 type WaitUntilStep struct {
-	BaseStep   `yaml:",inline"`
-	Visible    *Selector `yaml:"visible"`
-	NotVisible *Selector `yaml:"notVisible"`
+	BaseStep   `yaml:",inline" json:",inline"`
+	Visible    *Selector `yaml:"visible" json:"visible,omitempty"`
+	NotVisible *Selector `yaml:"notVisible" json:"notVisible,omitempty"`
 }
 
 // ============================================
@@ -369,38 +369,38 @@ type WaitUntilStep struct {
 
 // LaunchAppStep launches an app.
 type LaunchAppStep struct {
-	BaseStep      `yaml:",inline"`
-	AppID         string            `yaml:"appId"`
-	ClearState    bool              `yaml:"clearState"`
-	ClearKeychain bool              `yaml:"clearKeychain"`
-	StopApp       *bool             `yaml:"stopApp"`
-	NewSession    bool              `yaml:"newSession"` // Appium only: create fresh session
-	Permissions   map[string]string `yaml:"permissions"`
-	Arguments     map[string]any    `yaml:"arguments"`   // Launch arguments (-key value pairs)
-	Environment   map[string]string `yaml:"environment"` // Launch environment variables
+	BaseStep      `yaml:",inline" json:",inline"`
+	AppID         string            `yaml:"appId" json:"appId,omitempty"`
+	ClearState    bool              `yaml:"clearState" json:"clearState,omitempty"`
+	ClearKeychain bool              `yaml:"clearKeychain" json:"clearKeychain,omitempty"`
+	StopApp       *bool             `yaml:"stopApp" json:"stopApp,omitempty"`
+	NewSession    bool              `yaml:"newSession" json:"newSession,omitempty"` // Appium only: create fresh session
+	Permissions   map[string]string `yaml:"permissions" json:"permissions,omitempty"`
+	Arguments     map[string]any    `yaml:"arguments" json:"arguments,omitempty"`     // Launch arguments (-key value pairs)
+	Environment   map[string]string `yaml:"environment" json:"environment,omitempty"` // Launch environment variables
 }
 
 // StopAppStep stops an app.
 type StopAppStep struct {
-	BaseStep `yaml:",inline"`
-	AppID    string `yaml:"appId"`
+	BaseStep `yaml:",inline" json:",inline"`
+	AppID    string `yaml:"appId" json:"appId,omitempty"`
 }
 
 // KillAppStep kills an app.
 type KillAppStep struct {
-	BaseStep `yaml:",inline"`
-	AppID    string `yaml:"appId"`
+	BaseStep `yaml:",inline" json:",inline"`
+	AppID    string `yaml:"appId" json:"appId,omitempty"`
 }
 
 // ClearStateStep clears app state.
 type ClearStateStep struct {
-	BaseStep `yaml:",inline"`
-	AppID    string `yaml:"appId"`
+	BaseStep `yaml:",inline" json:",inline"`
+	AppID    string `yaml:"appId" json:"appId,omitempty"`
 }
 
 // ClearKeychainStep clears keychain.
 type ClearKeychainStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // SetPermissionsStep sets app permissions.
@@ -408,9 +408,9 @@ type ClearKeychainStep struct {
 // Permission shortcuts: location, camera, contacts, phone, microphone,
 // bluetooth, storage, notifications, medialibrary, calendar, sms, all
 type SetPermissionsStep struct {
-	BaseStep    `yaml:",inline"`
-	AppID       string            `yaml:"appId"`
-	Permissions map[string]string `yaml:"permissions"`
+	BaseStep    `yaml:",inline" json:",inline"`
+	AppID       string            `yaml:"appId" json:"appId,omitempty"`
+	Permissions map[string]string `yaml:"permissions" json:"permissions,omitempty"`
 }
 
 // ============================================
@@ -419,47 +419,47 @@ type SetPermissionsStep struct {
 
 // SetLocationStep sets device location.
 type SetLocationStep struct {
-	BaseStep  `yaml:",inline"`
-	Latitude  string `yaml:"latitude"`  // String for variable support
-	Longitude string `yaml:"longitude"` // String for variable support
+	BaseStep  `yaml:",inline" json:",inline"`
+	Latitude  string `yaml:"latitude" json:"latitude,omitempty"`   // String for variable support
+	Longitude string `yaml:"longitude" json:"longitude,omitempty"` // String for variable support
 }
 
 // SetOrientationStep sets device orientation.
 type SetOrientationStep struct {
-	BaseStep    `yaml:",inline"`
-	Orientation string `yaml:"orientation"` // PORTRAIT, LANDSCAPE
+	BaseStep    `yaml:",inline" json:",inline"`
+	Orientation string `yaml:"orientation" json:"orientation,omitempty"` // PORTRAIT, LANDSCAPE
 }
 
 // SetAirplaneModeStep sets airplane mode.
 type SetAirplaneModeStep struct {
-	BaseStep `yaml:",inline"`
-	Enabled  bool `yaml:"enabled"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Enabled  bool `yaml:"enabled" json:"enabled,omitempty"`
 }
 
 // ToggleAirplaneModeStep toggles airplane mode.
 type ToggleAirplaneModeStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // TravelStep simulates travel.
 type TravelStep struct {
-	BaseStep `yaml:",inline"`
-	Points   []string `yaml:"points"` // "lat, long"
-	Speed    float64  `yaml:"speed"`  // km/h
+	BaseStep `yaml:",inline" json:",inline"`
+	Points   []string `yaml:"points" json:"points,omitempty"` // "lat, long"
+	Speed    float64  `yaml:"speed" json:"speed,omitempty"`   // km/h
 }
 
 // OpenLinkStep opens a URL.
 type OpenLinkStep struct {
-	BaseStep   `yaml:",inline"`
-	Link       string `yaml:"link"`
-	AutoVerify *bool  `yaml:"autoVerify"`
-	Browser    *bool  `yaml:"browser"`
+	BaseStep   `yaml:",inline" json:",inline"`
+	Link       string `yaml:"link" json:"link,omitempty"`
+	AutoVerify *bool  `yaml:"autoVerify" json:"autoVerify,omitempty"`
+	Browser    *bool  `yaml:"browser" json:"browser,omitempty"`
 }
 
 // OpenBrowserStep opens a URL in the browser.
 type OpenBrowserStep struct {
-	BaseStep `yaml:",inline"`
-	URL      string `yaml:"url"`
+	BaseStep `yaml:",inline" json:",inline"`
+	URL      string `yaml:"url" json:"url,omitempty"`
 }
 
 // ============================================
@@ -468,36 +468,36 @@ type OpenBrowserStep struct {
 
 // RepeatStep repeats steps.
 type RepeatStep struct {
-	BaseStep `yaml:",inline"`
-	Times    string    `yaml:"times"` // String for variable support
-	While    Condition `yaml:"while"`
-	Steps    []Step    `yaml:"-"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Times    string    `yaml:"times" json:"times,omitempty"` // String for variable support
+	While    Condition `yaml:"while" json:"while,omitempty"`
+	Steps    []Step    `yaml:"-" json:"-"`
 }
 
 // RetryStep retries steps on failure.
 type RetryStep struct {
-	BaseStep   `yaml:",inline"`
-	MaxRetries string            `yaml:"maxRetries"` // String for variable support
-	Steps      []Step            `yaml:"-"`
-	File       string            `yaml:"file"`
-	Env        map[string]string `yaml:"env"`
+	BaseStep   `yaml:",inline" json:",inline"`
+	MaxRetries string            `yaml:"maxRetries" json:"maxRetries,omitempty"` // String for variable support
+	Steps      []Step            `yaml:"-" json:"-"`
+	File       string            `yaml:"file" json:"file,omitempty"`
+	Env        map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // RunFlowStep runs another flow.
 type RunFlowStep struct {
-	BaseStep `yaml:",inline"`
-	File     string            `yaml:"file"`
-	Steps    []Step            `yaml:"-"` // Inline steps
-	When     *Condition        `yaml:"when"`
-	Env      map[string]string `yaml:"env"`
+	BaseStep `yaml:",inline" json:",inline"`
+	File     string            `yaml:"file" json:"file,omitempty"`
+	Steps    []Step            `yaml:"-" json:"-"` // Inline steps
+	When     *Condition        `yaml:"when" json:"when,omitempty"`
+	Env      map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // RunScriptStep runs a script.
 type RunScriptStep struct {
-	BaseStep `yaml:",inline"`
-	Script   string            `yaml:"script"` // Script content or filename (string form)
-	File     string            `yaml:"file"`   // Script filename (map form)
-	Env      map[string]string `yaml:"env"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Script   string            `yaml:"script" json:"script,omitempty"` // Script content or filename (string form)
+	File     string            `yaml:"file" json:"file,omitempty"`     // Script filename (map form)
+	Env      map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // ScriptPath returns the script path (either Script or File field).
@@ -510,8 +510,8 @@ func (s *RunScriptStep) ScriptPath() string {
 
 // EvalScriptStep evaluates JavaScript.
 type EvalScriptStep struct {
-	BaseStep `yaml:",inline"`
-	Script   string `yaml:"script"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Script   string `yaml:"script" json:"script,omitempty"`
 }
 
 // EvalBrowserScriptStep executes JavaScript in the browser page context (web only).
@@ -695,26 +695,26 @@ type ClearNetworkMocksStep struct {
 
 // TakeScreenshotStep takes a screenshot.
 type TakeScreenshotStep struct {
-	BaseStep `yaml:",inline"`
-	Path     string `yaml:"path"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Path     string `yaml:"path" json:"path,omitempty"`
 }
 
 // StartRecordingStep starts recording.
 type StartRecordingStep struct {
-	BaseStep `yaml:",inline"`
-	Path     string `yaml:"path"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Path     string `yaml:"path" json:"path,omitempty"`
 }
 
 // StopRecordingStep stops recording.
 type StopRecordingStep struct {
-	BaseStep `yaml:",inline"`
-	Path     string `yaml:"path"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Path     string `yaml:"path" json:"path,omitempty"`
 }
 
 // AddMediaStep adds media files.
 type AddMediaStep struct {
-	BaseStep `yaml:",inline"`
-	Files    []string `yaml:"files"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Files    []string `yaml:"files" json:"files,omitempty"`
 }
 
 // ============================================
@@ -723,25 +723,25 @@ type AddMediaStep struct {
 
 // PressKeyStep presses a key.
 type PressKeyStep struct {
-	BaseStep `yaml:",inline"`
-	Key      string `yaml:"key"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Key      string `yaml:"key" json:"key,omitempty"`
 }
 
 // WaitForAnimationToEndStep waits for animations.
 type WaitForAnimationToEndStep struct {
-	BaseStep `yaml:",inline"`
+	BaseStep `yaml:",inline" json:",inline"`
 }
 
 // DefineVariablesStep defines variables.
 type DefineVariablesStep struct {
-	BaseStep `yaml:",inline"`
-	Env      map[string]string `yaml:"env"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Env      map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // UnsupportedStep represents an unsupported step.
 type UnsupportedStep struct {
-	BaseStep `yaml:",inline"`
-	Reason   string
+	BaseStep `yaml:",inline" json:",inline"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // Describe returns a description including the unsupported reason.

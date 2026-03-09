@@ -29,8 +29,9 @@ How the code is organized and how to extend it.
 | `pkg/driver/wda` | WebDriverAgent driver (iOS) |
 | `pkg/driver/mock` | Mock driver for testing |
 | `pkg/executor` | Flow runner — orchestrates step execution and callbacks |
-| `pkg/flow` | YAML parsing, Step types, Selectors |
+| `pkg/flow` | Step types, Selectors, YAML and JSON parsing |
 | `pkg/jsengine` | JavaScript evaluation engine (evalScript, assertTrue) |
+| `pkg/server` | REST API server — session-based HTTP bridge to core.Driver |
 | `pkg/report` | JSON and HTML report generation |
 | `pkg/uiautomator2` | UIAutomator2 HTTP protocol client |
 | `pkg/validator` | Pre-execution flow validation and tag filtering |

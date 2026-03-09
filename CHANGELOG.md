@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- REST API server (`maestro-runner server`) — session-based HTTP server for executing Maestro steps via JSON instead of YAML flow files. Supports session management, screenshots, view hierarchy, and device info. Configurable port via `--port` flag or `MAESTRO_SERVER_PORT` env var
+  ```bash
+  maestro-runner --platform android server --port 9999
+  ```
+- JSON step unmarshaling (`pkg/flow/json.go`) — all step types can now be deserialized from JSON, enabling the REST API execute endpoint
+- JSON struct tags on all flow step types and Selector for proper serialization/deserialization
 - Flutter VM Service fallback for element finding — when the native driver (WDA/UIAutomator2) can't find a Flutter element, automatically discovers the Dart VM Service and searches the semantics/widget trees in parallel. Works on Android and iOS simulators. Non-Flutter apps pay only one log read on first miss, then fully bypassed. Disable with `--no-flutter-fallback`
 - Flutter widget tree cross-reference — when semantics tree search fails, falls back to widget tree analysis (hint text, identifiers, suffix icons) and cross-references with semantics nodes for coordinates
 - DeviceLab Android driver — WebSocket-based on-device automation with bounds stabilization for animated elements and special character handling. ~2x faster than UIAutomator2

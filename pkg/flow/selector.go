@@ -13,28 +13,28 @@ import (
 // Pure data structure - executor decides how to use it.
 type Selector struct {
 	// Primary selectors
-	Text string `yaml:"text"` // Text to match
-	ID   string `yaml:"id"`   // Resource ID or accessibility ID
+	Text string `yaml:"text" json:"text,omitempty"` // Text to match
+	ID   string `yaml:"id" json:"id,omitempty"`     // Resource ID or accessibility ID
 
 	// Size matching
-	Width     int `yaml:"width"`
-	Height    int `yaml:"height"`
-	Tolerance int `yaml:"tolerance"`
+	Width     int `yaml:"width" json:"width,omitempty"`
+	Height    int `yaml:"height" json:"height,omitempty"`
+	Tolerance int `yaml:"tolerance" json:"tolerance,omitempty"`
 
 	// State filters
-	Enabled  *bool `yaml:"enabled"`
-	Selected *bool `yaml:"selected"`
-	Checked  *bool `yaml:"checked"`
-	Focused  *bool `yaml:"focused"`
+	Enabled  *bool `yaml:"enabled" json:"enabled,omitempty"`
+	Selected *bool `yaml:"selected" json:"selected,omitempty"`
+	Checked  *bool `yaml:"checked" json:"checked,omitempty"`
+	Focused  *bool `yaml:"focused" json:"focused,omitempty"`
 
 	// Index for multiple matches (string for variable support)
-	Index string `yaml:"index"`
+	Index string `yaml:"index" json:"index,omitempty"`
 
 	// Traits (comma-separated string, e.g., "button,heading")
-	Traits string `yaml:"traits"`
+	Traits string `yaml:"traits" json:"traits,omitempty"`
 
 	// CSS selector for web views
-	CSS string `yaml:"css"`
+	CSS string `yaml:"css" json:"css,omitempty"`
 
 	// Web-specific selectors
 	Placeholder  string `yaml:"placeholder"`  // Match by HTML placeholder attribute
@@ -49,27 +49,27 @@ type Selector struct {
 	Nth          int    `yaml:"nth"`          // Pick Nth match (0-based) when multiple elements match
 
 	// Relative selectors
-	ChildOf             *Selector   `yaml:"childOf"`
-	Below               *Selector   `yaml:"below"`
-	Above               *Selector   `yaml:"above"`
-	LeftOf              *Selector   `yaml:"leftOf"`
-	RightOf             *Selector   `yaml:"rightOf"`
-	ContainsChild       *Selector   `yaml:"containsChild"`
-	ContainsDescendants []*Selector `yaml:"containsDescendants"`
-	InsideOf            *Selector   `yaml:"insideOf"` // Visual containment (center point inside anchor bounds)
+	ChildOf             *Selector   `yaml:"childOf" json:"childOf,omitempty"`
+	Below               *Selector   `yaml:"below" json:"below,omitempty"`
+	Above               *Selector   `yaml:"above" json:"above,omitempty"`
+	LeftOf              *Selector   `yaml:"leftOf" json:"leftOf,omitempty"`
+	RightOf             *Selector   `yaml:"rightOf" json:"rightOf,omitempty"`
+	ContainsChild       *Selector   `yaml:"containsChild" json:"containsChild,omitempty"`
+	ContainsDescendants []*Selector `yaml:"containsDescendants" json:"containsDescendants,omitempty"`
+	InsideOf            *Selector   `yaml:"insideOf" json:"insideOf,omitempty"` // Visual containment (center point inside anchor bounds)
 
 	// Inline step properties (parsed with selector for YAML convenience)
-	Optional              *bool  `yaml:"optional"`
-	RetryTapIfNoChange    *bool  `yaml:"retryTapIfNoChange"`
-	WaitUntilVisible      *bool  `yaml:"waitUntilVisible"`
-	Point                 string `yaml:"point"`                 // Tap point "x%, y%"
-	Start                 string `yaml:"start"`                 // Swipe start "x%, y%"
-	End                   string `yaml:"end"`                   // Swipe end "x%, y%"
-	Repeat                int    `yaml:"repeat"`                // Tap repeat count
-	Delay                 int    `yaml:"delay"`                 // Delay between repeats (ms)
-	WaitToSettleTimeoutMs int    `yaml:"waitToSettleTimeoutMs"` // Wait for UI settle (ms)
-	Timeout               int    `yaml:"timeout"`               // Timeout in ms for element finding
-	Label                 string `yaml:"label"`                 // Step label
+	Optional              *bool  `yaml:"optional" json:"-"`
+	RetryTapIfNoChange    *bool  `yaml:"retryTapIfNoChange" json:"-"`
+	WaitUntilVisible      *bool  `yaml:"waitUntilVisible" json:"-"`
+	Point                 string `yaml:"point" json:"-"`                 // Tap point "x%, y%"
+	Start                 string `yaml:"start" json:"-"`                 // Swipe start "x%, y%"
+	End                   string `yaml:"end" json:"-"`                   // Swipe end "x%, y%"
+	Repeat                int    `yaml:"repeat" json:"-"`                // Tap repeat count
+	Delay                 int    `yaml:"delay" json:"-"`                 // Delay between repeats (ms)
+	WaitToSettleTimeoutMs int    `yaml:"waitToSettleTimeoutMs" json:"-"` // Wait for UI settle (ms)
+	Timeout               int    `yaml:"timeout" json:"-"`               // Timeout in ms for element finding
+	Label                 string `yaml:"label" json:"-"`                 // Step label
 }
 
 // selectorRaw is used for YAML parsing to capture the "element" field.

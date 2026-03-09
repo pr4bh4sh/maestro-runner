@@ -93,6 +93,40 @@ maestro-runner --driver devicelab --platform android test flows/
 
 All existing Maestro YAML flows work as-is — no changes needed. The driver also includes bounds stabilization for animated elements and improved special character handling in text selectors.
 
+## REST API Server
+
+maestro-runner includes an HTTP server for programmatic test execution via JSON, useful for building custom tooling, CI integrations, or language-specific clients.
+
+```bash
+maestro-runner server                                # Start on default port 9999
+maestro-runner server --port 8080                    # Custom port
+maestro-runner --platform android server             # Pre-select platform
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/session` | Create a session (returns `sessionId`) |
+| `POST` | `/session/{id}/execute` | Execute a step (JSON body) |
+| `GET` | `/session/{id}/screenshot` | Take a screenshot (PNG) |
+| `GET` | `/session/{id}/source` | Get view hierarchy (XML/JSON) |
+| `GET` | `/session/{id}/device-info` | Get device info |
+| `DELETE` | `/session/{id}` | Delete session |
+| `GET` | `/status` | Server status |
+
+**Example — execute a tap via JSON:**
+
+```bash
+# Create session
+SID=$(curl -s -X POST http://localhost:9999/session \
+  -d '{"platformName":"android"}' | jq -r .sessionId)
+
+# Execute a step
+curl -X POST http://localhost:9999/session/$SID/execute \
+  -d '{"type":"tapOn","selector":"Login"}'
+```
+
 ## CI/CD Integration
 
 maestro-runner is built for CI/CD pipelines — single binary, no JVM startup, low memory footprint. Works with GitHub Actions, GitLab CI, Jenkins, CircleCI, and any CI system that supports Android emulators or iOS simulators.
