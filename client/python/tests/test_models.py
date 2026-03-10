@@ -1,8 +1,6 @@
 """Unit tests for maestro_runner.models."""
 
-import pytest
 from maestro_runner.models import DeviceInfo, ElementInfo, ElementSelector, ExecutionResult
-
 
 # ── ElementSelector ──────────────────────────────────────────────────────
 

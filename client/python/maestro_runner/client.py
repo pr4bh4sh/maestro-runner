@@ -82,7 +82,9 @@ class MaestroClient:
 
     def _require_session(self) -> str:
         if not self._session_id:
-            raise SessionError("No active session. Pass capabilities to __init__ or call close() first.")
+            raise SessionError(
+                "No active session. Pass capabilities to __init__ or call close() first."
+            )
         return self._session_id
 
     # --- Low-level ---
@@ -116,7 +118,9 @@ class MaestroClient:
         stop_app: bool | None = None,
         label: str | None = None,
     ) -> ExecutionResult:
-        return self._exec(commands.launch_app(app_id, clear_state=clear_state, stop_app=stop_app, label=label))
+        return self._exec(
+            commands.launch_app(app_id, clear_state=clear_state, stop_app=stop_app, label=label)
+        )
 
     def stop_app(self, app_id: str, *, label: str | None = None) -> ExecutionResult:
         return self._exec(commands.stop_app(app_id, label=label))
@@ -162,9 +166,13 @@ class MaestroClient:
         selector: ElementSelector | None = None,
         label: str | None = None,
     ) -> ExecutionResult:
-        return self._exec(commands.tap_on(text=text, id=id, selector=selector, long_press=True, label=label))
+        return self._exec(
+            commands.tap_on(text=text, id=id, selector=selector, long_press=True, label=label)
+        )
 
-    def tap_on_point(self, point: str, *, long_press: bool = False, label: str | None = None) -> ExecutionResult:
+    def tap_on_point(
+        self, point: str, *, long_press: bool = False, label: str | None = None
+    ) -> ExecutionResult:
         step: dict[str, Any] = {"type": "tapOnPoint", "point": point}
         if long_press:
             step["longPress"] = True
@@ -177,7 +185,9 @@ class MaestroClient:
     def input_text(self, text: str, *, label: str | None = None) -> ExecutionResult:
         return self._exec(commands.input_text(text, label=label))
 
-    def erase_text(self, characters: int | None = None, *, label: str | None = None) -> ExecutionResult:
+    def erase_text(
+        self, characters: int | None = None, *, label: str | None = None
+    ) -> ExecutionResult:
         return self._exec(commands.erase_text(characters, label=label))
 
     def press_key(self, code: str, *, label: str | None = None) -> ExecutionResult:
@@ -186,7 +196,9 @@ class MaestroClient:
     def back(self, *, label: str | None = None) -> ExecutionResult:
         return self._exec(commands.back(label=label))
 
-    def hide_keyboard(self, *, strategy: str | None = None, label: str | None = None) -> ExecutionResult:
+    def hide_keyboard(
+        self, *, strategy: str | None = None, label: str | None = None
+    ) -> ExecutionResult:
         return self._exec(commands.hide_keyboard(strategy=strategy, label=label))
 
     def wait_for_animation_to_end(self, *, label: str | None = None) -> ExecutionResult:
@@ -197,7 +209,9 @@ class MaestroClient:
     def scroll(self, *, label: str | None = None) -> ExecutionResult:
         return self._exec(commands.scroll(label=label))
 
-    def swipe(self, direction: str, *, duration_ms: int = 400, label: str | None = None) -> ExecutionResult:
+    def swipe(
+        self, direction: str, *, duration_ms: int = 400, label: str | None = None
+    ) -> ExecutionResult:
         return self._exec(commands.swipe(direction, duration_ms=duration_ms, label=label))
 
     def swipe_on(
@@ -258,7 +272,9 @@ class MaestroClient:
 
     # --- Self-healing multi-selector tap ---
 
-    def tap_first_match(self, selectors: list[dict[str, Any]], *, step: str = "") -> ExecutionResult:
+    def tap_first_match(
+        self, selectors: list[dict[str, Any]], *, step: str = ""
+    ) -> ExecutionResult:
         """Try each selector in order; return on the first successful tap."""
         last_result = None
         for sel in selectors:
@@ -271,7 +287,9 @@ class MaestroClient:
             last_result = result
         if last_result is None:
             raise StepError("tap_first_match: no selectors provided")
-        raise StepError(f"tap_first_match: none of {len(selectors)} selectors matched (step={step})")
+        raise StepError(
+            f"tap_first_match: none of {len(selectors)} selectors matched (step={step})"
+        )
 
     # --- Device queries ---
 

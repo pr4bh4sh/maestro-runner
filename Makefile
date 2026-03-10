@@ -1,4 +1,4 @@
-.PHONY: build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck
+.PHONY: build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck lint-py lint-py-fix
 
 # Build variables
 BINARY_NAME=maestro-runner
@@ -139,6 +139,15 @@ run:
 
 validate:
 	./$(BINARY_NAME) validate $(FLOW)
+
+# Python lint targets
+lint-py:
+	cd client/python && .venv/bin/ruff check maestro_runner tests
+	cd client/python && .venv/bin/mypy maestro_runner
+
+lint-py-fix:
+	cd client/python && .venv/bin/ruff check --fix maestro_runner tests
+	cd client/python && .venv/bin/ruff format maestro_runner tests
 
 # Release
 release: clean build-all

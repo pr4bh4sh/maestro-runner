@@ -2,7 +2,6 @@
 
 import pytest
 import requests_mock as rm
-
 from maestro_runner.client import MaestroClient
 from maestro_runner.exceptions import MaestroError, SessionError, StepError
 from maestro_runner.models import ElementSelector

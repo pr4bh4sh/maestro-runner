@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from maestro_runner.models import ExecutionResult
+
 from tests.pages import BasePage
 
 

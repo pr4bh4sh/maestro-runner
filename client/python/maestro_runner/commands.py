@@ -38,7 +38,7 @@ def _selector_value(
         d["selected"] = selected
     # Compact form: text-only selector → plain string
     if list(d.keys()) == ["text"]:
-        return d["text"]
+        return str(d["text"])
     return d
 
 
@@ -117,7 +117,11 @@ def scroll(*, label: str | None = None) -> dict[str, Any]:
 
 
 def swipe(direction: str, *, duration_ms: int = 400, label: str | None = None) -> dict[str, Any]:
-    step: dict[str, Any] = {"type": "swipe", "direction": direction.upper(), "duration": duration_ms}
+    step: dict[str, Any] = {
+        "type": "swipe",
+        "direction": direction.upper(),
+        "duration": duration_ms,
+    }
     if label is not None:
         step["label"] = label
     return step

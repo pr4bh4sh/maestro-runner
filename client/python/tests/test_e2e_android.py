@@ -12,6 +12,7 @@ Run:
 """
 
 import os
+
 import pytest
 import requests
 
@@ -23,7 +24,7 @@ def session_id():
     """Create a session at module scope; delete it when done."""
     resp = requests.post(f"{SERVER_URL}/session", json={
         "platformName": "android",
-    })
+    }, timeout=30)
     assert resp.status_code == 200, f"Failed to create session: {resp.text}"
     sid = resp.json()["sessionId"]
     yield sid

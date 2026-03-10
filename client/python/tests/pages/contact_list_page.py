@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from maestro_runner.models import ExecutionResult
-from tests.pages.edit_contact_page import EditContactPage
+
 from tests.pages import BasePage
+from tests.pages.edit_contact_page import EditContactPage
 
 
 class ContactListPage(BasePage):

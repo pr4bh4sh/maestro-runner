@@ -11,11 +11,10 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Generator
+from collections.abc import Generator
 
 import pytest
 import requests
-
 from maestro_runner import MaestroClient
 
 SERVER_URL = os.environ.get("MAESTRO_SERVER_URL", "http://localhost:9999")

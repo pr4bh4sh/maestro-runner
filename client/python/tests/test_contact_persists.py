@@ -26,8 +26,8 @@ Run:
 from __future__ import annotations
 
 import pytest
-
 from maestro_runner import MaestroClient
+
 from tests.pages.contact_list_page import ContactListPage
 
 
