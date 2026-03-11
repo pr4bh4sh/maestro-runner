@@ -23,11 +23,62 @@ const BASE_PORT = parseInt(new URL(BASE_SERVER_URL).port || "9999", 10);
 
 // Jest assigns JEST_WORKER_ID starting at 1 for each parallel worker
 const WORKER_ID = parseInt(process.env.JEST_WORKER_ID ?? "1", 10);
+const WORKER_NAME = `jw${Math.max(WORKER_ID - 1, 0)}`;
 const SERVER_PORT = BASE_PORT + WORKER_ID - 1;
 const SERVER_URL = `http://localhost:${SERVER_PORT}`;
 
 const DEFAULT_BIN = path.resolve(__dirname, "..", "..", "..", "maestro-runner");
 const MAESTRO_RUNNER_BIN = process.env.MAESTRO_RUNNER_BIN ?? DEFAULT_BIN;
+const REPORTS_DIR = path.resolve(__dirname, "..", "reports");
+
+let runId = "";
+let serverLogPath = "";
+let serverLogStream: fs.WriteStream | undefined;
+
+function utcTimestamp(): string {
+  const date = new Date();
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return [
+    date.getUTCFullYear(),
+    pad(date.getUTCMonth() + 1),
+    pad(date.getUTCDate()),
+  ].join("") +
+    "-" +
+    [pad(date.getUTCHours()), pad(date.getUTCMinutes()), pad(date.getUTCSeconds())].join("");
+}
+
+function persistLatestServerMetadata(mode: "spawned" | "reused-existing-server"): void {
+  fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  const latestPath = path.join(REPORTS_DIR, "server-latest.json");
+  let payload: { updatedAt: string; workers: Record<string, Record<string, string>> } = {
+    updatedAt: new Date().toISOString(),
+    workers: {},
+  };
+
+  if (fs.existsSync(latestPath)) {
+    try {
+      payload = JSON.parse(fs.readFileSync(latestPath, "utf-8"));
+    } catch {
+      payload = {
+        updatedAt: new Date().toISOString(),
+        workers: {},
+      };
+    }
+  }
+
+  payload.workers[WORKER_NAME] = {
+    workerId: WORKER_NAME,
+    runId,
+    mode,
+    serverUrl: SERVER_URL,
+    serverPort: String(SERVER_PORT),
+    serverLogPath,
+    ...(assignedDevice ? { deviceId: assignedDevice } : {}),
+    startedAt: new Date().toISOString(),
+  };
+  payload.updatedAt = new Date().toISOString();
+  fs.writeFileSync(latestPath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
+}
 
 async function serverIsReady(url: string): Promise<boolean> {
   try {
@@ -68,7 +119,19 @@ let assignedDevice: string | undefined;
  * Returns the server URL.
  */
 export async function ensureServer(): Promise<string> {
-  if (await serverIsReady(SERVER_URL)) return SERVER_URL;
+  runId = `${utcTimestamp()}-${WORKER_NAME}-${process.pid}`;
+  fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  serverLogPath = path.join(REPORTS_DIR, `server-run-${utcTimestamp()}-${WORKER_NAME}.log`);
+
+  if (await serverIsReady(SERVER_URL)) {
+    fs.writeFileSync(
+      serverLogPath,
+      `runId=${runId} workerId=${WORKER_NAME} mode=reused-existing-server\n`,
+      "utf-8",
+    );
+    persistLatestServerMetadata("reused-existing-server");
+    return SERVER_URL;
+  }
 
   const binary = MAESTRO_RUNNER_BIN;
   if (!fs.existsSync(binary)) {
@@ -88,8 +151,24 @@ export async function ensureServer(): Promise<string> {
   serverProcess = spawn(
     binary,
     ["--platform", PLATFORM, "server", "--port", String(SERVER_PORT)],
-    { stdio: "pipe" },
+    {
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        MAESTRO_WORKER_ID: WORKER_NAME,
+        ...(assignedDevice ? { ANDROID_SERIAL: assignedDevice } : {}),
+      },
+    },
   );
+
+  serverLogStream = fs.createWriteStream(serverLogPath, { flags: "a", encoding: "utf-8" });
+  serverLogStream.write(
+    `runId=${runId} workerId=${WORKER_NAME} platform=${PLATFORM}` +
+      `${assignedDevice ? ` deviceId=${assignedDevice}` : ""}\n`,
+  );
+  serverProcess.stdout?.pipe(serverLogStream);
+  serverProcess.stderr?.pipe(serverLogStream);
+  persistLatestServerMetadata("spawned");
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -130,5 +209,10 @@ export async function teardown(): Promise<void> {
   if (serverProcess) {
     serverProcess.kill();
     serverProcess = undefined;
+  }
+  if (serverLogStream) {
+    serverLogStream.write(`terminated runId=${runId} workerId=${WORKER_NAME}\n`);
+    serverLogStream.end();
+    serverLogStream = undefined;
   }
 }

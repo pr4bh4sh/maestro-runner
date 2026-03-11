@@ -9,8 +9,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -99,20 +101,36 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	var req SessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request body: " + err.Error()})
+		serverTracef(
+			"server request worker=%s method=%s path=%s status=%d duration_ms=%d error=%q",
+			serverWorkerID(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(started).Milliseconds(),
+			err.Error(),
+		)
 		return
 	}
 
 	if req.PlatformName == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "platformName is required"})
+		serverTracef(
+			"server request worker=%s method=%s path=%s status=%d duration_ms=%d error=%q",
+			serverWorkerID(), r.Method, r.URL.Path, http.StatusBadRequest, time.Since(started).Milliseconds(),
+			"platformName is required",
+		)
 		return
 	}
 
 	driver, cleanup, err := s.CreateDriver(req)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to create driver: " + err.Error()})
+		serverTracef(
+			"server request worker=%s method=%s path=%s status=%d duration_ms=%d error=%q platform=%s deviceId=%s",
+			serverWorkerID(), r.Method, r.URL.Path, http.StatusInternalServerError,
+			time.Since(started).Milliseconds(), err.Error(), req.PlatformName, req.DeviceID,
+		)
 		return
 	}
 
@@ -125,28 +143,63 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	logger.Info("Created session %s for platform=%s", sessionID, req.PlatformName)
+	serverTracef(
+		"server request worker=%s method=%s path=%s status=%d duration_ms=%d session=%s platform=%s deviceId=%s",
+		serverWorkerID(), r.Method, r.URL.Path, http.StatusOK, time.Since(started).Milliseconds(),
+		sessionID, req.PlatformName, req.DeviceID,
+	)
 	writeJSON(w, http.StatusOK, SessionResponse{SessionID: sessionID})
 }
 
 func (s *Server) handleExecute(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	sessionID := r.PathValue("id")
 	sess, ok := s.getSession(w, r)
 	if !ok {
+		serverTracef(
+			"server execute worker=%s session=%s status=%d duration_ms=%d error=%q",
+			serverWorkerID(), sessionID, http.StatusNotFound, time.Since(started).Milliseconds(),
+			"session not found",
+		)
 		return
 	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "failed to read body: " + err.Error()})
+		serverTracef(
+			"server execute worker=%s session=%s status=%d duration_ms=%d error=%q",
+			serverWorkerID(), sessionID, http.StatusBadRequest, time.Since(started).Milliseconds(),
+			err.Error(),
+		)
 		return
 	}
 
 	step, err := flow.UnmarshalStep(body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid step: " + err.Error()})
+		serverTracef(
+			"server execute worker=%s session=%s status=%d duration_ms=%d error=%q raw_step=%s",
+			serverWorkerID(), sessionID, http.StatusBadRequest, time.Since(started).Milliseconds(),
+			err.Error(), trimForLog(string(body), 280),
+		)
 		return
 	}
 
+	serverTracef(
+		"server execute request worker=%s session=%s step=%q payload=%s",
+		serverWorkerID(), sessionID, stepName(step), trimForLog(string(body), 320),
+	)
 	result := sess.Driver.Execute(step)
+	status := "passed"
+	if !result.Success {
+		status = "failed"
+	}
+	serverTracef(
+		"server execute response worker=%s session=%s step=%q status=%s duration_ms=%d message=%s",
+		serverWorkerID(), sessionID, stepName(step), status, time.Since(started).Milliseconds(),
+		trimForLog(result.Message, 220),
+	)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -204,6 +257,7 @@ func (s *Server) handleDeviceInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	id := r.PathValue("id")
 
 	s.mu.Lock()
@@ -215,6 +269,11 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 	if !exists {
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: fmt.Sprintf("session %s not found", id)})
+		serverTracef(
+			"server request worker=%s method=%s path=%s status=%d duration_ms=%d session=%s error=%q",
+			serverWorkerID(), r.Method, r.URL.Path, http.StatusNotFound, time.Since(started).Milliseconds(),
+			id, "session not found",
+		)
 		return
 	}
 
@@ -222,6 +281,10 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		sess.Cleanup()
 	}
 	logger.Info("Deleted session %s", id)
+	serverTracef(
+		"server request worker=%s method=%s path=%s status=%d duration_ms=%d session=%s",
+		serverWorkerID(), r.Method, r.URL.Path, http.StatusNoContent, time.Since(started).Milliseconds(), id,
+	)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -260,4 +323,33 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 // SanitizePlatform normalizes the platform name.
 func SanitizePlatform(p string) string {
 	return strings.ToLower(strings.TrimSpace(p))
+}
+
+func serverWorkerID() string {
+	if worker := strings.TrimSpace(os.Getenv("PYTEST_XDIST_WORKER")); worker != "" {
+		return worker
+	}
+	if worker := strings.TrimSpace(os.Getenv("MAESTRO_WORKER_ID")); worker != "" {
+		return worker
+	}
+	return "master"
+}
+
+func trimForLog(value string, maxLen int) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) <= maxLen {
+		return trimmed
+	}
+	return trimmed[:maxLen] + "..."
+}
+
+func stepName(step flow.Step) string {
+	if step == nil {
+		return "unknown"
+	}
+	return string(step.Type())
+}
+
+func serverTracef(format string, v ...interface{}) {
+	fmt.Printf("%s [TRACE] %s\n", time.Now().Format("15:04:05.000000"), fmt.Sprintf(format, v...))
 }

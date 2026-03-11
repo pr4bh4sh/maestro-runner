@@ -29,6 +29,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--html=reports/report.html --self-contained-html --junitxml=reports/junit-report.xml"
+log_cli = true
+log_cli_level = "DEBUG"
+log_level = "DEBUG"
+log_date_format = "%Y-%m-%d %H:%M:%S"
 
 [tool.ruff]
 target-version = "py39"

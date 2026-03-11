@@ -90,6 +90,26 @@ npx jest tests/test_add_contact.test.ts
 
 The test setup (`tests/setup.ts`) auto-starts the maestro-runner server if it isn't already running.
 
+### Test Reports And Server Traces
+
+Jest writes test reports under `client/typescript/reports/`:
+
+```
+reports/report.html
+reports/junit-report.xml
+```
+
+The setup harness also persists worker-aware server logs for analysis:
+
+```
+reports/server-run-<YYYYMMDD-HHMMSS>-<worker>.log
+reports/server-latest.json
+```
+
+- `server-run-...log` is the canonical server stdout/stderr log for that worker run.
+- `server-latest.json` maps each worker id to its latest run metadata and log path.
+- Appium-style trace lines are emitted in server logs as `[TRACE]` entries, including request/response step, status, and duration.
+
 ## Code Conventions
 
 ### Architecture

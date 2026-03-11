@@ -113,9 +113,22 @@ The `conftest.py` session fixture auto-starts the maestro-runner server if it is
 HTML and JUnit XML reports are written automatically:
 
 ```
-tests/reports/report.html
-tests/reports/junit-report.xml
+reports/report.html
+reports/junit-report.xml
 ```
+
+Additional analysis logs are written during test runs:
+
+```
+reports/pytest-run-<YYYYMMDD-HHMMSS>-<worker>-<pid>.log
+reports/server-run-<YYYYMMDD-HHMMSS>-<worker>.log
+reports/server-latest.json
+```
+
+- `pytest-run-...log` contains persisted Python log records with worker id.
+- `server-run-...log` is the canonical server stdout/stderr log for that worker run.
+- `server-latest.json` maps each worker id to its latest run metadata and log path.
+- Appium-style server traces appear as `[TRACE]` lines with per-command request/response, status, and duration.
 
 ## Code Conventions
 
