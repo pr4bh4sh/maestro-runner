@@ -1,4 +1,4 @@
-.PHONY: build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck lint-py lint-py-fix
+.PHONY: build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck lint-py lint-py-fix hooks-install
 
 # Build variables
 BINARY_NAME=maestro-runner
@@ -148,6 +148,12 @@ lint-py:
 lint-py-fix:
 	cd client/python && .venv/bin/ruff check --fix maestro_runner tests
 	cd client/python && .venv/bin/ruff format maestro_runner tests
+
+hooks-install:
+	@git config core.hooksPath .githooks
+	@chmod +x .githooks/commit-msg
+	@chmod +x .githooks/pre-push
+	@echo "Installed git hooks from .githooks"
 
 # Release
 release: clean build-all

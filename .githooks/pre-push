@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Pre-push test policy:
+# - Go changes: run Go unit tests, Python client unit tests, and TypeScript client unit tests.
+# - Python-only changes under client/python/: run only Python client unit tests.
+# - TypeScript-only changes under client/typescript/: run only TypeScript client unit tests.
+# - Python + TypeScript changes without Go changes: run both client unit test suites.
+# - No Go, Python, or TypeScript changes: run no tests.
+#
+# Explicit exclusions:
+# - Go Chrome CDP tests are skipped by excluding pkg/driver/browser/cdp.
+# - Python real-device tests are skipped by running only tests/test_client.py and tests/test_models.py.
+# - TypeScript real-device tests are skipped by running npm run test:unit.
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+echo "[pre-push] Running unit test checks (Go, Python, TypeScript)..."
+echo "[pre-push] Skipping Chrome CDP tests and real-device tests."
+
+CHANGED_FILES=""
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+  [[ -z "${LOCAL_SHA:-}" ]] && continue
+
+  # Deleted refs have all-zero local sha; nothing to validate.
+  if [[ "$LOCAL_SHA" =~ ^0+$ ]]; then
+    continue
+  fi
+
+  if [[ "$REMOTE_SHA" =~ ^0+$ ]]; then
+    # New branch/tag push: diff against merge-base with origin/main when available.
+    if git show-ref --verify --quiet refs/remotes/origin/main; then
+      BASE_SHA="$(git merge-base "$LOCAL_SHA" refs/remotes/origin/main)"
+      CHANGED_FILES+="$(git diff --name-only "$BASE_SHA" "$LOCAL_SHA")"$'\n'
+    else
+      CHANGED_FILES+="$(git diff-tree --no-commit-id --name-only -r "$LOCAL_SHA")"$'\n'
+    fi
+  else
+    CHANGED_FILES+="$(git diff --name-only "$REMOTE_SHA" "$LOCAL_SHA")"$'\n'
+  fi
+done
+
+HAS_GO_CHANGES=0
+HAS_PYTHON_CHANGES=0
+HAS_TYPESCRIPT_CHANGES=0
+
+if echo "$CHANGED_FILES" | grep -Eq '(^|/).+\.go$|^go\.mod$|^go\.sum$'; then
+  HAS_GO_CHANGES=1
+fi
+
+if echo "$CHANGED_FILES" | grep -Eq '^client/python/'; then
+  HAS_PYTHON_CHANGES=1
+fi
+
+if echo "$CHANGED_FILES" | grep -Eq '^client/typescript/'; then
+  HAS_TYPESCRIPT_CHANGES=1
+fi
+
+if [[ "$HAS_GO_CHANGES" -eq 1 ]]; then
+  echo "[pre-push] Go changes detected. Running Go unit tests (excluding pkg/driver/browser/cdp)..."
+  GO_TEST_PKGS="$(go list ./... | grep -Ev '/pkg/driver/browser/cdp$' || true)"
+  if [[ -z "$GO_TEST_PKGS" ]]; then
+    echo "[pre-push] No Go packages found to test."
+  else
+    # shellcheck disable=SC2086
+    go test -count=1 $GO_TEST_PKGS
+  fi
+else
+  echo "[pre-push] No Go changes detected. Skipping Go unit tests."
+fi
+
+if [[ "$HAS_PYTHON_CHANGES" -eq 1 || "$HAS_GO_CHANGES" -eq 1 ]]; then
+  if [[ "$HAS_GO_CHANGES" -eq 1 && "$HAS_PYTHON_CHANGES" -eq 0 ]]; then
+    echo "[pre-push] Go changes detected. Running Python unit tests as part of cross-client validation (client/python/tests/test_client.py, test_models.py)..."
+  else
+    echo "[pre-push] Python changes detected. Running Python unit tests (client/python/tests/test_client.py, test_models.py)..."
+  fi
+  if [[ ! -x "client/python/.venv/bin/pytest" ]]; then
+    echo "[pre-push] Missing client/python/.venv/bin/pytest"
+    echo "[pre-push] Create venv and install deps: cd client/python && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'"
+    exit 1
+  fi
+  (
+    cd client/python
+    .venv/bin/pytest tests/test_client.py tests/test_models.py -q
+  )
+else
+  echo "[pre-push] No Python changes detected. Skipping Python unit tests."
+fi
+
+if [[ "$HAS_TYPESCRIPT_CHANGES" -eq 1 || "$HAS_GO_CHANGES" -eq 1 ]]; then
+  if [[ "$HAS_GO_CHANGES" -eq 1 && "$HAS_TYPESCRIPT_CHANGES" -eq 0 ]]; then
+    echo "[pre-push] Go changes detected. Running TypeScript unit tests as part of cross-client validation (npm run test:unit)..."
+  else
+    echo "[pre-push] TypeScript changes detected. Running TypeScript unit tests (npm run test:unit)..."
+  fi
+  if [[ ! -d "client/typescript/node_modules" ]]; then
+    echo "[pre-push] Missing client/typescript/node_modules"
+    echo "[pre-push] Install deps: cd client/typescript && npm install"
+    exit 1
+  fi
+  (
+    cd client/typescript
+    npm run test:unit
+  )
+else
+  echo "[pre-push] No TypeScript changes detected. Skipping TypeScript unit tests."
+fi
+
+if [[ "$HAS_GO_CHANGES" -eq 0 && "$HAS_PYTHON_CHANGES" -eq 0 && "$HAS_TYPESCRIPT_CHANGES" -eq 0 ]]; then
+  echo "[pre-push] No Go, Python, or TypeScript changes detected. No tests were run."
+fi
+
+echo "[pre-push] All unit test checks passed."

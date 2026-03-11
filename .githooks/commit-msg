@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG="$(sed -E 's/^[[:space:]]+|[[:space:]]+$//g' "$COMMIT_MSG_FILE" | head -n 1)"
+
+# Allow Git-generated merge/revert messages.
+if [[ "$COMMIT_MSG" =~ ^Merge\  ]] || [[ "$COMMIT_MSG" =~ ^Revert\  ]]; then
+  exit 0
+fi
+
+# Conventional Commits format:
+# type(scope)!: subject
+# type: subject
+PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?(!)?: .{1,72}$'
+
+if [[ ! "$COMMIT_MSG" =~ $PATTERN ]]; then
+  echo ""
+  echo "Invalid commit message format."
+  echo "Use Conventional Commits:"
+  echo "  <type>(<scope>)!: <subject>"
+  echo "  <type>: <subject>"
+  echo ""
+  echo "Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+  echo "Examples:"
+  echo "  feat(ios): add retry for session creation"
+  echo "  fix: handle empty response body"
+  echo "  chore!: remove deprecated flag"
+  echo ""
+  echo "First line must be 1-72 chars after ': '."
+  exit 1
+fi
