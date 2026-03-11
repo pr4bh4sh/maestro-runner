@@ -262,17 +262,29 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 		// First try WebDriver activeElement endpoint
 		active, err := d.client.ActiveElement()
 		if err != nil {
-			// Fallback: find element with focused=true via page source
-			focusedTrue := true
-			focusedSel := flow.Selector{Focused: &focusedTrue}
-			elem, _, findErr := d.findElement(focusedSel, false, 2000)
-			if findErr != nil {
-				return errorResult(err, "No focused element to type into")
+			// Keyboard transitions (numeric/email/etc.) can briefly drop focus.
+			// Retry activeElement with escalating delays before fallback selector search.
+			retryDelays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond, 500 * time.Millisecond}
+			for _, delay := range retryDelays {
+				time.Sleep(delay)
+				if active, err = d.client.ActiveElement(); err == nil {
+					break
+				}
 			}
-			if err := elem.SendKeys(text); err != nil {
-				return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
+
+			if err != nil {
+				// Fallback: find element with focused=true via page source
+				focusedTrue := true
+				focusedSel := flow.Selector{Focused: &focusedTrue}
+				elem, _, findErr := d.findElement(focusedSel, false, 2000)
+				if findErr != nil {
+					return errorResult(err, "No focused element to type into")
+				}
+				if err := elem.SendKeys(text); err != nil {
+					return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
+				}
+				return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), nil)
 			}
-			return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), nil)
 		}
 		if err := active.SendKeys(text); err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))

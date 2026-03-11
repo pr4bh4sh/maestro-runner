@@ -281,9 +281,26 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 			}
 		}
 	} else {
-		focused, err := d.findFocused()
+		// Try to find focused element with retry logic for keyboard transitions
+		var focused core.Element
+		var err error
+
+		// First attempt
+		focused, err = d.findFocused()
+
+		// If initial attempt fails, retry with delays (handles numeric/special keyboards)
 		if err != nil {
-			// Fallback: try finding by focused selector
+			retryDelays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond, 500 * time.Millisecond}
+			for _, delay := range retryDelays {
+				time.Sleep(delay)
+				if focused, err = d.findFocused(); err == nil {
+					break
+				}
+			}
+		}
+
+		// Still no focused element — try finding by focused selector
+		if err != nil {
 			focusedTrue := true
 			focusedSel := flow.Selector{Focused: &focusedTrue}
 			_, _, findErr := d.findElement(focusedSel, false, 2000)
@@ -296,6 +313,7 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 				return errorResult(err, "No focused element to type into")
 			}
 		}
+
 		if err := focused.Input(text); err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
 		}
@@ -1614,4 +1632,3 @@ func mapKeyCode(key string) int {
 		return 0
 	}
 }
-
