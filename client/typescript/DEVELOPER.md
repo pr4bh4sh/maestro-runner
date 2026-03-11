@@ -104,10 +104,14 @@ The setup harness also persists worker-aware server logs for analysis:
 ```
 reports/server-run-<YYYYMMDD-HHMMSS>-<worker>.log
 reports/server-latest.json
+reports/jest-run-<runId>.log
+reports/artifact-summary-<runId>.json
 ```
 
 - `server-run-...log` is the canonical server stdout/stderr log for that worker run.
 - `server-latest.json` maps each worker id to its latest run metadata and log path.
+- `jest-run-...log` records worker and node-aware test harness events for correlation.
+- `artifact-summary-...json` captures artifact paths/sizes and includes tail snippets for quick triage.
 - Appium-style trace lines are emitted in server logs as `[TRACE]` entries, including request/response step, status, and duration.
 
 ## Code Conventions

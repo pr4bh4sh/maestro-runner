@@ -34,6 +34,8 @@ const REPORTS_DIR = path.resolve(__dirname, "..", "reports");
 let runId = "";
 let serverLogPath = "";
 let serverLogStream: fs.WriteStream | undefined;
+let runLogPath = "";
+let runLogStream: fs.WriteStream | undefined;
 
 function utcTimestamp(): string {
   const date = new Date();
@@ -80,6 +82,74 @@ function persistLatestServerMetadata(mode: "spawned" | "reused-existing-server")
   fs.writeFileSync(latestPath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
 }
 
+function currentNodeId(): string {
+  const maybeExpect = (globalThis as { expect?: { getState?: () => { currentTestName?: string } } }).expect;
+  const name = maybeExpect?.getState?.().currentTestName;
+  return name && name.trim().length > 0 ? name : "-";
+}
+
+function appendRunLog(level: "INFO" | "DEBUG" | "WARN", message: string): void {
+  if (!runLogStream) {
+    return;
+  }
+  const ts = new Date().toISOString();
+  runLogStream.write(
+    `${ts} [${level}] [worker=${WORKER_NAME}] [node=${currentNodeId()}] ${message}\n`,
+  );
+}
+
+function tailFile(filePath: string, maxLines = 120): string {
+  if (!fs.existsSync(filePath)) {
+    return "";
+  }
+  const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
+}
+
+function writeArtifactSummary(status: "passed" | "failed"): void {
+  if (!runId) {
+    return;
+  }
+
+  const artifacts: Array<{ name: string; path: string; sizeBytes: number }> = [];
+  const known = [
+    path.join(REPORTS_DIR, "report.html"),
+    path.join(REPORTS_DIR, "junit-report.xml"),
+    serverLogPath,
+    runLogPath,
+  ];
+
+  for (const artifactPath of known) {
+    if (!artifactPath || !fs.existsSync(artifactPath)) {
+      continue;
+    }
+    const stats = fs.statSync(artifactPath);
+    artifacts.push({
+      name: path.basename(artifactPath),
+      path: artifactPath,
+      sizeBytes: stats.size,
+    });
+  }
+
+  const summary: Record<string, unknown> = {
+    runId,
+    workerId: WORKER_NAME,
+    platform: PLATFORM,
+    serverUrl: SERVER_URL,
+    serverPort: String(SERVER_PORT),
+    sessionStatus: status,
+    generatedAt: new Date().toISOString(),
+    artifacts,
+    tails: {
+      server: tailFile(serverLogPath),
+      jest: tailFile(runLogPath),
+    },
+  };
+
+  const summaryPath = path.join(REPORTS_DIR, `artifact-summary-${runId}.json`);
+  fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf-8");
+}
+
 async function serverIsReady(url: string): Promise<boolean> {
   try {
     const resp = await fetch(`${url}/status`, {
@@ -122,6 +192,11 @@ export async function ensureServer(): Promise<string> {
   runId = `${utcTimestamp()}-${WORKER_NAME}-${process.pid}`;
   fs.mkdirSync(REPORTS_DIR, { recursive: true });
   serverLogPath = path.join(REPORTS_DIR, `server-run-${utcTimestamp()}-${WORKER_NAME}.log`);
+  runLogPath = path.join(REPORTS_DIR, `jest-run-${runId}.log`);
+  if (!runLogStream) {
+    runLogStream = fs.createWriteStream(runLogPath, { flags: "a", encoding: "utf-8" });
+  }
+  appendRunLog("INFO", `run initialized runId=${runId} platform=${PLATFORM}`);
 
   if (await serverIsReady(SERVER_URL)) {
     fs.writeFileSync(
@@ -130,6 +205,7 @@ export async function ensureServer(): Promise<string> {
       "utf-8",
     );
     persistLatestServerMetadata("reused-existing-server");
+    appendRunLog("INFO", "reusing existing maestro-runner server");
     return SERVER_URL;
   }
 
@@ -169,6 +245,7 @@ export async function ensureServer(): Promise<string> {
   serverProcess.stdout?.pipe(serverLogStream);
   serverProcess.stderr?.pipe(serverLogStream);
   persistLatestServerMetadata("spawned");
+  appendRunLog("INFO", `spawned maestro-runner server on ${SERVER_URL}`);
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -196,14 +273,21 @@ export async function getClient(): Promise<MaestroClient> {
     caps.deviceId = assignedDevice;
   }
   await client.createSession(caps);
+  appendRunLog("INFO", `client session created for ${SERVER_URL}`);
   sharedClient = client;
   return client;
 }
 
 /** Tear down the shared client and server process. */
 export async function teardown(): Promise<void> {
+  let failed = false;
   if (sharedClient) {
-    await sharedClient.close();
+    try {
+      await sharedClient.close();
+    } catch {
+      failed = true;
+      appendRunLog("WARN", "client close failed during teardown");
+    }
     sharedClient = undefined;
   }
   if (serverProcess) {
@@ -214,5 +298,11 @@ export async function teardown(): Promise<void> {
     serverLogStream.write(`terminated runId=${runId} workerId=${WORKER_NAME}\n`);
     serverLogStream.end();
     serverLogStream = undefined;
+  }
+  appendRunLog("INFO", "teardown completed");
+  writeArtifactSummary(failed ? "failed" : "passed");
+  if (runLogStream) {
+    runLogStream.end();
+    runLogStream = undefined;
   }
 }
