@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Generator
+from typing import Any
 
 import fcntl
 
@@ -33,6 +34,9 @@ _DEFAULT_BIN = os.path.join(
 )
 MAESTRO_RUNNER_BIN = os.environ.get("MAESTRO_RUNNER_BIN", _DEFAULT_BIN)
 REPORTS_DIR = (Path(__file__).resolve().parent.parent / "reports")
+_CURRENT_NODE_ID = "-"
+_SESSION_RUN_ID = ""
+_SESSION_WORKER_ID = "master"
 
 
 def _utc_timestamp() -> str:
@@ -43,6 +47,15 @@ def _active_worker_id(explicit_worker_id: str | None = None) -> str:
     if explicit_worker_id:
         return explicit_worker_id
     return os.environ.get("PYTEST_XDIST_WORKER", "master")
+
+
+def _active_node_id() -> str:
+    if _CURRENT_NODE_ID and _CURRENT_NODE_ID != "-":
+        return _CURRENT_NODE_ID
+    current_test = os.environ.get("PYTEST_CURRENT_TEST", "")
+    if "::" in current_test:
+        return current_test.split(" ", 1)[0]
+    return "-"
 
 
 def _make_run_id(worker_id: str) -> str:
@@ -56,6 +69,8 @@ def _record_factory(*args: object, **kwargs: object) -> logging.LogRecord:
     record = _ORIGINAL_RECORD_FACTORY(*args, **kwargs)
     if not hasattr(record, "worker_id"):
         record.worker_id = _active_worker_id()
+    if not hasattr(record, "node_id"):
+        record.node_id = _active_node_id()
     return record
 
 
@@ -117,11 +132,95 @@ def _setup_persisted_python_logs(worker_id: str, run_id: str) -> None:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
         logging.Formatter(
-            "%(asctime)s [%(levelname)s] [%(name)s] [worker=%(worker_id)s] %(message)s"
+            "%(asctime)s [%(levelname)s] [%(name)s] "
+            "[worker=%(worker_id)s] [node=%(node_id)s] %(message)s"
         )
     )
     root_logger.setLevel(logging.DEBUG)
     root_logger.addHandler(file_handler)
+
+
+def _resolve_worker_metadata(worker_id: str) -> dict[str, Any]:
+    latest_path = REPORTS_DIR / "server-latest.json"
+    if not latest_path.exists():
+        return {}
+    try:
+        data = json.loads(latest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+    workers = data.get("workers", {})
+    if not isinstance(workers, dict):
+        return {}
+
+    metadata = workers.get(worker_id)
+    if not isinstance(metadata, dict):
+        return {}
+    return metadata
+
+
+def _write_artifact_summary(exit_status: int) -> None:
+    if not _SESSION_RUN_ID:
+        return
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    worker_id = _SESSION_WORKER_ID
+    run_id = _SESSION_RUN_ID
+    metadata = _resolve_worker_metadata(worker_id)
+
+    artifacts: list[dict[str, Any]] = []
+    for path in [
+        REPORTS_DIR / "report.html",
+        REPORTS_DIR / "junit-report.xml",
+    ]:
+        if path.exists():
+            artifacts.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "sizeBytes": path.stat().st_size,
+                }
+            )
+
+    pytest_log_path = REPORTS_DIR / f"pytest-run-{run_id}.log"
+    if pytest_log_path.exists():
+        artifacts.append(
+            {
+                "name": pytest_log_path.name,
+                "path": str(pytest_log_path),
+                "sizeBytes": pytest_log_path.stat().st_size,
+            }
+        )
+
+    server_log_path = Path(str(metadata.get("serverLogPath", "")))
+    if server_log_path.exists():
+        artifacts.append(
+            {
+                "name": server_log_path.name,
+                "path": str(server_log_path),
+                "sizeBytes": server_log_path.stat().st_size,
+            }
+        )
+
+    summary: dict[str, Any] = {
+        "runId": run_id,
+        "workerId": worker_id,
+        "platform": PLATFORM,
+        "serverUrl": str(metadata.get("serverUrl", SERVER_URL)),
+        "serverPort": str(metadata.get("serverPort", SERVER_PORT)),
+        "sessionStatus": "failed" if exit_status != 0 else "passed",
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "artifacts": artifacts,
+    }
+
+    if exit_status != 0:
+        summary["failureTails"] = {
+            "server": _tail_file(server_log_path) if server_log_path.exists() else "",
+            "pytest": _tail_file(pytest_log_path) if pytest_log_path.exists() else "",
+        }
+
+    summary_path = REPORTS_DIR / f"artifact-summary-{run_id}.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _server_is_ready(url: str, timeout: float = 2.0) -> bool:
@@ -163,7 +262,10 @@ def maestro_server(worker_id: str) -> Generator[tuple[str, str | None], None, No
 
     Yields (server_url, device_serial_or_None).
     """
+    global _SESSION_RUN_ID, _SESSION_WORKER_ID
     run_id = _make_run_id(worker_id)
+    _SESSION_RUN_ID = run_id
+    _SESSION_WORKER_ID = worker_id
     _setup_persisted_python_logs(worker_id, run_id)
 
     # Single-worker mode (no xdist or xdist with -n0)
@@ -318,3 +420,22 @@ def client(maestro_server: tuple[str, str | None]) -> Generator[MaestroClient, N
         caps["deviceId"] = device_serial
     with MaestroClient(url, capabilities=caps) as c:
         yield c
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    global _CURRENT_NODE_ID
+    _CURRENT_NODE_ID = item.nodeid
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    del item, nextitem
+    global _CURRENT_NODE_ID
+    _CURRENT_NODE_ID = "-"
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    del session
+    _write_artifact_summary(exitstatus)
