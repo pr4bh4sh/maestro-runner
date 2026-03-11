@@ -6,8 +6,10 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "jest",
-    "test:e2e": "jest --testPathPattern=tests/e2e",
+    "test": "echo 'Use npm run test:unit (parallel) or npm run test:device (serial real-device)' && exit 1",
+    "test:unit": "jest --testPathIgnorePatterns=test_add_contact.test.ts --testPathIgnorePatterns=test_contact_persists.test.ts --passWithNoTests",
+    "test:device": "jest tests/test_add_contact.test.ts tests/test_contact_persists.test.ts --runInBand",
+    "test:e2e": "npm run test:device",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },

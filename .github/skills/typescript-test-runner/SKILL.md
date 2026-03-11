@@ -3,19 +3,20 @@ name: typescript-test-runner
 description: >
   Runs tests, lint, and build for the maestro-runner TypeScript client at
   client/typescript/. Use this skill whenever the user mentions TypeScript
-  tests, Jest, npm test, e2e tests, linting, or building the TS client — even
+  tests, Jest, npm run test:unit, npm run test:device, e2e tests, linting, or building the TS client — even
   if they don't say "TypeScript" explicitly, apply this skill whenever the
   context is clearly client/typescript/. Make sure to use this skill for any
-  jest, npm run, or npx jest command, and any time the user asks why a
+  jest, npm run test:unit, npm run test:device, or npx jest command, and any time the user asks why a
   TypeScript test is failing. Handles server startup automatically via
-  setup.ts. DO NOT use for Python tests, Go tests, or server-side code — use
-  the python-test-runner skill or run Go tests directly.
-allowed-tools: "Bash(npm:*) Bash(npx:*) Bash(node:*) Bash(adb:*) Bash(curl:*) Bash(make:*)"
+  setup.ts. Automatically handles test sequencing and device lock conflicts 
+  for "run all tests" requests. DO NOT use for Python tests, Go tests, or 
+  server-side code — use the python-test-runner skill or run Go tests directly.
+allowed-tools: "Bash(npm:*) Bash(npx:*) Bash(node:*) Bash(adb:*) Bash(curl:*) Bash(make:*) Bash(pkill:*) Bash(sleep:*)"
 metadata:
   author: maestro-runner
-  version: 1.0.0
+  version: 1.1.0
   category: testing
-  tags: [typescript, jest, e2e, android, lint, build]
+  tags: [typescript, jest, e2e, android, lint, build, test-sequencing, device-lock]
 ---
 
 # TypeScript Test Runner
@@ -39,17 +40,44 @@ Runs tests, lint, and build for the TypeScript client at `client/typescript/`.
 ```sh
 cd client/typescript && npm install
 ```
+## Run All Tests (Complete Suite)
 
-## Step 1: Unit / Integration Tests
+**Use this when asked to "run all tests"** — handles proper sequencing and device lock mitigation:
+
+```sh
+# 1) Clean up any stale maestro-runner server processes
+pkill -f "maestro-runner.*server" || true
+sleep 2
+
+# 2) Run unit tests in parallel (no real device required)
+cd client/typescript && npm run test:unit
+
+# 3) Run real-device tests in serial mode
+cd client/typescript && npm run test:device
+```
+
+**Why this works:**
+- Stale server processes are cleaned up before tests to prevent device lock conflicts
+- `setup.ts` auto-starts a fresh maestro-runner server for the test suite
+- Single-worker execution avoids session/device races on single-emulator setups
+
+To run only one group directly:
+```sh
+cd client/typescript && npm run test:unit
+cd client/typescript && npm run test:device
+```
+
+
+## Step 1: Unit Tests (parallel-safe)
 
 The test setup (`tests/setup.ts`) auto-starts the maestro-runner server if it isn't already running — no manual server startup needed.
 
 ```sh
-# All tests
-cd client/typescript && npm test
+# Unit tests only (parallel-safe)
+cd client/typescript && npm run test:unit
 
-# E2E tests only
-npm run test:e2e
+# Real-device tests only (serial)
+npm run test:device
 
 # Specific test file
 npx jest tests/test_add_contact.test.ts
@@ -61,7 +89,7 @@ npx jest -t "should add a contact"
 npx jest --watch
 ```
 
-## Step 2: E2E Android Tests
+## Step 2: Real-Device Android Tests (serial)
 
 ### 1. Check emulator is attached
 ```sh
@@ -70,12 +98,12 @@ adb devices
 
 ### 2. Run (server is auto-started by setup.ts)
 ```sh
-cd client/typescript && npm run test:e2e
+cd client/typescript && npm run test:device
 ```
 
 To target a different server or platform:
 ```sh
-MAESTRO_SERVER_URL=http://localhost:8888 MAESTRO_PLATFORM=android npm run test:e2e
+MAESTRO_SERVER_URL=http://localhost:8888 MAESTRO_PLATFORM=android npm run test:device
 ```
 
 ### Environment Variables

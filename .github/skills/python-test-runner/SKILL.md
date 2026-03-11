@@ -6,15 +6,16 @@ description: >
   mypy, the Python venv, or running/debugging tests for client/python/ — even
   if they just say "run the tests" and the context is clearly Python. Make
   sure to use this skill for any pytest or make lint-py command, and any time
-  the user asks why a Python test is failing or the venv isn't working. DO NOT
-  use for TypeScript tests, Go tests, or server-side code — use the
+  the user asks why a Python test is failing or the venv isn't working. 
+  Automatically handles test sequencing and device lock conflicts for "run all tests" 
+  requests. DO NOT use for TypeScript tests, Go tests, or server-side code — use the
   typescript-test-runner skill or run Go tests directly.
 allowed-tools: "Bash(python:*) Bash(python3:*) Bash(pip:*) Bash(pip3:*) Bash(pytest:*) Bash(ruff:*) Bash(mypy:*) Bash(make:*) Bash(adb:*) Bash(curl:*) Bash(source:*)"
 metadata:
   author: maestro-runner
-  version: 1.0.0
+  version: 1.1.0
   category: testing
-  tags: [python, pytest, e2e, android, lint, mypy, ruff]
+  tags: [python, pytest, e2e, android, lint, mypy, ruff, test-sequencing, device-lock]
 ---
 
 # Python Test Runner
@@ -119,6 +120,37 @@ make lint-py-fix
 cd client/python && source .venv/bin/activate && python -m pytest tests/test_client.py tests/test_models.py -v
 ```
 
+## Run All Tests (Complete Suite)
+
+**Use this when asked to "run all tests"** — handles proper sequencing and device lock mitigation:
+
+```sh
+# 1) Run unit tests first (no device needed)
+cd client/python && source .venv/bin/activate && \
+  python -m pytest tests/test_client.py tests/test_models.py -v
+
+# 2) Run page-object/integration tests (need device + server)
+cd client/python && python -m pytest tests/test_add_contact.py tests/test_contact_persists.py -v
+
+# 3) Clean up any stale server processes holding device
+pkill -f "maestro-runner.*server" || true
+sleep 2
+
+# 4) Start fresh server instance for e2e tests
+cd /path/to/repo && ./maestro-runner --platform android server --port 9999 &>/tmp/maestro-server.log &
+sleep 2
+curl -s http://localhost:9999/status
+
+# 5) Run e2e tests (with exclusive device access)
+cd client/python && python -m pytest tests/test_e2e_android.py -v
+```
+
+**Why this order:**
+- Unit tests run first (fastest, no device needed)
+- Integration tests can share server session
+- Device lock is cleaned up before e2e tests to prevent "device already in use" errors
+- E2E tests run last with fresh server connection
+
 ## Reliable Full-Client Run Order
 
 When both unit and Android e2e tests are needed, run in this order to reduce
@@ -134,6 +166,9 @@ curl -s http://localhost:9999/status
 
 # 3) E2E tests separately
 cd client/python && ./.venv/bin/python -m pytest tests/test_e2e_android.py -v
+
+# 4) Page-Object / Integration Tests (after e2e, reusing server)
+cd client/python && ./.venv/bin/python -m pytest tests/test_add_contact.py tests/test_contact_persists.py -v
 ```
 
 ## Reports
