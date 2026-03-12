@@ -18,8 +18,10 @@
  *   MAESTRO_RUNNER_BIN   (path to binary, auto-detected by default)
  *
  * Run:
- *   MAESTRO_PLATFORM=ios npx jest tests/test_add_contact_ios.test.ts --runInBand
+ *   MAESTRO_PLATFORM=ios npx jest tests/test_add_contact_ios.device.test.ts --runInBand
  */
+
+import { afterAll, describe, it } from "@jest/globals";
 
 import { getClient, teardown } from "./setup";
 import { IOSContactListPage } from "./pages/IOSContactListPage";

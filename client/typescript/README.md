@@ -53,11 +53,15 @@ it("adds a contact", async () => {
 ## Running Tests
 
 ```bash
-# Prerequisites: Android emulator running, maestro-runner server started
+# Prerequisites for device tests: emulator/simulator running, maestro-runner server started
 ./maestro-runner --platform android server --port 9999
 
-# Run tests
-npm test
+# Run unit tests only
+npm run test:unit
+
+# Run device tests
+npm run test:device:android
+npm run test:device:ios
 ```
 
 ## Environment Variables

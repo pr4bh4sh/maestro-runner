@@ -1,3 +1,5 @@
+import { describe, expect, it } from "@jest/globals";
+
 import { DeviceInfo, ElementInfo, ElementSelector, ExecutionResult } from "../src/models";
 
 describe("ElementSelector.toDict", () => {

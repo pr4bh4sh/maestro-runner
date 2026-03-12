@@ -1,3 +1,5 @@
+import { afterAll, beforeEach, describe, expect, it, jest } from "@jest/globals";
+
 import { MaestroClient } from "../src/client";
 import { MaestroError, SessionError, StepError } from "../src/exceptions";
 import { ElementSelector } from "../src/models";

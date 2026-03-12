@@ -67,17 +67,17 @@ npm run lint:fix     # Auto-fix what's possible
 
 ## Test
 
-Tests use **Jest** with **ts-jest** and run against a live maestro-runner server.
+Tests use **Jest** with **ts-jest**. Unit tests use the `*.unit.test.ts` suffix, while live device/feature tests use the `*.device.test.ts` suffix and run against a live maestro-runner server.
 
 ```bash
-# Run all tests (requires emulator + server)
-npm test
+# Run unit tests only
+npm run test:unit
 
-# Run E2E tests only
+# Run E2E/device tests only
 npm run test:e2e
 
 # Run a specific test file
-npx jest tests/test_add_contact.test.ts
+npx jest tests/test_add_contact.device.test.ts
 ```
 
 ### Environment Variables

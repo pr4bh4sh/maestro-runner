@@ -21,8 +21,10 @@
  *   MAESTRO_RUNNER_BIN   (path to binary, auto-detected by default)
  *
  * Run:
- *   npx jest tests/test_contact_persists.test.ts
+ *   npx jest tests/test_contact_persists.device.test.ts
  */
+
+import { afterAll, describe, it } from "@jest/globals";
 
 import { getClient, teardown } from "./setup";
 import { ContactListPage } from "./pages/ContactListPage";
