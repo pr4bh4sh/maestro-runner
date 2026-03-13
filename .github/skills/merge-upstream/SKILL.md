@@ -3,8 +3,10 @@ name: merge-upstream
 description: >
   Merges the upstream main branch from https://github.com/devicelab-dev/maestro-runner
   into the current branch. Use this skill when you need to sync your local branch
-  with the latest changes from the official maestro-runner repository. Handles
-  conflict resolution, provides merge status, and ensures a clean merge workflow.
+  with the latest changes from the official maestro-runner repository, pull in
+  upstream changes, check if the branch is out of sync with upstream, upstream
+  has new commits you need, or to cherry-pick features from the official repo.
+  Handles conflict resolution, provides merge status, and ensures a clean merge workflow.
 allowed-tools: "Bash(git:*) Bash(grep:*) Bash(echo:*) Bash(make:*) Bash(go:*) Bash(npm:*) Bash(python:*) Bash(pytest:*)"
 metadata:
   author: maestro-runner
@@ -22,7 +24,13 @@ upstream repository at `https://github.com/devicelab-dev/maestro-runner`.
 
 - Git installed and configured with credentials
 - Local repository initialized with remote named `origin`
-- No uncommitted changes in your working directory (or they will be stashed)
+- No uncommitted changes in your working directory; stash them first if needed:
+
+```sh
+git stash        # save uncommitted changes
+# ... run merge ...
+git stash pop    # restore uncommitted changes afterwards
+```
 
 ## Quick Start
 
@@ -143,35 +151,26 @@ upstream changes and verify there is nothing new missing on your branch:
 git log --oneline --no-merges HEAD..upstream/main
 ```
 
-## Run Unit Tests After Merge
+## Run Tests After Merge
 
-Always run unit tests after a merge to catch integration regressions early.
-
-```sh
-# Preferred repo command
-make test
-
-# Equivalent direct Go command
-go test -v ./...
-```
-
-Optional deeper validation:
+Always run tests after a merge to catch integration regressions early. If upstream added or updated dependencies, refresh them before running tests.
 
 ```sh
-make test-race
-make test-coverage-check
-```
+# 1) Go server tests (from repo root)
+go mod tidy                # refresh Go deps if go.mod/go.sum changed upstream
+make test                  # all Go tests
+make test-race             # optional: race detector
+make test-coverage-check   # optional: enforce 80% coverage threshold
 
-## Run Client Unit Tests After Merge
+# 2) TypeScript client unit tests
+cd client/typescript
+npm install                # refresh npm deps if package.json changed upstream
+npm run test:unit
 
-Also validate both client SDKs so upstream changes do not break client behavior.
-
-```sh
-# TypeScript client unit tests
-cd client/typescript && npm run test:unit
-
-# Python client unit tests (project venv)
-cd client/python && ./.venv/bin/python -m pytest tests/test_client.py tests/test_models.py -v
+# 3) Python client unit tests
+cd client/python
+pip install -e ".[dev]"    # refresh Python deps if pyproject.toml changed upstream
+./.venv/bin/python -m pytest tests/test_client.py tests/test_models.py -v
 ```
 
 ## Troubleshooting

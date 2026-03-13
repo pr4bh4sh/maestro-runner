@@ -3,10 +3,12 @@ name: go-test-runner
 description: >
   Runs Go tests, race checks, coverage checks, benchmarks, and quality checks
   for the maestro-runner repository. Use this skill whenever the user asks to
-  run or debug Go tests, `go test`, `make test`, `make check`, or CI-style Go
-  verification at repo root. DO NOT use for Python client tests or TypeScript
-  client tests; use the dedicated client skills for those.
-allowed-tools: "Bash(go:*) Bash(make:*) Bash(grep:*) Bash(awk:*) Bash(sed:*) Bash(cat:*) Bash(ls:*)"
+  run or debug Go tests, `go test`, `make test`, `make check`, CI-style Go
+  verification at repo root, or asks why a Go test is failing, how to fix a
+  test failure, how to run go vet or staticcheck, or how to check coverage.
+  DO NOT use for Python client tests or TypeScript client tests; use the
+  dedicated client skills for those.
+allowed-tools: "Bash(go:*) Bash(make:*) Bash(grep:*) Bash(awk:*) Bash(sed:*) Bash(cat:*) Bash(ls:*) Bash(find:*) Bash(head:*) Bash(tail:*) Bash(tee:*)"
 metadata:
   author: maestro-runner
   version: 1.0.0

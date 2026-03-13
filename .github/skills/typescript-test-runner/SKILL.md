@@ -3,14 +3,16 @@ name: typescript-test-runner
 description: >
   Runs tests, lint, and build for the maestro-runner TypeScript client at
   client/typescript/. Use this skill whenever the user mentions TypeScript
-  tests, Jest, npm run test:unit, npm run test:device, e2e tests, linting, or building the TS client — even
-  if they don't say "TypeScript" explicitly, apply this skill whenever the
-  context is clearly client/typescript/. Make sure to use this skill for any
-  jest, npm run test:unit, npm run test:device, or npx jest command, and any time the user asks why a
-  TypeScript test is failing. Handles server startup automatically via
-  setup.ts. Automatically handles test sequencing and device lock conflicts 
-  for "run all tests" requests. DO NOT use for Python tests, Go tests, or 
-  server-side code — use the python-test-runner skill or run Go tests directly.
+  tests, Jest, npm run test:unit, npm run test:device, e2e tests, linting, or
+  building the TS client — even if they don't say "TypeScript" explicitly,
+  apply this skill whenever the context is clearly client/typescript/. Use
+  this skill when the user says a TypeScript test is failing, "why is the Jest
+  test red", "module not found", "can't connect to server", or when running
+  iOS or Android device tests from the TypeScript client. Handles server
+  startup automatically via setup.ts. Automatically handles test sequencing
+  and device lock conflicts for "run all tests" requests. DO NOT use for
+  Python tests, Go tests, or server-side code — use the python-test-runner
+  skill or run Go tests directly.
 allowed-tools: "Bash(npm:*) Bash(npx:*) Bash(node:*) Bash(adb:*) Bash(curl:*) Bash(make:*) Bash(pkill:*) Bash(sleep:*)"
 metadata:
   author: maestro-runner
@@ -52,8 +54,12 @@ sleep 2
 # 2) Run unit tests in parallel (no real device required)
 cd client/typescript && npm run test:unit
 
-# 3) Run real-device tests in serial mode
-cd client/typescript && npm run test:device
+# 3) Run Android real-device tests in serial mode
+cd client/typescript && npm run test:device:android
+
+# 4) Run iOS real-device tests in serial mode
+cd client/typescript && \
+  MAESTRO_PLATFORM=ios MAESTRO_DEVICE_ID=<UDID> npm run test:device:ios
 ```
 
 **Why this works:**
@@ -64,7 +70,8 @@ cd client/typescript && npm run test:device
 To run only one group directly:
 ```sh
 cd client/typescript && npm run test:unit
-cd client/typescript && npm run test:device
+cd client/typescript && npm run test:device:android
+cd client/typescript && MAESTRO_PLATFORM=ios MAESTRO_DEVICE_ID=<UDID> npm run test:device:ios
 ```
 
 
@@ -76,8 +83,11 @@ The test setup (`tests/setup.ts`) auto-starts the maestro-runner server if it is
 # Unit tests only (parallel-safe)
 cd client/typescript && npm run test:unit
 
-# Real-device tests only (serial)
-npm run test:device
+# Android real-device tests (serial)
+npm run test:device:android
+
+# iOS real-device tests (serial, requires MAESTRO_DEVICE_ID)
+MAESTRO_PLATFORM=ios MAESTRO_DEVICE_ID=<UDID> npm run test:device:ios
 
 # Specific test file
 npx jest tests/test_add_contact.test.ts
@@ -98,12 +108,25 @@ adb devices
 
 ### 2. Run (server is auto-started by setup.ts)
 ```sh
-cd client/typescript && npm run test:device
+cd client/typescript && npm run test:device:android
 ```
 
-To target a different server or platform:
+To target a different server:
 ```sh
-MAESTRO_SERVER_URL=http://localhost:8888 MAESTRO_PLATFORM=android npm run test:device
+MAESTRO_SERVER_URL=http://localhost:8888 MAESTRO_PLATFORM=android npm run test:device:android
+```
+
+## Step 2b: Real-Device iOS Tests (serial)
+
+### 1. Check simulator is running
+```sh
+xcrun simctl list devices booted
+```
+
+### 2. Run (server is auto-started by setup.ts with the iOS platform)
+```sh
+cd client/typescript && \
+  MAESTRO_PLATFORM=ios MAESTRO_DEVICE_ID=<UDID> npm run test:device:ios
 ```
 
 ### Environment Variables
@@ -112,6 +135,7 @@ MAESTRO_SERVER_URL=http://localhost:8888 MAESTRO_PLATFORM=android npm run test:d
 |----------|---------|-------------|
 | `MAESTRO_SERVER_URL` | `http://localhost:9999` | Server URL |
 | `MAESTRO_PLATFORM` | `android` | Target platform (`android` / `ios`) |
+| `MAESTRO_DEVICE_ID` | _(unset)_ | Device/simulator UDID (required for iOS; optional for Android) |
 | `MAESTRO_RUNNER_BIN` | `../../maestro-runner` | Path to maestro-runner binary |
 
 ## Step 3 (optional): Manual Server Startup
@@ -119,8 +143,11 @@ MAESTRO_SERVER_URL=http://localhost:8888 MAESTRO_PLATFORM=android npm run test:d
 If `setup.ts` can't locate the binary or you want to manage the server yourself:
 
 ```sh
-# From repo root
+# From repo root — Android
 ./maestro-runner --platform android server --port 9999 &>/tmp/maestro-server.log &
+
+# From repo root — iOS (provide simulator UDID)
+./maestro-runner --platform ios --device <UDID> server --port 9999 &>/tmp/maestro-server.log &
 
 # Verify
 curl -s http://localhost:9999/status
