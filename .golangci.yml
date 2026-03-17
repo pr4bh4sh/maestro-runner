@@ -1,0 +1,26 @@
+version: "2"
+
+linters:
+  exclusions:
+    rules:
+      # Test files: ignore unchecked error returns - HTTP handler helpers,
+      # mock servers, and deferred teardown are irrelevant in tests.
+      - path: "_test\\.go"
+        linters:
+          - errcheck
+
+      # Deferred cleanup: fire-and-forget, errors not actionable.
+      - source: "^\\s+defer "
+        linters:
+          - errcheck
+
+      # nhooyr.io/websocket is deprecated in favor of coder/websocket.
+      # Migration tracked separately; suppress SA1019 for now.
+      - text: "SA1019"
+        linters:
+          - staticcheck
+
+      # QF* are optional style suggestions, not correctness issues.
+      - text: "QF[0-9]"
+        linters:
+          - staticcheck

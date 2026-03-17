@@ -79,7 +79,9 @@ func (d *FlutterDriver) Execute(step flow.Step) *core.CommandResult {
 	// If the app was already determined to be non-Flutter, don't retry.
 	if _, ok := step.(*flow.LaunchAppStep); ok {
 		if d.client != nil {
-			d.client.Close()
+			if err := d.client.Close(); err != nil {
+				logger.Debug("Flutter VM service close failed during launchApp reset: %v", err)
+			}
 			d.client = nil
 			d.attempted = false // Was Flutter before — re-discover after restart
 		}
@@ -316,7 +318,9 @@ func (d *FlutterDriver) getFlutterTrees(needWidgetTree bool) (semanticsDump, wid
 // tryReconnect attempts to re-establish the VM Service connection.
 func (d *FlutterDriver) tryReconnect() error {
 	if d.client != nil {
-		d.client.Close()
+		if err := d.client.Close(); err != nil {
+			logger.Debug("Flutter VM service close failed before reconnect: %v", err)
+		}
 		d.client = nil
 	}
 
@@ -480,7 +484,11 @@ func (d *FlutterDriver) executeWithCoordinates(step flow.Step, node *SemanticsNo
 
 // Close closes the VM Service client if connected.
 func (d *FlutterDriver) Close() {
-	d.client.Close()
+	if d.client != nil {
+		if err := d.client.Close(); err != nil {
+			logger.Debug("Flutter VM service close failed: %v", err)
+		}
+	}
 	d.client = nil
 }
 

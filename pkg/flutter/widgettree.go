@@ -188,7 +188,6 @@ func extractSubtree(dump string, pos int) string {
 		nlIdx := strings.Index(dump[i:], "\n")
 		var line string
 		if nlIdx < 0 {
-			line = dump[i:]
 			subtreeEnd = len(dump)
 			break
 		}

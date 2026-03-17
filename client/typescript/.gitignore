@@ -6,6 +6,7 @@ dist/
 .tsbuildinfo
 coverage/
 maestro-server.log
+reports/
 
 # Local copied iOS driver sources
 drivers/

@@ -5,13 +5,12 @@ description: >
   following Conventional Commits format. Use this skill whenever the user asks
   to commit changes, stage and commit, write a commit message, "git commit this",
   "commit my changes", "make a commit", or wants help describing what changed.
-  Also use it when the user says "push" or "save my work" if there are uncommitted
-  changes — commit first, then push. Handles staging, message generation, and
-  optional push.
+  Handles staging and message generation. NEVER push unless the user explicitly
+  says "push" or "commit and push" — do not prompt or suggest pushing.
 allowed-tools: "Bash(git:*) Bash(grep:*) Bash(echo:*) Bash(cat:*) Bash(head:*)"
 metadata:
   author: maestro-runner
-  version: 1.3.0
+  version: 1.4.0
   category: git
   tags: [git, commit, conventional-commits, staging]
 ---
@@ -132,6 +131,9 @@ Based on what's staged:
 Show the proposed message to the user and ask for quick confirmation before
 committing, unless the user already said "just commit" or "commit and push".
 
+**NEVER suggest or offer to push after committing. Only push if the user
+explicitly requested it (e.g. said "push", "commit and push", "push it").**
+
 **Good examples:**
 ```
 feat(ios): add UDID env var support to e2e test setup
@@ -190,6 +192,21 @@ printf 'feat(api)!: change session response format to JSON:API\n\nBREAKING CHANG
 git commit -F /tmp/commit-msg.txt
 ```
 
+### Step 5a: Verify commit success (CRITICAL)
+
+**BEFORE attempting any alternative commit method or retry:**
+
+```sh
+git log -1 --oneline
+```
+
+**Check the output:**
+- If you see a recent commit that matches the message you just created, **STOP**. The commit succeeded.
+- If the exit code was 0 and the commit hash appears in logs, **DO NOT attempt to commit again**.
+- Only retry with a different method if `git status` shows changes are still staged AND the commit truly failed (exit code non-zero or error message present).
+
+**This prevents duplicate commits.** If a previous attempt succeeded with exit code 0, trust that result.
+
 #### Git trailers (optional)
 
 Add at the end of the body after a blank line:
@@ -207,7 +224,43 @@ git log -1 --format="%h %s"
 git show --stat HEAD
 ```
 
-### Step 7: Push (if requested)
+### Step 6.5: Check for explicit push request (CRITICAL)
+
+**Before even considering a push, verify the user's intent:**
+
+```
+Check the user's original message for these exact keywords:
+- "push"
+- "commit and push"
+- "push it"
+- Any grammatically similar explicit push request
+```
+
+**Decision logic:**
+```
+IF user message contains "push" keyword:
+  → Proceed to Step 7 (push)
+ELSE:
+  → STOP. Report commit success and stop at Step 6.
+  → Wait for explicit user request before pushing.
+```
+
+**Why this matters:** Accidentally pushing commits violates the skill's core
+principle. This check prevents defaulting to push after successful commit.
+It forces an explicit wait-for-user-intent at every fork point.
+
+**Example responses (no push requested):**
+```
+✓ "Commit 071b569 created. Ready to push when you ask."
+✓ "Committed successfully. Branch is clean."
+❌ "Pushing now..." (without explicit user request)
+```
+
+### Step 7: Push (ONLY if explicitly requested)
+
+> **NEVER push automatically. NEVER ask "should I push?". NEVER offer to push.**
+> Only run the push commands below when the user's message explicitly includes
+> "push", "commit and push", or "push it".
 
 ```sh
 git push
@@ -219,7 +272,26 @@ If the branch has no upstream yet:
 git push -u origin $(git rev-parse --abbrev-ref HEAD)
 ```
 
-## Handling Common Situations
+### Step 7.5: Verify push success (CRITICAL)
+
+**After running push, verify it succeeded:**
+
+```sh
+git log -1 --format="%h %s (pushed to remote)"
+git status    # should show "Your branch is up to date with 'origin/...'"
+```
+
+**If git status shows "ahead of ... commit" after push:**
+```
+→ STOP. Push may have failed. Check error messages above.
+→ Retry or investigate before proceeding.
+```
+
+**If status shows synced/up-to-date:**
+```
+→ Push succeeded. Report success.
+→ Do not attempt alternative push methods.
+```
 
 ### Mixed changes (only commit some of them)
 

@@ -98,6 +98,12 @@ func New(cfg Config) (*Driver, error) {
 		Set("disable-background-timer-throttling").
 		Set("disable-component-update").
 		Set("password-store", "basic")
+
+	// GitHub Actions (and other CI environments) run as root without a kernel
+	// sandbox, so Chrome requires --no-sandbox to launch.
+	if os.Getenv("CI") != "" {
+		l = l.Set("no-sandbox")
+	}
 	if chromeBin != "" {
 		l = l.Bin(chromeBin)
 	} else {

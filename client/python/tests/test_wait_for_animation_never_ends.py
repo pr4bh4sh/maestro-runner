@@ -32,8 +32,7 @@ Run:
 
 import time
 
-from maestro_runner import MaestroClient
-from maestro_runner import commands
+from maestro_runner import MaestroClient, commands
 
 # Page with a perpetually spinning loading indicator — animation never settles
 _SPINNER_URL = "https://discuss.wxpython.org/t/loading-spinner-animation/35657"
@@ -44,9 +43,9 @@ _TIMEOUT_MS = 5_000
 # the spinner to advance at least one visible frame
 _SLEEP_MS = 500
 # Maximum pixel-diff % still considered "static".
-# The Discourse spinner produces ~0.000413–0.000674 diff on iOS after 500 ms;
+# The Discourse spinner produces ~0.000413-0.000674 diff on iOS after 500 ms;
 # we set the bar at 0.0003 (well below that) so any rotation is detected as
-# animated. On Android the diff is ~0.000741–0.000867 so 0.0003 works there too.
+# animated. On Android the diff is ~0.000741-0.000867 so 0.0003 works there too.
 _THRESHOLD = 0.0003
 
 

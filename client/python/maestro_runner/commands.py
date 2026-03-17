@@ -223,7 +223,7 @@ def wait_for_animation_to_end(
         sleep_ms:  Milliseconds to pause between the two comparison screenshots.
                    Longer values catch slow-moving animations.  Defaults to 200 ms
                    on the server side.
-        threshold: Maximum pixel-diff percentage (0.0–1.0) still considered static.
+        threshold: Maximum pixel-diff percentage (0.0-1.0) still considered static.
                    Lower is stricter.  Defaults to 0.005 (0.5 %) on the server side.
         label:     Optional step label shown in reports.
     """

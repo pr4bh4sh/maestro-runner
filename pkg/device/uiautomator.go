@@ -115,7 +115,9 @@ func (d *AndroidDevice) setupSocketForward(cfg UIAutomator2Config) error {
 		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 			logger.Debug("failed to remove stale socket file %s: %v", socketPath, err)
 		}
-		os.Remove(pidPathFor(socketPath))
+		if err := os.Remove(pidPathFor(socketPath)); err != nil && !os.IsNotExist(err) {
+			logger.Debug("failed to remove stale socket PID file for %s: %v", socketPath, err)
+		}
 	}
 
 	if err := d.ForwardSocket(socketPath, cfg.DevicePort); err != nil {
@@ -185,7 +187,9 @@ func (d *AndroidDevice) StopUIAutomator2() error {
 		if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
 			logger.Warn("failed to remove socket file %s: %v", d.socketPath, err)
 		}
-		os.Remove(pidPathFor(d.socketPath))
+		if err := os.Remove(pidPathFor(d.socketPath)); err != nil && !os.IsNotExist(err) {
+			logger.Warn("failed to remove socket PID file for %s: %v", d.socketPath, err)
+		}
 		d.socketPath = ""
 	}
 	// Also clean up default socket path (in case of stale from previous run)
@@ -196,7 +200,9 @@ func (d *AndroidDevice) StopUIAutomator2() error {
 	if err := os.Remove(defaultSocket); err != nil && !os.IsNotExist(err) {
 		logger.Warn("failed to remove default socket file %s: %v", defaultSocket, err)
 	}
-	os.Remove(pidPathFor(defaultSocket))
+	if err := os.Remove(pidPathFor(defaultSocket)); err != nil && !os.IsNotExist(err) {
+		logger.Warn("failed to remove default socket PID file for %s: %v", defaultSocket, err)
+	}
 
 	// Clean up port forward (Windows)
 	if d.localPort != 0 {

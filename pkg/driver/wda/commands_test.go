@@ -1705,14 +1705,20 @@ func TestSetWaitForIdleTimeoutEnable(t *testing.T) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/appium/settings") {
 			body, _ := io.ReadAll(r.Body)
 			var req map[string]interface{}
-			json.Unmarshal(body, &req)
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Errorf("unmarshal request: %v", err)
+			}
 			if s, ok := req["settings"].(map[string]interface{}); ok {
 				settingsReceived = s
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
+			t.Errorf("encode default response: %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -1741,14 +1747,20 @@ func TestSetWaitForIdleTimeoutDisable(t *testing.T) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/appium/settings") {
 			body, _ := io.ReadAll(r.Body)
 			var req map[string]interface{}
-			json.Unmarshal(body, &req)
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Errorf("unmarshal request: %v", err)
+			}
 			if s, ok := req["settings"].(map[string]interface{}); ok {
 				settingsReceived = s
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
+			t.Errorf("encode default response: %v", err)
+		}
 	}))
 	defer server.Close()
 

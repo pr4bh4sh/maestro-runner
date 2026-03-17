@@ -42,6 +42,6 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ["dist/", "node_modules/", "coverage/", "jest.config.js"],
+    ignores: ["dist/", "node_modules/", "coverage/", "reports/", "drivers/", "cache/", "jest.config.js"],
   },
 );

@@ -1,0 +1,168 @@
+name: E2E Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  e2e-android:
+    name: E2E Android (API 36)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Required to run Android emulator with hardware acceleration on Linux
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.6'
+          cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: client/typescript/package-lock.json
+
+      - name: Build maestro-runner
+        run: |
+          go mod download
+          go build -o maestro-runner .
+
+      - name: Install Python client dependencies
+        working-directory: client/python
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Install TypeScript client dependencies
+        working-directory: client/typescript
+        run: |
+          npm ci
+          npm install --no-save jest-junit
+
+      - name: Write e2e test script
+        run: |
+          cat > /tmp/run-e2e.sh << 'SCRIPT'
+          #!/usr/bin/env bash
+          set +e
+          FAILED=0
+          mkdir -p reports/yaml reports/python reports/typescript ctrf
+
+          # Detect emulator serial
+          DEVICE=$(adb devices | grep -E "emulator-[0-9]+" | head -1 | awk '{print $1}')
+          export MAESTRO_DEVICE_ID="$DEVICE"
+          echo "Using device: $DEVICE"
+          adb devices
+
+          # Install UIAutomator2 driver APKs (server before test harness)
+          adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+          adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+          adb install -r -g drivers/android/settings_apk-debug.apk
+
+          # --- YAML flow tests ---
+          echo "::group::YAML flow tests"
+          ./maestro-runner --platform android test --output reports/yaml e2e/workspaces/contacts/add_contact_android.yaml e2e/workspaces/contacts/contact_persists.yaml || FAILED=1
+          echo "::endgroup::"
+
+          # --- Python e2e tests (conftest.py auto-starts server) ---
+          echo "::group::Python e2e tests"
+          cd client/python
+          .venv/bin/python -m pytest tests/test_add_contact.py tests/test_contact_persists.py -v --junit-xml=../../reports/python/junit.xml || FAILED=1
+          cd ../..
+          echo "::endgroup::"
+
+          # --- TypeScript e2e tests (setup.ts auto-starts server) ---
+          echo "::group::TypeScript e2e tests"
+          cd client/typescript
+          JEST_JUNIT_OUTPUT_DIR=../../reports/typescript JEST_JUNIT_OUTPUT_NAME=junit.xml npx jest tests/test_add_contact.device.test.ts tests/test_contact_persists.device.test.ts --runInBand --reporters=default --reporters=jest-junit || FAILED=1
+          cd ../..
+          echo "::endgroup::"
+
+          exit $FAILED
+          SCRIPT
+          chmod +x /tmp/run-e2e.sh
+
+      - name: Run Android E2E tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -no-boot-anim -no-snapshot-load -netdelay none -netspeed full -no-window -gpu swiftshader_indirect
+          disable-animations: true
+          script: bash /tmp/run-e2e.sh
+
+      - name: Generate CTRF reports
+        if: always()
+        run: |
+          mkdir -p ctrf
+
+          # Convert YAML flow JUnit XMLs (one timestamped subdir per run)
+          find reports/yaml -name "*.xml" -type f | while read -r f; do
+            name=$(basename "$(dirname "$f")")
+            npx --yes junit-to-ctrf "$f" -o "ctrf/yaml-${name}-ctrf.json" || true
+          done
+
+          # Convert Python e2e JUnit
+          if [ -f reports/python/junit.xml ]; then
+            npx --yes junit-to-ctrf reports/python/junit.xml -o ctrf/python-ctrf.json || true
+          fi
+
+          # Convert TypeScript e2e JUnit
+          if [ -f reports/typescript/junit.xml ]; then
+            npx --yes junit-to-ctrf reports/typescript/junit.xml -o ctrf/ts-ctrf.json || true
+          fi
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-android-reports-${{ github.run_number }}
+          path: |
+            reports/
+            ctrf/
+          retention-days: 14
+
+      - name: Publish test results
+        if: always()
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: 'ctrf/*.json'
+          pull-request-report: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

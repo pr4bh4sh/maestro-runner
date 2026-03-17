@@ -124,6 +124,7 @@ func (d *Driver) getKeyboardBounds() *core.Bounds {
 }
 
 // isKeyboardVisible checks if the soft keyboard is currently shown using dumpsys.
+//nolint:unused
 func (d *Driver) isKeyboardVisible() bool {
 	return d.getKeyboardBounds() != nil
 }

@@ -7,6 +7,7 @@ instance on a unique port, targeting a specific device (via ANDROID_SERIAL).
 from __future__ import annotations
 
 import base64
+import fcntl
 import html
 import json
 import logging
@@ -15,12 +16,10 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Generator
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Generator
 from typing import Any
-
-import fcntl
 
 import pytest
 import requests
@@ -468,20 +467,20 @@ def client(maestro_server: tuple[str, str | None]) -> Generator[MaestroClient, N
 
 def _capture_failure_diagnostics(test_name: str, client: MaestroClient | None) -> dict[str, str]:
     """Capture server logs, screenshot, and UI dump after a test failure.
-    
+
     Stores diagnostics in a run-specific directory: reports/{run_id}/diagnostics/
     """
     if not _SESSION_RUN_ID:
         return {}
-    
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     test_safe = re.sub(r"[^a-zA-Z0-9_-]", "_", test_name)
     artifacts: dict[str, str] = {}
-    
+
     # Create run-specific diagnostics directory
     run_dir = _session_run_dir() / "diagnostics"
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Get server log tail
     worker_metadata = _resolve_worker_metadata(_SESSION_WORKER_ID)
     server_log_path = Path(str(worker_metadata.get("serverLogPath", "")))
@@ -491,8 +490,9 @@ def _capture_failure_diagnostics(test_name: str, client: MaestroClient | None) -
         log_file.write_text(log_content, encoding="utf-8")
         artifacts["server_log"] = str(log_file)
         artifacts["server_log_text"] = log_content
-        logging.getLogger(__name__).info(f"✓ Server log captured: {log_file.relative_to(REPORTS_DIR)}")
-    
+        logger = logging.getLogger(__name__)
+        logger.info(f"✓ Server log captured: {log_file.relative_to(REPORTS_DIR)}")
+
     # Capture screenshot and UI dump if client is available
     if client:
         try:
@@ -501,16 +501,20 @@ def _capture_failure_diagnostics(test_name: str, client: MaestroClient | None) -
             screenshot_file.write_bytes(screenshot_data)
             artifacts["screenshot_file"] = str(screenshot_file)
             artifacts["screenshot_base64"] = base64.b64encode(screenshot_data).decode("utf-8")
-            logging.getLogger(__name__).info(f"✓ Screenshot captured: {screenshot_file.relative_to(REPORTS_DIR)}")
+            logging.getLogger(__name__).info(
+                f"✓ Screenshot captured: {screenshot_file.relative_to(REPORTS_DIR)}"
+            )
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to capture screenshot: {e}")
-        
+
         try:
             ui_dump_file = run_dir / f"{test_safe}-{timestamp}-ui-dump.xml"
             ui_dump = client.view_hierarchy()
             ui_dump_file.write_text(ui_dump, encoding="utf-8")
             artifacts["ui_dump"] = str(ui_dump_file)
-            logging.getLogger(__name__).info(f"✓ UI dump captured: {ui_dump_file.relative_to(REPORTS_DIR)}")
+            logging.getLogger(__name__).info(
+                f"✓ UI dump captured: {ui_dump_file.relative_to(REPORTS_DIR)}"
+            )
         except Exception as e:
             logging.getLogger(__name__).warning(f"Failed to capture UI dump: {e}")
 
@@ -561,7 +565,9 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> 
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> Generator[None, None, None]:
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[Any]
+) -> Generator[None, None, None]:
     """Capture diagnostics after test call fails and attach key artifacts to pytest-html."""
     outcome: Any = yield
     report = outcome.get_result()
@@ -593,7 +599,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                 <button
                   type=\"button\"
                   class=\"report-section-toggle\"
-                  onclick=\"const container=this.closest('td.extra'); const section=container && container.querySelector('.report-screenshot-panel'); if(!section){return;} const hidden=section.classList.toggle('report-section-hidden'); this.textContent=hidden ? 'Show Screenshot' : 'Hide Screenshot';\"
+                  onclick="const container=this.closest('td.extra'); const section=container && container.querySelector('.report-screenshot-panel'); if(!section){return;} const hidden=section.classList.toggle('report-section-hidden'); this.textContent=hidden ? 'Show Screenshot' : 'Hide Screenshot';"  # noqa: E501
                 >Hide Screenshot</button>
                 """.strip()
             )
@@ -604,7 +610,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                 <button
                   type=\"button\"
                   class=\"report-section-toggle\"
-                  onclick=\"const container=this.closest('td.extra'); const section=container && container.querySelector('.report-server-log'); if(!section){return;} const hidden=section.classList.toggle('report-section-hidden'); this.textContent=hidden ? 'Show Server Log' : 'Hide Server Log';\"
+                  onclick="const container=this.closest('td.extra'); const section=container && container.querySelector('.report-server-log'); if(!section){return;} const hidden=section.classList.toggle('report-section-hidden'); this.textContent=hidden ? 'Show Server Log' : 'Hide Server Log';"  # noqa: E501
                 >Hide Server Log</button>
                 """.strip()
             )
@@ -615,25 +621,25 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                 <button
                   type=\"button\"
                   class=\"report-section-toggle\"
-                  onclick=\"const container=this.closest('td.extra'); const section=container && container.querySelector('.logwrapper'); if(!section){return;} const hidden=section.classList.toggle('report-section-hidden'); this.textContent=hidden ? 'Show Error Details' : 'Hide Error Details';\"
+                  onclick="const container=this.closest('td.extra'); const section=container && container.querySelector('.logwrapper'); if(!section){return;} const hidden=section.classList.toggle('report-section-hidden'); this.textContent=hidden ? 'Show Error Details' : 'Hide Error Details';"  # noqa: E501
                 >Hide Error Details</button>
                 """.strip()
             )
 
         report_extras.append(
             html_extras.html(
-                (
+
                     '<div class="report-section-controls">'
                     + "".join(control_buttons)
                     + "</div>"
-                )
+
             )
         )
 
     if screenshot_base64:
         report_extras.append(
             html_extras.html(
-                (
+
                     '<div class="report-screenshot-panel">'
                     '<div class="report-screenshot-panel__title">Screenshot</div>'
                     '<div class="report-screenshot-frame">'
@@ -642,21 +648,21 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> 
                     + '" />'
                     '</div>'
                     '</div>'
-                )
+
             )
         )
 
     if server_log_text:
         report_extras.append(
             html_extras.html(
-                (
+
                     '<div class="report-server-log">'
                     '<div class="report-server-log__title">Server Log</div>'
                     '<pre class="report-server-log__content">'
                     + html.escape(server_log_text)
                     + '</pre>'
                     '</div>'
-                )
+
             )
         )
 
