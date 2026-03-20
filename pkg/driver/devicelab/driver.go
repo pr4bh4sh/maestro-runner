@@ -246,6 +246,12 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	case *flow.WaitForAnimationToEndStep:
 		result = d.waitForAnimationToEnd(s)
 
+	// WebView JS execution
+	case *flow.EvalWebViewScriptStep:
+		result = d.evalWebViewScript(s)
+	case *flow.RunWebViewScriptStep:
+		result = d.runWebViewScript(s)
+
 	// Media
 	case *flow.TakeScreenshotStep:
 		result = d.takeScreenshot(s)

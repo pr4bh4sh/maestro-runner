@@ -2,7 +2,9 @@ package devicelab
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -1871,4 +1873,69 @@ func mapKeyCode(key string) int {
 	default:
 		return 0
 	}
+}
+
+// evalWebViewScript executes JavaScript in the mobile WebView via CDP.
+func (d *Driver) evalWebViewScript(step *flow.EvalWebViewScriptStep) *core.CommandResult {
+	if step.Script == "" {
+		return &core.CommandResult{Success: false, Error: fmt.Errorf("evalWebViewScript: script is empty"), Message: "Script is empty"}
+	}
+
+	page := d.webView.rodPage()
+	if page == nil {
+		return &core.CommandResult{Success: false, Error: fmt.Errorf("evalWebViewScript: no WebView CDP connection"), Message: "No WebView CDP connection — is the WebView visible?"}
+	}
+
+	js := fmt.Sprintf("async () => { %s }", step.Script)
+	obj, err := page.Timeout(10 * time.Second).Eval(js)
+	if err != nil {
+		return &core.CommandResult{Success: false, Error: fmt.Errorf("evalWebViewScript: %w", err), Message: fmt.Sprintf("JS execution failed: %v", err)}
+	}
+
+	val := ""
+	if obj != nil && obj.Value.Val() != nil {
+		val = obj.Value.Str()
+	}
+
+	result := &core.CommandResult{Success: true, Message: "evalWebViewScript completed"}
+	result.Data = val
+	return result
+}
+
+// runWebViewScript loads a JS file and executes it in the mobile WebView via CDP.
+func (d *Driver) runWebViewScript(step *flow.RunWebViewScriptStep) *core.CommandResult {
+	if step.File == "" {
+		return &core.CommandResult{Success: false, Error: fmt.Errorf("runWebViewScript: file is required"), Message: "File is required"}
+	}
+
+	data, err := os.ReadFile(step.File) //#nosec G304 -- user-provided script file
+	if err != nil {
+		return &core.CommandResult{Success: false, Error: fmt.Errorf("runWebViewScript: %w", err), Message: fmt.Sprintf("Failed to read file: %v", err)}
+	}
+
+	page := d.webView.rodPage()
+	if page == nil {
+		return &core.CommandResult{Success: false, Error: fmt.Errorf("runWebViewScript: no WebView CDP connection"), Message: "No WebView CDP connection — is the WebView visible?"}
+	}
+
+	var envSetup string
+	if len(step.Env) > 0 {
+		envJSON, _ := json.Marshal(step.Env)
+		envSetup = fmt.Sprintf("window.__env = %s;\n", envJSON)
+	}
+
+	js := fmt.Sprintf("async () => { %s%s }", envSetup, string(data))
+	obj, err := page.Timeout(10 * time.Second).Eval(js)
+	if err != nil {
+		return &core.CommandResult{Success: false, Error: fmt.Errorf("runWebViewScript: %w", err), Message: fmt.Sprintf("JS execution failed: %v", err)}
+	}
+
+	val := ""
+	if obj != nil && obj.Value.Val() != nil {
+		val = obj.Value.Str()
+	}
+
+	result := &core.CommandResult{Success: true, Message: "runWebViewScript completed"}
+	result.Data = val
+	return result
 }
