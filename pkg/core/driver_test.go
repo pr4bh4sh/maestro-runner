@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 )
 
 func TestBounds_Center(t *testing.T) {
@@ -249,6 +251,41 @@ func TestHasNonASCII(t *testing.T) {
 	}
 }
 
+func TestBounds_VisiblePercentage(t *testing.T) {
+	screenW, screenH := 1080, 1920
+
+	tests := []struct {
+		name     string
+		bounds   Bounds
+		expected float64
+	}{
+		{"fully on-screen", Bounds{X: 100, Y: 100, Width: 200, Height: 200}, 1.0},
+		{"fully off-screen right", Bounds{X: 1100, Y: 100, Width: 200, Height: 200}, 0.0},
+		{"fully off-screen below", Bounds{X: 100, Y: 2000, Width: 200, Height: 200}, 0.0},
+		{"fully off-screen left", Bounds{X: -300, Y: 100, Width: 200, Height: 200}, 0.0},
+		{"fully off-screen above", Bounds{X: 100, Y: -300, Width: 200, Height: 200}, 0.0},
+		{"half off-screen right", Bounds{X: 980, Y: 100, Width: 200, Height: 200}, 0.5},
+		{"half off-screen bottom", Bounds{X: 100, Y: 1820, Width: 200, Height: 200}, 0.5},
+		{"zero-size element", Bounds{X: 100, Y: 100, Width: 0, Height: 0}, 0.0},
+		{"zero-width element", Bounds{X: 100, Y: 100, Width: 0, Height: 200}, 0.0},
+		{"full-screen overlay", Bounds{X: 0, Y: 0, Width: 1080, Height: 1920}, 1.0},
+		{"full-screen overlay with negative origin", Bounds{X: -10, Y: -10, Width: 1100, Height: 1940}, 1.0},
+		{"exactly 10% visible", Bounds{X: 1060, Y: 100, Width: 200, Height: 200}, 0.10},
+		{"barely visible (<10%)", Bounds{X: 1070, Y: 100, Width: 200, Height: 200}, 0.05},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.bounds.VisiblePercentage(screenW, screenH)
+			diff := got - tt.expected
+			if diff < -0.01 || diff > 0.01 {
+				t.Errorf("Bounds%+v.VisiblePercentage(%d, %d) = %f, want %f",
+					tt.bounds, screenW, screenH, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestBounds_CenterInside(t *testing.T) {
 	outer := Bounds{X: 0, Y: 0, Width: 100, Height: 100}
 
@@ -272,6 +309,94 @@ func TestBounds_CenterInside(t *testing.T) {
 				t.Errorf("Bounds%+v.CenterInside(%+v) = %v, want %v", tt.inner, outer, got, tt.expected)
 			}
 		})
+	}
+}
+
+// --- Unwrap tests ---
+
+// stubDriver is a minimal Driver for testing Unwrap.
+type stubDriver struct{}
+
+func (s *stubDriver) Execute(step flow.Step) *CommandResult  { return nil }
+func (s *stubDriver) Screenshot() ([]byte, error)            { return nil, nil }
+func (s *stubDriver) Hierarchy() ([]byte, error)             { return nil, nil }
+func (s *stubDriver) GetState() *StateSnapshot               { return nil }
+func (s *stubDriver) GetPlatformInfo() *PlatformInfo         { return nil }
+func (s *stubDriver) SetFindTimeout(ms int)                  {}
+func (s *stubDriver) SetWaitForIdleTimeout(ms int) error     { return nil }
+
+// wrappingDriver wraps another driver and implements Inner().
+type wrappingDriver struct {
+	inner Driver
+}
+
+func (w *wrappingDriver) Execute(step flow.Step) *CommandResult  { return nil }
+func (w *wrappingDriver) Screenshot() ([]byte, error)            { return nil, nil }
+func (w *wrappingDriver) Hierarchy() ([]byte, error)             { return nil, nil }
+func (w *wrappingDriver) GetState() *StateSnapshot               { return nil }
+func (w *wrappingDriver) GetPlatformInfo() *PlatformInfo         { return nil }
+func (w *wrappingDriver) SetFindTimeout(ms int)                  {}
+func (w *wrappingDriver) SetWaitForIdleTimeout(ms int) error     { return nil }
+func (w *wrappingDriver) Inner() Driver                          { return w.inner }
+
+func TestUnwrap_NoWrapper(t *testing.T) {
+	d := &stubDriver{}
+	got := Unwrap(d)
+	if got != d {
+		t.Error("Unwrap on non-wrapper should return the same driver")
+	}
+}
+
+func TestUnwrap_SingleLayer(t *testing.T) {
+	inner := &stubDriver{}
+	wrapper := &wrappingDriver{inner: inner}
+	got := Unwrap(wrapper)
+	if got != inner {
+		t.Error("Unwrap should return the inner driver from a single wrapper")
+	}
+}
+
+func TestUnwrap_DoubleLayer(t *testing.T) {
+	innermost := &stubDriver{}
+	mid := &wrappingDriver{inner: innermost}
+	outer := &wrappingDriver{inner: mid}
+	got := Unwrap(outer)
+	if got != innermost {
+		t.Error("Unwrap should unwrap through multiple layers to the innermost driver")
+	}
+}
+
+// sessionEnsurerDriver is a driver that also implements SessionEnsurer.
+type sessionEnsurerDriver struct {
+	stubDriver
+	ensureCalled bool
+	lastAppID    string
+}
+
+func (s *sessionEnsurerDriver) EnsureSession(appID string) error {
+	s.ensureCalled = true
+	s.lastAppID = appID
+	return nil
+}
+
+func TestUnwrap_ExposesSessionEnsurer(t *testing.T) {
+	inner := &sessionEnsurerDriver{}
+	wrapper := &wrappingDriver{inner: inner}
+
+	unwrapped := Unwrap(wrapper)
+	ensurer, ok := unwrapped.(SessionEnsurer)
+	if !ok {
+		t.Fatal("Unwrap should expose SessionEnsurer from inner driver")
+	}
+
+	if err := ensurer.EnsureSession("com.example.app"); err != nil {
+		t.Fatalf("EnsureSession returned error: %v", err)
+	}
+	if !inner.ensureCalled {
+		t.Error("EnsureSession was not called on the inner driver")
+	}
+	if inner.lastAppID != "com.example.app" {
+		t.Errorf("EnsureSession appID = %q, want %q", inner.lastAppID, "com.example.app")
 	}
 }
 

@@ -61,7 +61,7 @@ func Wrap(inner core.Driver, client *VMServiceClient, dev DeviceExecutor, appID,
 // No port forwarding needed — the VM Service listens on localhost directly.
 func WrapIOS(inner core.Driver, client *VMServiceClient, udid, appID string) core.Driver {
 	return &FlutterDriver{
-		inner: inner,
+		inner:  inner,
 		client: client,
 		appID:  appID,
 		udid:   udid,
@@ -79,9 +79,7 @@ func (d *FlutterDriver) Execute(step flow.Step) *core.CommandResult {
 	// If the app was already determined to be non-Flutter, don't retry.
 	if _, ok := step.(*flow.LaunchAppStep); ok {
 		if d.client != nil {
-			if err := d.client.Close(); err != nil {
-				logger.Debug("Flutter VM service close failed during launchApp reset: %v", err)
-			}
+			d.client.Close()
 			d.client = nil
 			d.attempted = false // Was Flutter before — re-discover after restart
 		}
@@ -543,9 +541,9 @@ func extractSelector(step flow.Step) *flow.Selector {
 
 // --- Pass-through methods ---
 
-func (d *FlutterDriver) Screenshot() ([]byte, error)       { return d.inner.Screenshot() }
-func (d *FlutterDriver) Hierarchy() ([]byte, error)         { return d.inner.Hierarchy() }
-func (d *FlutterDriver) GetState() *core.StateSnapshot      { return d.inner.GetState() }
+func (d *FlutterDriver) Screenshot() ([]byte, error)         { return d.inner.Screenshot() }
+func (d *FlutterDriver) Hierarchy() ([]byte, error)          { return d.inner.Hierarchy() }
+func (d *FlutterDriver) GetState() *core.StateSnapshot       { return d.inner.GetState() }
 func (d *FlutterDriver) GetPlatformInfo() *core.PlatformInfo { return d.inner.GetPlatformInfo() }
 func (d *FlutterDriver) SetFindTimeout(ms int) {
 	d.findTimeoutMs = ms
@@ -584,3 +582,6 @@ func (d *FlutterDriver) DetectWebView() (*core.WebViewInfo, error) {
 	}
 	return nil, fmt.Errorf("inner driver does not support DetectWebView")
 }
+
+// Inner returns the underlying driver for optional interface access.
+func (d *FlutterDriver) Inner() core.Driver { return d.inner }

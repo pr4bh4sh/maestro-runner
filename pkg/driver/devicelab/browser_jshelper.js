@@ -1,3 +1,10 @@
+(function() {
+  // Override alert/confirm/prompt — on page-level Chrome Android CDP connections,
+  // a native dialog freezes ALL CDP commands including Page.handleJavaScriptDialog.
+  window.alert = function(msg) { console.log('[maestro] alert suppressed: ' + msg); };
+  window.confirm = function(msg) { console.log('[maestro] confirm suppressed: ' + msg); return true; };
+  window.prompt = function(msg, def) { console.log('[maestro] prompt suppressed: ' + msg); return def || ''; };
+
 window.__maestro = {
   findByText: function(text) {
     var lower = text.toLowerCase();
@@ -25,17 +32,13 @@ window.__maestro = {
     return best;
   },
 
-  // Visibility check: returns true if element is visible in the page.
   _isElementVisible: function(el) {
     if (!el || !el.isConnected) return false;
-    // Check offsetParent (null means display:none, except for body/html/fixed)
     if (el.offsetParent === null) {
       var style = window.getComputedStyle(el);
       if (style.display === 'none') return false;
       if (style.visibility === 'hidden') return false;
-      // Fixed/sticky elements have null offsetParent but can be visible
       if (style.position !== 'fixed' && style.position !== 'sticky') {
-        // Check if it's body/html
         var tag = el.tagName.toLowerCase();
         if (tag !== 'body' && tag !== 'html') return false;
       }
@@ -47,31 +50,6 @@ window.__maestro = {
     return true;
   },
 
-  // Find elements matching selector config and return true if any are visible.
-  // selectorType: "text", "id", "css", "textContains", "textRegex", or attribute types
-  _isAnyVisible: function(selectorType, selectorValue) {
-    var self = this;
-    var elements = self._findMatchingElements(selectorType, selectorValue);
-    for (var i = 0; i < elements.length; i++) {
-      if (self._isElementVisible(elements[i])) return true;
-    }
-    return false;
-  },
-
-  // Filter to deepest elements: remove any element that is an ancestor of another match.
-  // This ensures text-based visibility checks use the actual text-bearing element,
-  // not a parent whose textContent includes hidden children's text.
-  _filterToDeepest: function(elements) {
-    if (elements.length <= 1) return elements;
-    return elements.filter(function(el) {
-      for (var i = 0; i < elements.length; i++) {
-        if (elements[i] !== el && el.contains(elements[i])) return false;
-      }
-      return true;
-    });
-  },
-
-  // Find all elements matching a selector.
   _findMatchingElements: function(selectorType, selectorValue) {
     var results = [];
     switch (selectorType) {
@@ -113,7 +91,6 @@ window.__maestro = {
             results.push(el);
           }
         }
-        results = this._filterToDeepest(results);
         break;
       }
       case 'textContains': {
@@ -123,7 +100,6 @@ window.__maestro = {
           var t = (all[i].textContent || '').trim().toLowerCase();
           if (t.indexOf(lower) !== -1) results.push(all[i]);
         }
-        results = this._filterToDeepest(results);
         break;
       }
       case 'textRegex': {
@@ -136,7 +112,6 @@ window.__maestro = {
             if (re.test(t) || re.test(label)) results.push(all[i]);
           }
         } catch(e) {}
-        results = this._filterToDeepest(results);
         break;
       }
       case 'role': {
@@ -148,20 +123,38 @@ window.__maestro = {
     return results;
   },
 
-  // RAF-based polling: waits until no matching element is visible or timeout.
-  // Returns a promise that resolves to true (element gone) or false (still visible at timeout).
+  _isAnyVisible: function(selectorType, selectorValue) {
+    var self = this;
+    var elements = self._findMatchingElements(selectorType, selectorValue);
+    for (var i = 0; i < elements.length; i++) {
+      if (self._isElementVisible(elements[i])) return true;
+    }
+    return false;
+  },
+
+  // Find first visible element matching selector. Returns the element or null.
+  findVisible: function(selectorType, selectorValue) {
+    var self = this;
+    var elements = self._findMatchingElements(selectorType, selectorValue);
+    // Pick deepest visible element (most specific)
+    var best = null, bestDepth = -1;
+    for (var i = 0; i < elements.length; i++) {
+      if (!self._isElementVisible(elements[i])) continue;
+      var d = 0, n = elements[i];
+      while (n.parentElement) { d++; n = n.parentElement; }
+      if (d > bestDepth) { best = elements[i]; bestDepth = d; }
+    }
+    return best;
+  },
+
   waitForNotVisible: function(selectorType, selectorValue, timeoutMs) {
     var self = this;
     return new Promise(function(resolve) {
       var deadline = Date.now() + timeoutMs;
-
-      // Quick check: already not visible?
       if (!self._isAnyVisible(selectorType, selectorValue)) {
         resolve(true);
         return;
       }
-
-      // RAF polling loop
       function check() {
         if (!self._isAnyVisible(selectorType, selectorValue)) {
           resolve(true);
@@ -177,20 +170,14 @@ window.__maestro = {
     });
   },
 
-  // RAF-based polling: waits until a matching element is visible or timeout.
-  // Returns a promise that resolves to true (element visible) or false (not found at timeout).
   waitForVisible: function(selectorType, selectorValue, timeoutMs) {
     var self = this;
     return new Promise(function(resolve) {
       var deadline = Date.now() + timeoutMs;
-
-      // Quick check: already visible?
       if (self._isAnyVisible(selectorType, selectorValue)) {
         resolve(true);
         return;
       }
-
-      // RAF polling loop
       function check() {
         if (self._isAnyVisible(selectorType, selectorValue)) {
           resolve(true);
@@ -206,3 +193,4 @@ window.__maestro = {
     });
   }
 };
+})();

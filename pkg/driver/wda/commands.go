@@ -186,19 +186,29 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 }
 
 func (d *Driver) assertNotVisible(step *flow.AssertNotVisibleStep) *core.CommandResult {
-	// Poll to confirm element stays invisible
-	// Default 5s aligns closer to Maestro's optionalLookupTimeoutMs (7s)
+	// Poll with quick checks, waiting for element to disappear.
+	// Each check is a single lookup (no retries). If element is not found
+	// at any point, we pass immediately. If still visible at timeout, fail.
 	timeoutMs := step.TimeoutMs
 	if timeoutMs <= 0 {
 		timeoutMs = 5000
 	}
 
-	info, err := d.findElement(step.Selector, true, timeoutMs)
-	if err != nil || info == nil {
-		return successResult("Element is not visible", nil)
-	}
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	pollInterval := 500 * time.Millisecond
 
-	return errorResult(fmt.Errorf("element is visible"), fmt.Sprintf("Element should not be visible: %s", selectorDesc(step.Selector)))
+	for {
+		info, err := d.findElementOnce(step.Selector)
+		if err != nil || info == nil {
+			return successResult("Element is not visible", nil)
+		}
+
+		if time.Now().After(deadline) {
+			return errorResult(fmt.Errorf("element is visible"), fmt.Sprintf("Element should not be visible: %s", selectorDesc(step.Selector)))
+		}
+
+		time.Sleep(pollInterval)
+	}
 }
 
 // Input commands
@@ -405,7 +415,8 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 	// "scroll down" means reveal content below, which requires swiping UP
 	// Maestro: ScrollDirection.DOWN -> SwipeDirection.UP
 	var fromX, fromY, toX, toY float64
-	switch step.Direction {
+	dir := strings.ToLower(step.Direction)
+	switch dir {
 	case "up":
 		// Scroll up = reveal top content = swipe DOWN
 		fromX, fromY = centerX, centerY-scrollDistance/2
@@ -517,31 +528,39 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 			}
 		}
 
-		centerX := areaX + areaW/2
-		centerY := areaY + areaH/2
-		swipeDistance := areaH / 3
-
-		switch strings.ToLower(step.Direction) {
+		// Swipe coordinates match Maestro iOS behavior:
+		// LEFT:  90%→10% of width,  centered vertically
+		// RIGHT: 10%→90% of width,  centered vertically
+		// UP:    centered horizontally, 90%→10% of height
+		// DOWN:  centered horizontally, 20%→90% of height
+		dir := strings.ToLower(step.Direction)
+		switch dir {
 		case "up":
-			fromX, fromY = centerX, centerY+swipeDistance/2
-			toX, toY = centerX, centerY-swipeDistance/2
+			fromX = areaX + areaW*0.5
+			fromY = areaY + areaH*0.9
+			toX = areaX + areaW*0.5
+			toY = areaY + areaH*0.1
 		case "down":
-			fromX, fromY = centerX, centerY-swipeDistance/2
-			toX, toY = centerX, centerY+swipeDistance/2
+			fromX = areaX + areaW*0.5
+			fromY = areaY + areaH*0.2
+			toX = areaX + areaW*0.5
+			toY = areaY + areaH*0.9
 		case "left":
-			swipeDistance = areaW / 3
-			fromX, fromY = centerX+swipeDistance/2, centerY
-			toX, toY = centerX-swipeDistance/2, centerY
+			fromX = areaX + areaW*0.9
+			fromY = areaY + areaH*0.5
+			toX = areaX + areaW*0.1
+			toY = areaY + areaH*0.5
 		case "right":
-			swipeDistance = areaW / 3
-			fromX, fromY = centerX-swipeDistance/2, centerY
-			toX, toY = centerX+swipeDistance/2, centerY
+			fromX = areaX + areaW*0.1
+			fromY = areaY + areaH*0.5
+			toX = areaX + areaW*0.9
+			toY = areaY + areaH*0.5
 		default:
 			return errorResult(fmt.Errorf("invalid direction: %s", step.Direction), "Invalid swipe direction")
 		}
 	}
 
-	duration := 0.3
+	duration := 0.1
 	if step.Duration > 0 {
 		duration = float64(step.Duration) / 1000.0
 	}
@@ -623,7 +642,7 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 	needPerms := d.udid != "" && d.info.IsSimulator && !hasAllValue(permissions, "unset")
 
 	if step.ClearState {
-		_ = d.client.TerminateApp(bundleID)
+		_ = d.terminateApp(bundleID)
 
 		if needPerms {
 			// Run uninstall+install and permission resets concurrently
@@ -756,27 +775,32 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 	hasArgs := len(launchArgs) > 0 || len(launchEnv) > 0
 
 	// If no session exists, create one (which also launches the app)
+	newSession := false
 	if !d.client.HasSession() {
 		if err := d.client.CreateSession(bundleID, d.alertAction); err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to create session for app: %s", bundleID))
 		}
-		// Single UpdateSettings call: disable quiescence (prevents XCTest crashes)
-		// and set alert button selectors for permission dialogs
-		sessionSettings := map[string]interface{}{
-			"shouldWaitForQuiescence": false,
-			"waitForIdleTimeout":      0,
-		}
-		if d.alertAction == "accept" {
-			sessionSettings["acceptAlertButtonSelector"] = "**/XCUIElementTypeButton[`label BEGINSWITH[c] 'Allow' OR label ==[c] 'OK'`]"
-		} else if d.alertAction == "dismiss" {
-			sessionSettings["dismissAlertButtonSelector"] = "**/XCUIElementTypeButton[`label CONTAINS[c] 'Don't Allow' OR label CONTAINS[c] 'Dont Allow'`]"
-		}
-		_ = d.client.UpdateSettings(sessionSettings)
-		// If no arguments/environment, the session creation already launched the app
-		if !hasArgs {
-			return successResult(fmt.Sprintf("Launched app: %s", bundleID), nil)
-		}
-		// Fall through to LaunchAppWithArgs to relaunch with arguments
+		newSession = true
+	}
+
+	// Always update settings — ensures alert config is correct even when
+	// reusing a session from a previous flow with different permissions.
+	sessionSettings := map[string]interface{}{
+		"shouldWaitForQuiescence": false,
+		"waitForIdleTimeout":      0,
+		"defaultAlertAction":      d.alertAction,
+	}
+	if d.alertAction == "accept" {
+		sessionSettings["acceptAlertButtonSelector"] = "**/XCUIElementTypeButton[`label BEGINSWITH[c] 'Allow' OR label ==[c] 'OK'`]"
+	} else if d.alertAction == "dismiss" {
+		sessionSettings["dismissAlertButtonSelector"] = "**/XCUIElementTypeButton[`label CONTAINS[c] 'Don't Allow' OR label CONTAINS[c] 'Dont Allow'`]"
+	}
+	_ = d.client.UpdateSettings(sessionSettings)
+
+	// If we just created a session and no args needed, we're done
+	// (CreateSession already launched the app)
+	if newSession && !hasArgs {
+		return successResult(fmt.Sprintf("Launched app: %s", bundleID), nil)
 	}
 
 	// Terminate the app first so WDA calls launch (not activate),
@@ -799,7 +823,7 @@ func (d *Driver) stopApp(step *flow.StopAppStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("bundleID required"), "Bundle ID is required for stopApp")
 	}
 
-	if err := d.client.TerminateApp(bundleID); err != nil {
+	if err := d.terminateApp(bundleID); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to stop app: %s", bundleID))
 	}
 
@@ -812,11 +836,36 @@ func (d *Driver) killApp(step *flow.KillAppStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("bundleID required"), "Bundle ID is required for killApp")
 	}
 
-	if err := d.client.TerminateApp(bundleID); err != nil {
+	if err := d.terminateApp(bundleID); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to kill app: %s", bundleID))
 	}
 
 	return successResult(fmt.Sprintf("Killed app: %s", bundleID), nil)
+}
+
+// terminateApp terminates an app via WDA session if available, otherwise falls back
+// to xcrun simctl terminate (simulators) or devicectl (real devices).
+// This handles the case where stopApp/killApp is called before any launchApp
+// (e.g. "- stopApp" as the first step in a flow).
+func (d *Driver) terminateApp(bundleID string) error {
+	if d.client.HasSession() {
+		return d.client.TerminateApp(bundleID)
+	}
+
+	// No WDA session — fall back to device-level terminate
+	if d.info != nil && d.info.IsSimulator {
+		cmd := exec.Command("xcrun", "simctl", "terminate", d.udid, bundleID)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			// Ignore errors — app might not be running
+			logger.Debug("simctl terminate %s: %v: %s", bundleID, err, string(output))
+		}
+		return nil
+	}
+
+	// Real device without session — nothing we can do, succeed silently.
+	// The next launchApp will create a session and handle it.
+	logger.Debug("no WDA session for terminateApp on real device, skipping")
+	return nil
 }
 
 func (d *Driver) clearState(step *flow.ClearStateStep) *core.CommandResult {
@@ -826,7 +875,7 @@ func (d *Driver) clearState(step *flow.ClearStateStep) *core.CommandResult {
 	}
 
 	// Terminate app first
-	_ = d.client.TerminateApp(bundleID)
+	_ = d.terminateApp(bundleID)
 
 	return d.clearAppState(bundleID)
 }

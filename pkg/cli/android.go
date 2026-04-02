@@ -459,7 +459,7 @@ func createDeviceLabDriver(cfg *RunConfig, dev *device.AndroidDevice, info devic
 		}
 	})
 
-	// Wire WebView CDP support (Rod/CDP for element finding in WebViews)
+	// Enable WebView CDP element finding via ADB socket forwarding
 	driver.SetWebViewForwarder(dev)
 
 	cleanup := func() {

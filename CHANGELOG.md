@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-03-25
+
+### Added
+- **WebView CDP support for Android** — the DeviceLab driver now connects to WebViews via Chrome DevTools Protocol for element finding and JavaScript execution, instead of relying solely on the native UiAutomator accessibility tree
+  ```bash
+  # Automatic — when a WebView is detected, CDP is used transparently
+  maestro-runner --driver devicelab test webview-flow.yaml
+  ```
+- **Chrome browser CDP on Android** — the DeviceLab driver can now automate Chrome browser on Android devices via CDP, enabling web testing on real Android devices
+- **`evalWebViewScript` command** — execute inline JavaScript in a mobile WebView via CDP. Returns the result as a string, optionally stored in an output variable
+  ```yaml
+  # Inline script
+  - evalWebViewScript: "return document.title"
+
+  # With output variable
+  - evalWebViewScript:
+      script: "return document.querySelector('#price').textContent"
+      output: price
+
+  # Use the result
+  - assertTrue: ${price == '$7.50'}
+  ```
+- **`runWebViewScript` command** — load and execute a JavaScript file in a mobile WebView via CDP. Supports environment variables injected as `window.__env`
+  ```yaml
+  # Simple file execution
+  - runWebViewScript: scripts/extract-data.js
+
+  # With environment variables and output
+  - runWebViewScript:
+      file: scripts/validate-cart.js
+      env:
+        EXPECTED_TOTAL: "29.99"
+      output: validationResult
+  ```
+- **Network idle detection and DOM stability waits** — after navigations (in both browser and WebView contexts), maestro-runner now waits for network idle and DOM stability before proceeding, reducing flakiness on pages with async loading
+- **CDP RAF-based visibility polling** — browser commands now use `requestAnimationFrame`-based polling for element visibility, improving reliability for dynamically rendered content
+- **CDP `<select>` option support** — `tapOn` with option elements now correctly selects the option via JavaScript instead of attempting a click
+- **CDP JS click fallback** — when a native click fails on a browser element, falls back to JavaScript `.click()` for better reliability with overlapping elements
+
+### Changed
+- Default WDA swipe duration changed from 300ms to 100ms for faster, more responsive swipe gestures on iOS
+- JavaScript helper code extracted from Go string literals into dedicated embedded `.js` files for easier maintenance ([#37](https://github.com/devicelab-dev/maestro-runner/pull/37))
+
+### Fixed
+- **Swipe coordinates now match Maestro behavior** across all drivers (UIAutomator2, DeviceLab, WDA, Appium) — previously, swipe start/end positions differed from Maestro's implementation
+- **`assertNotVisible` now correctly polls for disappearance** instead of polling for appearance — previously, the command would pass immediately if the element wasn't visible, without waiting for it to disappear after an action
+- **Filter out-of-bounds elements from page source searches** — elements with coordinates outside the visible screen bounds are now excluded from search results, preventing false matches on off-screen elements ([#39](https://github.com/devicelab-dev/maestro-runner/issues/39))
+- **Text node attribute error** — fixed `TypeError: this.getAttribute is not a function` when browser CDP encounters text nodes that don't have HTML attributes ([#35](https://github.com/devicelab-dev/maestro-runner/issues/35), [#36](https://github.com/devicelab-dev/maestro-runner/pull/36))
+- **iOS WDA session lifecycle** — improved driver reliability with better session creation, cleanup, and error recovery
+- **`--team-id` no longer required for auto-detected simulators** — when a booted simulator is auto-detected, `--team-id` is automatically skipped since simulators don't need code signing
+  ```bash
+  # Before: required --team-id even when simulator is already booted
+  # Now: just works
+  maestro-runner --platform ios test flow.yaml
+  ```
+- **Flutter reconnection** — skip retries for non-Flutter apps instead of wasting time on connection attempts. Non-Flutter apps now pay zero retry cost
+- **WebView CDP forwarder** — wired `SetWebViewForwarder` in the DeviceLab driver, which was never connected — elements were previously found only via native UiAutomator accessibility tree even when a WebView was present
+- **hideKeyboard reliability** — on-device agent now uses `KEYCODE_ESCAPE` first (keyboard-only, no navigation side-effects), falls back to `KEYCODE_BACK` if needed. Retries up to 3 times with keyboard visibility polling
+- **In-WebView navigation** — when visibility check fails during in-WebView page navigation (JS context destroyed), refreshes page reference and retries instead of skipping CDP entirely
+- **CDP text match filtering** — text-based visibility checks (`text`, `textContains`, `textRegex`) now filter to the deepest matching element, preventing false positives from ancestor elements whose `textContent` includes hidden children's text
+
+### Contributors
+
+[@tmahesh](https://github.com/tmahesh)
+1. Fixed text node attribute error in browser CDP ([#36](https://github.com/devicelab-dev/maestro-runner/pull/36))
+2. Refactored JS helper code into embedded files ([#37](https://github.com/devicelab-dev/maestro-runner/pull/37))
+
+[@mahesh-e27](https://github.com/mahesh-e27)
+1. Reported text node attribute bug in browser CDP ([#35](https://github.com/devicelab-dev/maestro-runner/issues/35))
+
+[@sircharleswatson](https://github.com/sircharleswatson)
+1. Reported `assertVisible` passing for off-screen text in browser ([#39](https://github.com/devicelab-dev/maestro-runner/issues/39))
+
+[@satishs22](https://github.com/satishs22)
+1. Reported `tapOn` timeout issue on Android emulator ([#25](https://github.com/devicelab-dev/maestro-runner/issues/25))
+
+[@chrisjin-swipe](https://github.com/chrisjin-swipe)
+1. Reported `inputText` character skipping on Android ([#32](https://github.com/devicelab-dev/maestro-runner/issues/32))
+
 ## [1.0.9] - 2026-03-11
 
 ### Added
