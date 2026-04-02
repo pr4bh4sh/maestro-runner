@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devicelab-dev/maestro-runner/pkg/cloud"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/device"
@@ -472,6 +473,10 @@ type RunConfig struct {
 
 	// Flutter
 	NoFlutterFallback bool // Disable automatic Flutter VM Service fallback
+
+	// Cloud provider (detected from AppiumURL, nil if not a cloud provider)
+	CloudProvider cloud.Provider
+	CloudMeta     map[string]string
 }
 
 func hyperlink(url, text string) string {
@@ -842,6 +847,31 @@ func executeTest(cfg *RunConfig) error {
 	if err := report.GenerateAllure(cfg.OutputDir); err != nil {
 		allureGenerated = false
 		fmt.Printf("  %s⚠%s Warning: failed to generate Allure report: %v\n", color(colorYellow), color(colorReset), err)
+	}
+
+	// Report result to cloud provider (if detected)
+	if cfg.CloudProvider != nil {
+		cloudResult := &cloud.TestResult{
+			Passed:      result.Status == report.StatusPassed,
+			Total:       result.TotalFlows,
+			PassedCount: result.PassedFlows,
+			FailedCount: result.FailedFlows,
+			Duration:    result.Duration,
+			OutputDir:   cfg.OutputDir,
+		}
+		for _, f := range result.FlowResults {
+			cloudResult.Flows = append(cloudResult.Flows, cloud.FlowResult{
+				Name:     f.Name,
+				Passed:   f.Status == report.StatusPassed,
+				Duration: f.Duration,
+				Error:    f.Error,
+			})
+		}
+		if err := cfg.CloudProvider.ReportResult(cfg.AppiumURL, cfg.CloudMeta, cloudResult); err != nil {
+			logger.Warn("%s result reporting failed: %v", cfg.CloudProvider.Name(), err)
+		} else {
+			logger.Info("%s job updated: passed=%v", cfg.CloudProvider.Name(), cloudResult.Passed)
+		}
 	}
 
 	// Display reports section as a directory tree
@@ -1647,6 +1677,15 @@ func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		return nil, nil, fmt.Errorf("create Appium session: %w", err)
 	}
 	logger.Info("Appium session created successfully: %s", driver.GetPlatformInfo().DeviceID)
+
+	// Detect cloud provider and extract metadata
+	if p := cloud.Detect(cfg.AppiumURL); p != nil {
+		cfg.CloudProvider = p
+		cfg.CloudMeta = make(map[string]string)
+		p.ExtractMeta(driver.SessionID(), driver.SessionCaps(), cfg.CloudMeta)
+		logger.Info("Cloud provider detected: %s", p.Name())
+	}
+
 	printSetupSuccess("Appium session created")
 
 	// Cleanup function
