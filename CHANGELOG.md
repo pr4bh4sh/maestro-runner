@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-04-06
+
+### Added
+- **Cloud provider abstraction** — automatic detection and result reporting for cloud device providers (Sauce Labs, BrowserStack, LambdaTest, etc.) when using the Appium driver. Test pass/fail status, flow results, and metadata are reported to the provider after the run completes. Based on [@eyaly](https://github.com/eyaly)'s Sauce Labs integration ([#43](https://github.com/devicelab-dev/maestro-runner/pull/43), [#45](https://github.com/devicelab-dev/maestro-runner/pull/45))
+  ```bash
+  # Sauce Labs — automatically detected from the Appium URL
+  maestro-runner --driver appium --appium-url "https://ondemand.us-west-1.saucelabs.com/wd/hub" \
+    --caps caps.json test flows/
+  ```
+- **Source file path in FlowResult** — each flow result now includes the path to the source YAML file, used by cloud providers and report consumers
+
+### Changed
+- Updated DeviceLab Android driver APK with latest on-device agent
+- Airplane mode commands now use `cmd connectivity airplane-mode enable/disable` (Android 11+) instead of the legacy `settings put global airplane_mode_on` approach
+
+### Fixed
+- **CDP `waitForPageReady` crash** — replaced panicking `MustWaitLoad()` with error-handling `WaitLoad()` in the browser CDP driver, preventing test run crashes on pages with deeply nested object references
+- Removed unused `freePort()` function from DeviceLab WebView driver
+- Removed unused regex variables (`reLabel`, `reHint`, `reValue`) from Flutter semantics parser
+- Tightened variable scope in Flutter widget tree parser
+
+### Contributors
+
+[@eyaly](https://github.com/eyaly)
+1. Implemented original Sauce Labs pass/fail reporting integration ([#43](https://github.com/devicelab-dev/maestro-runner/pull/43)), which formed the basis for the cloud provider abstraction in [#45](https://github.com/devicelab-dev/maestro-runner/pull/45)
+
 ## [1.1.0] - 2026-03-25
 
 ### Added
