@@ -25,6 +25,9 @@ type Client struct {
 	sessionCaps  map[string]interface{} // merged capabilities from session response
 	client       *http.Client
 	platform     string // ios, android
+	deviceName   string // e.g., "Pixel 8", "iPhone 15 Pro"
+	deviceUDID   string // device identifier from session
+	osVersion    string // e.g., "14", "17.0"
 	screenW      int
 	screenH      int
 	isRealDevice bool // true for physical devices, false for simulators
@@ -84,11 +87,32 @@ func (c *Client) Connect(capabilities map[string]interface{}) error {
 		return fmt.Errorf("no session ID in response")
 	}
 
-	// Extract platform and device type from capabilities
+	// Extract platform, device info, and device type from capabilities
 	if caps, ok := value["capabilities"].(map[string]interface{}); ok {
 		c.sessionCaps = caps
 		if platform, ok := caps["platformName"].(string); ok {
 			c.platform = strings.ToLower(platform)
+		}
+		// Extract device name from session caps
+		for _, key := range []string{"deviceName", "appium:deviceName", "device"} {
+			if name, ok := caps[key].(string); ok && name != "" {
+				c.deviceName = name
+				break
+			}
+		}
+		// Extract device UDID from session caps
+		for _, key := range []string{"udid", "appium:udid", "deviceUDID"} {
+			if udid, ok := caps[key].(string); ok && udid != "" {
+				c.deviceUDID = udid
+				break
+			}
+		}
+		// Extract OS version from session caps
+		for _, key := range []string{"platformVersion", "appium:platformVersion"} {
+			if ver, ok := caps[key].(string); ok && ver != "" {
+				c.osVersion = ver
+				break
+			}
 		}
 		// Detect real device vs simulator from session response
 		if isReal, ok := caps["isRealDevice"].(bool); ok {
@@ -186,6 +210,21 @@ func (c *Client) SessionCaps() map[string]interface{} {
 // Platform returns the platform (ios/android).
 func (c *Client) Platform() string {
 	return c.platform
+}
+
+// DeviceName returns the device name from session caps (e.g., "Pixel 8", "iPhone 15 Pro").
+func (c *Client) DeviceName() string {
+	return c.deviceName
+}
+
+// DeviceUDID returns the device UDID from session caps.
+func (c *Client) DeviceUDID() string {
+	return c.deviceUDID
+}
+
+// OSVersion returns the OS version from session caps (e.g., "14", "17.0").
+func (c *Client) OSVersion() string {
+	return c.osVersion
 }
 
 // IsRealDevice returns true for physical devices, false for simulators/emulators.

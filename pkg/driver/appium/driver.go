@@ -225,6 +225,10 @@ func (d *Driver) GetPlatformInfo() *core.PlatformInfo {
 	w, h := d.client.ScreenSize()
 	return &core.PlatformInfo{
 		Platform:     d.platform,
+		DeviceName:   d.client.DeviceName(),
+		DeviceID:     d.client.DeviceUDID(),
+		OSVersion:    d.client.OSVersion(),
+		IsSimulator:  !d.client.IsRealDevice(),
 		ScreenWidth:  w,
 		ScreenHeight: h,
 		AppID:        d.appID,
