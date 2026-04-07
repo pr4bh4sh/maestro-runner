@@ -78,6 +78,11 @@ var GlobalFlags = []cli.Flag{
 		EnvVars: []string{"MAESTRO_TEAM_ID", "DEVELOPMENT_TEAM"},
 	},
 	&cli.StringFlag{
+		Name:    "wda-bundle-id",
+		Usage:   "Custom WDA bundle identifier for code signing (iOS)",
+		EnvVars: []string{"MAESTRO_WDA_BUNDLE_ID"},
+	},
+	&cli.StringFlag{
 		Name:    "start-emulator",
 		Usage:   "Start Android emulator with AVD name (e.g., Pixel_7_API_33)",
 		EnvVars: []string{"MAESTRO_START_EMULATOR"},

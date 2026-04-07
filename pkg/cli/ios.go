@@ -97,7 +97,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	// 3. Create WDA runner
 	printSetupStep("Building WDA...")
 	logger.Info("Building WDA for device %s (team ID: %s)", udid, cfg.TeamID)
-	runner := wdadriver.NewRunner(udid, cfg.TeamID)
+	runner := wdadriver.NewRunner(udid, cfg.TeamID, cfg.WDABundleID)
 	ctx := context.Background()
 
 	if err := runner.Build(ctx); err != nil {

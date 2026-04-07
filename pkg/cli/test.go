@@ -459,6 +459,7 @@ type RunConfig struct {
 	WaitForIdleTimeout int    // Wait for device idle in ms (0 = disabled, default 200)
 	TypingFrequency    int    // WDA typing frequency in keys/sec (0 = use WDA default of 60)
 	TeamID             string // Apple Development Team ID for WDA code signing
+	WDABundleID        string // Custom WDA bundle identifier
 
 	// Emulator/Simulator management
 	StartEmulator     string // AVD name to start (e.g., Pixel_7_API_33)
@@ -627,6 +628,7 @@ func runTest(c *cli.Context) error {
 		WaitForIdleTimeout: getInt("wait-for-idle-timeout"),
 		TypingFrequency:    getInt("typing-frequency"),
 		TeamID:             getString("team-id"),
+		WDABundleID:        getString("wda-bundle-id"),
 		StartEmulator:      getString("start-emulator"),
 		StartSimulator:     getString("start-simulator"),
 		AutoStartEmulator:  getBool("auto-start-emulator"),
