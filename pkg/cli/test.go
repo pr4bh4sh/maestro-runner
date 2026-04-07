@@ -1225,6 +1225,10 @@ func executeFlowsWithMode(cfg *RunConfig, flows []flow.Flow, needsParallel bool,
 		if count <= 1 {
 			return executeAppiumSingleSession(cfg, flows)
 		}
+		// Don't create more sessions than flows
+		if count > len(flows) {
+			count = len(flows)
+		}
 		return executeAppiumParallel(cfg, count, flows)
 	}
 

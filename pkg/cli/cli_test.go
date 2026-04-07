@@ -1441,7 +1441,8 @@ func TestExecuteFlowsWithMode_AppiumParallel(t *testing.T) {
 		Driver:   "appium",
 		Parallel: 2,
 	}
-	_, err := executeFlowsWithMode(cfg, nil, true, []string{"appium-1", "appium-2"})
+	testFlows := []flow.Flow{{}, {}} // need flows so min(parallel, flows) > 0
+	_, err := executeFlowsWithMode(cfg, testFlows, true, []string{"appium-1", "appium-2"})
 	if err == nil {
 		t.Error("expected error for parallel Appium with no server URL")
 	}
