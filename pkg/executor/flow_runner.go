@@ -154,6 +154,7 @@ func (fr *FlowRunner) Run() FlowResult {
 				return FlowResult{
 					ID:           fr.detail.ID,
 					Name:         fr.detail.Name,
+					SourceFile:   fr.flow.SourcePath,
 					Status:       report.StatusFailed,
 					Duration:     time.Since(flowStart).Milliseconds(),
 					Error:        errMsg,
@@ -241,6 +242,7 @@ func (fr *FlowRunner) Run() FlowResult {
 	return FlowResult{
 		ID:           fr.detail.ID,
 		Name:         fr.detail.Name,
+		SourceFile:   fr.flow.SourcePath,
 		Status:       flowStatus,
 		Duration:     flowDuration,
 		Error:        flowError,

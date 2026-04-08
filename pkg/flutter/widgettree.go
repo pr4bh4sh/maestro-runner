@@ -186,12 +186,11 @@ func extractSubtree(dump string, pos int) string {
 
 	for i := scanStart; i < len(dump); {
 		nlIdx := strings.Index(dump[i:], "\n")
-		var line string
 		if nlIdx < 0 {
 			subtreeEnd = len(dump)
 			break
 		}
-		line = dump[i : i+nlIdx]
+		line := dump[i : i+nlIdx]
 
 		// Skip empty lines
 		trimmed := strings.TrimSpace(line)

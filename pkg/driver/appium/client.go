@@ -22,6 +22,7 @@ const w3cElementKey = "element-6066-11e4-a52e-4f735466cecf"
 type Client struct {
 	serverURL    string
 	sessionID    string
+	sessionCaps  map[string]interface{} // merged capabilities from session response
 	client       *http.Client
 	platform     string // ios, android
 	screenW      int
@@ -85,6 +86,7 @@ func (c *Client) Connect(capabilities map[string]interface{}) error {
 
 	// Extract platform and device type from capabilities
 	if caps, ok := value["capabilities"].(map[string]interface{}); ok {
+		c.sessionCaps = caps
 		if platform, ok := caps["platformName"].(string); ok {
 			c.platform = strings.ToLower(platform)
 		}
@@ -166,7 +168,19 @@ func (c *Client) Disconnect() error {
 	}
 	_, err := c.delete(c.sessionPath())
 	c.sessionID = ""
+	c.sessionCaps = nil
 	return err
+}
+
+// SessionID returns the Appium/WebDriver session ID.
+func (c *Client) SessionID() string {
+	return c.sessionID
+}
+
+// SessionCaps returns the merged capabilities from the session creation response.
+// These may contain additional fields added by cloud providers (e.g., appium:jobUuid on Sauce Labs).
+func (c *Client) SessionCaps() map[string]interface{} {
+	return c.sessionCaps
 }
 
 // Platform returns the platform (ios/android).

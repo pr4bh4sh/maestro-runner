@@ -73,6 +73,16 @@ func (d *Driver) Close() error {
 	return d.client.Disconnect()
 }
 
+// SessionID returns the Appium/WebDriver session ID.
+func (d *Driver) SessionID() string {
+	return d.client.SessionID()
+}
+
+// SessionCaps returns the merged capabilities from the session creation response.
+func (d *Driver) SessionCaps() map[string]interface{} {
+	return d.client.SessionCaps()
+}
+
 // RestartSession closes the existing Appium session and creates a fresh one.
 func (d *Driver) RestartSession() error {
 	if err := d.client.Disconnect(); err != nil {

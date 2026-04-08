@@ -429,7 +429,7 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 // waitForPageReady waits for the page to finish loading and DOM to stabilize.
 // Used after navigations to handle SPAs that render content after the load event.
 func (d *Driver) waitForPageReady() {
-	d.page.MustWaitLoad()
+	_ = d.page.WaitLoad()
 	p := d.page.Timeout(5 * time.Second)
 	_ = p.WaitDOMStable(300*time.Millisecond, 0)
 	if d.network != nil {

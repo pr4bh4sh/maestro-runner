@@ -1020,17 +1020,6 @@ func cssEscapeID(s string) string {
 	return b.String()
 }
 
-// freePort finds an available TCP port.
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		return 0, err
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port, nil
-}
-
 // unixDialer implements cdp.Dialer for Unix socket connections.
 type unixDialer struct {
 	socketPath string

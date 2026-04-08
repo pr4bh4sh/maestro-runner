@@ -174,6 +174,7 @@ maestro-runner --driver appium --appium-url <HUB_URL> --caps caps.json test flow
 ```
 
 - **[TestingBot](docs/cloud-providers/testingbot.md)** — Setup guide for running on TestingBot's real device cloud
+- **[Sauce Labs](docs/cloud-providers/saucelabs.md)** — Setup guide for running on Sauce Labs Appium cloud
 
 ## Contributing
 

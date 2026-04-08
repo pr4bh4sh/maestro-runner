@@ -73,6 +73,7 @@ type RunResult struct {
 type FlowResult struct {
 	ID           string
 	Name         string
+	SourceFile   string // path to the source YAML file
 	Status       report.Status
 	Duration     int64
 	Error        string
