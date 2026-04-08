@@ -1767,7 +1767,8 @@ func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		logger.Error("Failed to create Appium session: %v", err)
 		return nil, nil, fmt.Errorf("create Appium session: %w", err)
 	}
-	logger.Info("Appium session created successfully: %s", driver.GetPlatformInfo().DeviceID)
+	info := driver.GetPlatformInfo()
+	logger.Info("Appium session created successfully: %s", info.DeviceID)
 
 	// Detect cloud provider and extract metadata
 	if p := cloud.Detect(cfg.AppiumURL); p != nil {
@@ -1777,7 +1778,16 @@ func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		logger.Info("Cloud provider detected: %s", p.Name())
 	}
 
-	printSetupSuccess("Appium session created")
+	// Print session details
+	sessionDetail := fmt.Sprintf("Appium session created (session: %s", driver.SessionID())
+	if info.DeviceName != "" {
+		sessionDetail += fmt.Sprintf(", device: %s", info.DeviceName)
+	}
+	if info.OSVersion != "" {
+		sessionDetail += fmt.Sprintf(", OS: %s %s", info.Platform, info.OSVersion)
+	}
+	sessionDetail += ")"
+	printSetupSuccess(sessionDetail)
 
 	// Cleanup function
 	cleanup := func() {
@@ -2239,11 +2249,18 @@ func createAppiumWorkers(cfg *RunConfig, count int) ([]executor.DeviceWorker, []
 			return nil, nil, fmt.Errorf("failed to create %s: %w", workerID, err)
 		}
 
+		// Extract session ID for parallel output
+		var sessionID string
+		if appDrv, ok := driver.(*appiumdriver.Driver); ok {
+			sessionID = appDrv.SessionID()
+		}
+
 		workers = append(workers, executor.DeviceWorker{
-			ID:       i,
-			DeviceID: workerID,
-			Driver:   driver,
-			Cleanup:  cleanup,
+			ID:        i,
+			DeviceID:  workerID,
+			SessionID: sessionID,
+			Driver:    driver,
+			Cleanup:   cleanup,
 		})
 		cleanups = append(cleanups, cleanup)
 

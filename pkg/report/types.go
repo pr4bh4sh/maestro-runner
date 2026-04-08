@@ -59,6 +59,7 @@ type Device struct {
 	Platform    string `json:"platform"` // ios, android
 	OSVersion   string `json:"osVersion"`
 	Model       string `json:"model,omitempty"`
+	SessionID   string `json:"sessionId,omitempty"` // Appium session ID
 	IsSimulator bool   `json:"isSimulator"`
 }
 

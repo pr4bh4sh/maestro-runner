@@ -13,10 +13,11 @@ import (
 
 // DeviceWorker represents a single device worker that pulls from the queue.
 type DeviceWorker struct {
-	ID       int
-	DeviceID string
-	Driver   core.Driver
-	Cleanup  func()
+	ID        int
+	DeviceID  string
+	SessionID string // Appium session ID (empty for non-Appium drivers)
+	Driver    core.Driver
+	Cleanup   func()
 }
 
 // workItem represents a flow and its index in the original flow list.
@@ -50,8 +51,11 @@ func formatDeviceLabel(device *report.Device) string {
 	if device == nil {
 		return "Unknown"
 	}
-	// For event logs, just show device name
-	return device.Name
+	label := device.Name
+	if device.SessionID != "" {
+		label += " (session: " + device.SessionID + ")"
+	}
+	return label
 }
 
 // formatDuration formats milliseconds as human-readable duration
@@ -140,6 +144,7 @@ func (pr *ParallelRunner) Run(ctx context.Context, flows []flow.Flow) (*RunResul
 				Name:        platformInfo.DeviceName,
 				Platform:    platformInfo.Platform,
 				OSVersion:   platformInfo.OSVersion,
+				SessionID:   w.SessionID,
 				IsSimulator: platformInfo.IsSimulator,
 			}
 
