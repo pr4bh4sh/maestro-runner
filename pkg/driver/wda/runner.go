@@ -29,6 +29,7 @@ const (
 type Runner struct {
 	deviceUDID          string
 	teamID              string
+	wdaBundleID         string
 	port                uint16
 	wdaPath             string
 	buildDir            string
@@ -41,11 +42,12 @@ type Runner struct {
 // NewRunner creates a new WDA runner.
 // The WDA port is derived from the device UDID so each simulator gets a
 // deterministic, unique port without scanning.
-func NewRunner(deviceUDID, teamID string) *Runner {
+func NewRunner(deviceUDID, teamID, wdaBundleID string) *Runner {
 	return &Runner{
-		deviceUDID: deviceUDID,
-		teamID:     teamID,
-		port:       PortFromUDID(deviceUDID),
+		deviceUDID:  deviceUDID,
+		teamID:      teamID,
+		wdaBundleID: wdaBundleID,
+		port:        PortFromUDID(deviceUDID),
 	}
 }
 
@@ -122,7 +124,7 @@ func (r *Runner) Build(ctx context.Context) error {
 
 	projectPath := filepath.Join(r.wdaPath, "WebDriverAgent.xcodeproj")
 
-	cmd := exec.CommandContext(buildCtx, "xcodebuild",
+	args := []string{
 		"build-for-testing",
 		"-project", projectPath,
 		"-scheme", "WebDriverAgentRunner",
@@ -130,7 +132,11 @@ func (r *Runner) Build(ctx context.Context) error {
 		"-derivedDataPath", r.derivedDataPath(),
 		"-allowProvisioningUpdates",
 		fmt.Sprintf("DEVELOPMENT_TEAM=%s", r.teamID),
-	)
+	}
+	if r.wdaBundleID != "" {
+		args = append(args, fmt.Sprintf("PRODUCT_BUNDLE_IDENTIFIER=%s", r.wdaBundleID))
+	}
+	cmd := exec.CommandContext(buildCtx, "xcodebuild", args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -347,6 +353,9 @@ func (r *Runner) getBuildCacheDir() (string, error) {
 			teamID = "default"
 		}
 		configName = fmt.Sprintf("device-ios%s-team%s", iosVersion, teamID)
+	}
+	if r.wdaBundleID != "" {
+		configName += "-bundle" + r.wdaBundleID
 	}
 
 	cacheDir := filepath.Join(config.GetCacheDir(), "wda-builds", configName)

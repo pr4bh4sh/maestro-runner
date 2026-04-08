@@ -1432,15 +1432,23 @@ func TestDetermineExecutionMode_SingleExplicitDevice(t *testing.T) {
 // ============================================================
 
 func TestExecuteFlowsWithMode_AppiumParallel(t *testing.T) {
+	// Suppress stdout from setup messages
+	oldStdout := os.Stdout
+	os.Stdout, _ = os.Open(os.DevNull)
+	defer func() { os.Stdout = oldStdout }()
+
 	cfg := &RunConfig{
-		Driver: "appium",
+		Driver:   "appium",
+		Parallel: 2,
 	}
-	_, err := executeFlowsWithMode(cfg, nil, true, []string{"d1", "d2"})
+	testFlows := []flow.Flow{{}, {}} // need flows so min(parallel, flows) > 0
+	_, err := executeFlowsWithMode(cfg, testFlows, true, []string{"appium-1", "appium-2"})
 	if err == nil {
-		t.Error("expected error for parallel Appium execution")
+		t.Error("expected error for parallel Appium with no server URL")
 	}
-	if !strings.Contains(err.Error(), "parallel execution not yet supported for Appium") {
-		t.Errorf("unexpected error: %v", err)
+	// Should fail on session creation (no AppiumURL), not on "not supported"
+	if strings.Contains(err.Error(), "not yet supported") {
+		t.Errorf("parallel should be supported now, got: %v", err)
 	}
 }
 
