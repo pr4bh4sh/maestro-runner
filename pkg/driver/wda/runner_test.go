@@ -129,7 +129,7 @@ func TestNewRunner_SetsPort(t *testing.T) {
 	udid := "12345678-1234-1234-1234-ABCDEF123456"
 	teamID := "ABC123DEF"
 
-	runner := NewRunner(udid, teamID)
+	runner := NewRunner(udid, teamID, "")
 
 	expectedPort := PortFromUDID(udid)
 	if runner.Port() != expectedPort {
@@ -141,7 +141,7 @@ func TestNewRunner_StoresUDID(t *testing.T) {
 	udid := "test-udid-1234"
 	teamID := "TEAM123"
 
-	runner := NewRunner(udid, teamID)
+	runner := NewRunner(udid, teamID, "")
 
 	if runner.deviceUDID != udid {
 		t.Errorf("expected deviceUDID %q, got %q", udid, runner.deviceUDID)
@@ -152,7 +152,7 @@ func TestNewRunner_StoresTeamID(t *testing.T) {
 	udid := "test-udid-1234"
 	teamID := "TEAM456"
 
-	runner := NewRunner(udid, teamID)
+	runner := NewRunner(udid, teamID, "")
 
 	if runner.teamID != teamID {
 		t.Errorf("expected teamID %q, got %q", teamID, runner.teamID)

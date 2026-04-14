@@ -73,10 +73,16 @@ func formatDeviceLabel(device *report.Device) string {
 		return "Unknown"
 	}
 
+	var label string
 	if device.OSVersion != "" {
-		return fmt.Sprintf("%s (%s %s)", device.Name, device.Platform, device.OSVersion)
+		label = fmt.Sprintf("%s (%s %s)", device.Name, device.Platform, device.OSVersion)
+	} else {
+		label = fmt.Sprintf("%s (%s)", device.Name, device.Platform)
 	}
-	return fmt.Sprintf("%s (%s)", device.Name, device.Platform)
+	if device.SessionID != "" {
+		label += fmt.Sprintf(" [session: %s]", device.SessionID)
+	}
+	return label
 }
 
 // printDetailedFlowResults prints flow-by-flow results with all commands.
