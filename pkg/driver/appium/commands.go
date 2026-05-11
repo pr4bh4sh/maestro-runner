@@ -256,6 +256,10 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
+		if err := d.parentContext().Err(); err != nil {
+			return errorResult(fmt.Errorf("scroll cancelled: %w", err), "")
+		}
+
 		// Check if element is visible
 		info, err := d.findElement(step.Element, 1*time.Second)
 		if err == nil && info != nil {
@@ -605,10 +609,9 @@ func (d *Driver) copyTextFrom(step *flow.CopyTextFromStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("element has no text"), "")
 	}
 
-	if err := d.client.SetClipboard(text); err != nil {
-		return errorResult(err, "Failed to set clipboard")
-	}
-
+	// Don't push to device clipboard — Appium 3.x UIA2 returns 404 for
+	// /appium/device/set_clipboard, and the executor already keeps the
+	// copied text in memory (script.SetCopiedText) for pasteText to reuse.
 	result := successResult(fmt.Sprintf("Copied text: '%s' (len=%d)", text, len(text)), info)
 	result.Data = text
 	return result
@@ -884,7 +887,7 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 		timeout = time.Duration(step.TimeoutMs) * time.Millisecond
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 	defer cancel()
 
 	var selector *flow.Selector

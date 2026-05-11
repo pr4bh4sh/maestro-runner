@@ -16,15 +16,7 @@ import (
 // findElement finds an element using the selector with polling until timeout.
 // Uses Rod's clone-based timeout: creates a new page object with deadline.
 func (d *Driver) findElement(sel flow.Selector, optional bool, stepTimeoutMs int) (*rod.Element, *core.ElementInfo, error) {
-	// Warn about unsupported selector fields (once per field)
-	if unsupported := flow.CheckUnsupportedFields(&sel, "web"); len(unsupported) > 0 {
-		for _, field := range unsupported {
-			if !d.warnedFields[field] {
-				d.warnedFields[field] = true
-				log.Printf("[browser] warning: %q is not supported on web — will be ignored", field)
-			}
-		}
-	}
+	d.recordUnsupportedFields(&sel)
 
 	timeout := d.calculateTimeout(optional, stepTimeoutMs)
 	deadline := time.Now().Add(timeout)
@@ -39,10 +31,32 @@ func (d *Driver) findElement(sel flow.Selector, optional bool, stepTimeoutMs int
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	hint := d.crossOriginHint()
 	if lastErr != nil {
-		return nil, nil, fmt.Errorf("element '%s' not found within %v: %w", sel.Describe(), timeout, lastErr)
+		return nil, nil, fmt.Errorf("element '%s' not found within %v%s: %w", sel.Describe(), timeout, hint, lastErr)
 	}
-	return nil, nil, fmt.Errorf("element '%s' not found within %v", sel.Describe(), timeout)
+	return nil, nil, fmt.Errorf("element '%s' not found within %v%s", sel.Describe(), timeout, hint)
+}
+
+// crossOriginHint returns a human-readable suffix listing how many cross-origin
+// iframes the most recent JS-side traversal had to skip, or an empty string if
+// none were skipped (or the helper was never invoked). Same-origin iframe
+// traversal is automatic; cross-origin / OOPIF support requires CDP-level
+// frame enumeration which is not yet implemented (see issue #65).
+func (d *Driver) crossOriginHint() string {
+	obj, err := d.page.Evaluate(rod.Eval(`() => (window.__maestro && window.__maestro.getLastCrossOriginSkips && window.__maestro.getLastCrossOriginSkips()) || 0`))
+	if err != nil || obj == nil {
+		return ""
+	}
+	n := obj.Value.Int()
+	if n <= 0 {
+		return ""
+	}
+	plural := "iframe"
+	if n > 1 {
+		plural = "iframes"
+	}
+	return fmt.Sprintf(" (skipped %d cross-origin %s — full OOPIF support not implemented yet)", n, plural)
 }
 
 // findElementOnce performs a single attempt to find an element (no polling).
@@ -89,19 +103,20 @@ func (d *Driver) findElementOnce(sel flow.Selector) (*rod.Element, *core.Element
 }
 
 // findByCSS finds an element by CSS selector.
+// Falls back to a same-origin-iframe walk when the top-frame query misses.
 func (d *Driver) findByCSS(sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
-	if sel.Nth > 0 {
+	if sel.EffectiveNth() > 0 {
 		p := d.page.Timeout(2 * time.Second)
 		elems, err := p.Elements(sel.CSS)
 		if err != nil {
 			return nil, nil, fmt.Errorf("CSS selector '%s' not found: %w", sel.CSS, err)
 		}
-		if sel.Nth >= len(elems) {
-			return nil, nil, fmt.Errorf("CSS selector '%s': nth=%d but only %d elements found", sel.CSS, sel.Nth, len(elems))
+		if sel.EffectiveNth() >= len(elems) {
+			return nil, nil, fmt.Errorf("CSS selector '%s': nth=%d but only %d elements found", sel.CSS, sel.EffectiveNth(), len(elems))
 		}
-		elem := elems[sel.Nth]
+		elem := elems[sel.EffectiveNth()]
 		if !d.matchesStateFilters(elem, sel) {
-			return nil, nil, fmt.Errorf("CSS selector '%s' found (nth=%d) but state filters don't match", sel.CSS, sel.Nth)
+			return nil, nil, fmt.Errorf("CSS selector '%s' found (nth=%d) but state filters don't match", sel.CSS, sel.EffectiveNth())
 		}
 		info := d.elementInfo(elem)
 		return elem, info, nil
@@ -109,20 +124,20 @@ func (d *Driver) findByCSS(sel flow.Selector) (*rod.Element, *core.ElementInfo, 
 
 	p := d.page.Timeout(2 * time.Second)
 	elem, err := p.Element(sel.CSS)
-	if err != nil {
-		return nil, nil, fmt.Errorf("CSS selector '%s' not found: %w", sel.CSS, err)
+	if err == nil {
+		if !d.matchesStateFilters(elem, sel) {
+			return nil, nil, fmt.Errorf("CSS selector '%s' found but state filters don't match", sel.CSS)
+		}
+		info := d.elementInfo(elem)
+		return elem, info, nil
 	}
 
-	if !d.matchesStateFilters(elem, sel) {
-		return nil, nil, fmt.Errorf("CSS selector '%s' found but state filters don't match", sel.CSS)
-	}
-
-	info := d.elementInfo(elem)
-	return elem, info, nil
+	return d.findByCSSAcrossFrames(sel.CSS, sel, fmt.Sprintf("CSS selector '%s'", sel.CSS))
 }
 
 // findByID finds an element by ID using a cascade of strategies.
 // Uses one-shot lookups (NotFoundSleeper) so failed strategies don't waste time retrying.
+// Falls back to a same-origin-iframe walk if every top-frame strategy misses.
 func (d *Driver) findByID(sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
 	selectors := []string{
 		"#" + cssEscape(sel.ID),
@@ -146,6 +161,14 @@ func (d *Driver) findByID(sel flow.Selector) (*rod.Element, *core.ElementInfo, e
 		return elem, info, nil
 	}
 
+	// Iframe fallback: try each strategy across same-origin frames.
+	for _, css := range selectors {
+		elem, info, err := d.findByCSSAcrossFrames(css, sel, fmt.Sprintf("id '%s' (%s)", sel.ID, css))
+		if err == nil {
+			return elem, info, nil
+		}
+	}
+
 	return nil, nil, fmt.Errorf("element with id '%s' not found", sel.ID)
 }
 
@@ -153,6 +176,13 @@ func (d *Driver) findByID(sel flow.Selector) (*rod.Element, *core.ElementInfo, e
 // 1. AX tree query (clickable roles first, then input roles, then all roles)
 // 2. Rod page.Search() fallback (Shadow DOM support)
 // 3. JS fallback (last resort)
+//
+// When the selector specifies an `index`/`nth` slot, we bypass the AX-tree
+// cascade entirely: AX queries root at the top-frame body and don't
+// enumerate cross-frame / shadow-DOM matches, which would silently make
+// `index: N` resolve to the closest in-range top-frame match. Instead use
+// the JS helper that walks every same-origin root and indexes deterministically
+// (issue #72).
 func (d *Driver) findByText(sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
 	text := sel.Text
 
@@ -162,6 +192,10 @@ func (d *Driver) findByText(sel flow.Selector) (*rod.Element, *core.ElementInfo,
 		regexSel.TextRegex = text
 		regexSel.Text = ""
 		return d.findByTextRegex(regexSel)
+	}
+
+	if nth := sel.EffectiveNth(); nth > 0 {
+		return d.findByTextAtAcrossRoots(text, nth, sel)
 	}
 
 	// Stage 1a: AX tree — clickable roles
@@ -303,34 +337,36 @@ func (d *Driver) findByTextRegex(sel flow.Selector) (*rod.Element, *core.Element
 }
 
 // findByCSSWithNth finds elements by CSS selector, applying nth selection if set.
+// Falls back to a same-origin-iframe walk when the top-frame query misses (nth=0 only).
 func (d *Driver) findByCSSWithNth(css string, sel flow.Selector, desc string) (*rod.Element, *core.ElementInfo, error) {
 	p := d.page.Sleeper(rod.NotFoundSleeper)
 
-	if sel.Nth > 0 {
+	if sel.EffectiveNth() > 0 {
 		elems, err := p.Elements(css)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s not found: %w", desc, err)
 		}
-		if sel.Nth >= len(elems) {
-			return nil, nil, fmt.Errorf("%s: nth=%d but only %d elements found", desc, sel.Nth, len(elems))
+		if sel.EffectiveNth() >= len(elems) {
+			return nil, nil, fmt.Errorf("%s: nth=%d but only %d elements found", desc, sel.EffectiveNth(), len(elems))
 		}
-		elem := elems[sel.Nth]
+		elem := elems[sel.EffectiveNth()]
 		if !d.matchesStateFilters(elem, sel) {
-			return nil, nil, fmt.Errorf("%s found (nth=%d) but state filters don't match", desc, sel.Nth)
+			return nil, nil, fmt.Errorf("%s found (nth=%d) but state filters don't match", desc, sel.EffectiveNth())
 		}
 		info := d.elementInfo(elem)
 		return elem, info, nil
 	}
 
 	elem, err := p.Element(css)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%s not found: %w", desc, err)
+	if err == nil {
+		if !d.matchesStateFilters(elem, sel) {
+			return nil, nil, fmt.Errorf("%s found but state filters don't match", desc)
+		}
+		info := d.elementInfo(elem)
+		return elem, info, nil
 	}
-	if !d.matchesStateFilters(elem, sel) {
-		return nil, nil, fmt.Errorf("%s found but state filters don't match", desc)
-	}
-	info := d.elementInfo(elem)
-	return elem, info, nil
+
+	return d.findByCSSAcrossFrames(css, sel, desc)
 }
 
 // resolveAXNodes resolves a list of AX nodes to a visible element, applying nth and state filters.
@@ -353,7 +389,7 @@ func (d *Driver) resolveAXNodes(nodes []*proto.AccessibilityAXNode, sel flow.Sel
 		}
 
 		// Apply nth filter
-		if sel.Nth > 0 && visibleIdx < sel.Nth {
+		if sel.EffectiveNth() > 0 && visibleIdx < sel.EffectiveNth() {
 			visibleIdx++
 			continue
 		}
@@ -474,6 +510,15 @@ func (d *Driver) findByAXTree(text, role string, sel flow.Selector) (*rod.Elemen
 }
 
 // findBySearch uses Rod's page.Search() which handles Shadow DOM via DOMPerformSearch.
+//
+// Reject IFRAME results: CDP DOM.performSearch matches against the iframe
+// element's serialized attributes, including srcdoc — for an iframe whose
+// srcdoc HTML happens to contain the search text, the iframe element itself
+// is returned. That is essentially never what the caller wants (the caller
+// is looking for a tappable text element, not the iframe wrapper). Falling
+// through here lets the cascade reach the JS findByText path, which walks
+// _collectRoots() into the iframe document and shadow DOM and returns the
+// actual visible match. (Issues #71/#72 acting layer.)
 func (d *Driver) findBySearch(text string, sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
 	p := d.page.Timeout(2 * time.Second)
 	res, err := p.Search(text)
@@ -487,6 +532,10 @@ func (d *Driver) findBySearch(text string, sel flow.Selector) (*rod.Element, *co
 	}
 
 	elem := res.First
+	if tag, _ := elem.Eval(`() => this.tagName`); tag != nil &&
+		(tag.Value.Str() == "IFRAME" || tag.Value.Str() == "FRAME") {
+		return nil, nil, fmt.Errorf("search returned iframe element (likely srcdoc text match) — falling through to JS findByText")
+	}
 	if !d.matchesStateFilters(elem, sel) {
 		return nil, nil, fmt.Errorf("search found element but state filters don't match")
 	}
@@ -511,6 +560,65 @@ func (d *Driver) findByJS(text string, sel flow.Selector) (*rod.Element, *core.E
 		return nil, nil, fmt.Errorf("JS found element but state filters don't match")
 	}
 
+	info := d.elementInfo(elem)
+	return elem, info, nil
+}
+
+// findByCSSAcrossFrames runs a CSS selector across the top document and every
+// reachable same-origin iframe. Used as a fallback when Rod's top-frame query
+// misses (e.g. Flutter Web rendered inside an iframe — see issue #65).
+func (d *Driver) findByCSSAcrossFrames(css string, sel flow.Selector, desc string) (*rod.Element, *core.ElementInfo, error) {
+	obj, err := d.page.Evaluate(rod.Eval(`(s) => window.__maestro.findByCSSAcrossFrames(s)`, css).ByObject())
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s not found across frames: %w", desc, err)
+	}
+	elem, err := d.page.ElementFromObject(obj)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: element from object failed: %w", desc, err)
+	}
+	if !d.matchesStateFilters(elem, sel) {
+		return nil, nil, fmt.Errorf("%s found across frames but state filters don't match", desc)
+	}
+	info := d.elementInfo(elem)
+	return elem, info, nil
+}
+
+// findByTextAtAcrossRoots returns the Nth (0-based) text match across every
+// same-origin root reachable from the top frame — top doc, same-origin
+// iframe documents, and open shadow roots. This is the index-aware sibling
+// of findByCSSAcrossFrames and the cross-root sibling of findByText's
+// AX-tree cascade. AX-tree queries root at the top-frame body and can't
+// enumerate iframe / shadow-DOM matches, so combining `text` + `nth` used
+// to silently fall back to the closest in-range top-frame element (issue
+// #72). Routing index-bearing text selectors through this path makes the
+// match list deterministic and surfaces a clear out-of-range error.
+func (d *Driver) findByTextAtAcrossRoots(text string, nth int, sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
+	// Two-stage call: count first (by value), then fetch element only when
+	// the index is in range. Avoids rod.Eval(...).ByObject() ever resolving
+	// against a JS null, which can stall the eval pipe (no remote objectId
+	// to track).
+	countRes, err := d.page.Evaluate(rod.Eval(`(t, n) => window.__maestro.findByTextAt_count(t, n)`, text, nth))
+	if err != nil {
+		return nil, nil, fmt.Errorf("text '%s' index %d: %w", text, nth, err)
+	}
+	count := 0
+	if countRes != nil {
+		count = countRes.Value.Int()
+	}
+	if nth >= count {
+		return nil, nil, fmt.Errorf("text '%s' index %d: only %d match(es) found across same-origin roots", text, nth, count)
+	}
+	res, err := d.page.Evaluate(rod.Eval(`() => window.__maestro.findByTextAt_get()`).ByObject())
+	if err != nil {
+		return nil, nil, fmt.Errorf("text '%s' index %d: %w", text, nth, err)
+	}
+	elem, err := d.page.ElementFromObject(res)
+	if err != nil {
+		return nil, nil, fmt.Errorf("text '%s' index %d: element from object failed: %w", text, nth, err)
+	}
+	if !d.matchesStateFilters(elem, sel) {
+		return nil, nil, fmt.Errorf("text '%s' index %d found but state filters don't match", text, nth)
+	}
 	info := d.elementInfo(elem)
 	return elem, info, nil
 }
@@ -639,8 +747,14 @@ func (d *Driver) elementInfo(elem *rod.Element) *core.ElementInfo {
 		}
 	}
 
-	if visible, err := elem.Visible(); err == nil {
-		info.Visible = visible
+	// Route visibility through __maestro._isElementVisible rather than Rod's
+	// own check. Rod's elem.Visible() does intrinsic-only checks (display,
+	// computed style, getBoundingClientRect) that report iframe-clipped
+	// elements as visible. The shared helper additionally intersects against
+	// each ancestor iframe's content viewport, which is what scrollUntilVisible
+	// and waitForVisible need to correctly identify scrolled-out targets.
+	if v, err := elem.Eval(`() => window.__maestro._isElementVisible(this)`); err == nil {
+		info.Visible = v.Value.Bool()
 	}
 
 	// Skip attribute lookups for text nodes

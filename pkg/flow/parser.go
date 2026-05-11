@@ -1011,6 +1011,7 @@ func parseRunFlowStep(valueNode *yaml.Node, sourcePath string) (Step, error) {
 		Env      map[string]string `yaml:"env"`
 		Optional bool              `yaml:"optional"`
 		Label    string            `yaml:"label"`
+		Timeout  int               `yaml:"timeout"`
 	}
 
 	if err := valueNode.Decode(&raw); err != nil {
@@ -1022,6 +1023,7 @@ func parseRunFlowStep(valueNode *yaml.Node, sourcePath string) (Step, error) {
 	s.Env = raw.Env
 	s.Optional = raw.Optional
 	s.StepLabel = raw.Label
+	s.TimeoutMs = raw.Timeout
 
 	for _, cmdNode := range raw.Commands {
 		step, err := parseStep(&cmdNode, sourcePath)

@@ -18,6 +18,9 @@ type Driver struct {
 	info   *core.PlatformInfo
 	udid   string // Device UDID for simctl commands
 
+	// Parent context for element-finding operations (nil = context.Background())
+	ctx context.Context
+
 	// App file path for clearState (uninstall+reinstall)
 	appFile string
 
@@ -38,9 +41,19 @@ type Driver struct {
 // NewDriver creates a new WDA driver.
 func NewDriver(client *Client, info *core.PlatformInfo, udid string) *Driver {
 	return &Driver{
-		client:       client,
-		info:         info,
-		udid:         udid,
+		client: client,
+		info:   info,
+		udid:   udid,
+		// Default to "accept" so the WDA alerts monitor is enabled at session
+		// creation. WDA only registers the monitor when defaultAlertAction is
+		// in the session capabilities (see FBSessionCommands.m); setting it
+		// later via /appium/settings just changes the value and cannot start
+		// the monitor retroactively. EnsureSession runs before any launchApp
+		// step, so without this default a real-device session would be created
+		// with no monitor and permission dialogs (e.g. notifications) would
+		// block the flow. launchApp may override based on explicit permissions.
+		// Matches Maestro's documented default of accepting all permissions.
+		alertAction:  "accept",
 		warnedFields: make(map[string]bool),
 	}
 }
@@ -69,6 +82,19 @@ func (d *Driver) screenSize() (int, int, error) {
 		return d.info.ScreenWidth, d.info.ScreenHeight, nil
 	}
 	return 0, 0, fmt.Errorf("screen dimensions not available")
+}
+
+// SetContext sets the parent context for element-finding operations.
+func (d *Driver) SetContext(ctx context.Context) {
+	d.ctx = ctx
+}
+
+// parentContext returns the parent context for element-finding operations.
+func (d *Driver) parentContext() context.Context {
+	if d.ctx != nil {
+		return d.ctx
+	}
+	return context.Background()
 }
 
 // SetFindTimeout sets the timeout for finding required elements.
@@ -217,6 +243,10 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	case *flow.SetPermissionsStep:
 		result = d.setPermissions(s)
 
+	// Keychain
+	case *flow.ClearKeychainStep:
+		result = d.clearKeychain(s)
+
 	default:
 		result = &core.CommandResult{
 			Success: false,
@@ -272,7 +302,7 @@ func (d *Driver) findElement(sel flow.Selector, optional bool, stepTimeoutMs int
 	}
 
 	timeout := d.calculateTimeout(optional, stepTimeoutMs)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 	defer cancel()
 
 	return d.findElementWithContext(ctx, sel)
@@ -321,7 +351,7 @@ func (d *Driver) findElementForTap(sel flow.Selector, optional bool, stepTimeout
 	// For relative selectors, use page source which handles them correctly
 	if sel.HasRelativeSelector() {
 		timeout := d.calculateTimeout(optional, stepTimeoutMs)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 		defer cancel()
 		return d.findElementRelativeWithContext(ctx, sel)
 	}
@@ -340,7 +370,7 @@ func (d *Driver) findElementForTap(sel flow.Selector, optional bool, stepTimeout
 	// For text-based selectors, use smart fallback strategy
 	if sel.Text != "" {
 		timeout := d.calculateTimeout(optional, stepTimeoutMs)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 		defer cancel()
 		return d.findElementForTapWithContext(ctx, sel)
 	}

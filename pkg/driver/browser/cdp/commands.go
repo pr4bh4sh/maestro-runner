@@ -43,6 +43,19 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return successResult(fmt.Sprintf("Selected option %s", step.Selector.DescribeQuoted()), info)
 	}
 
+	// Iframe / shadow-root branch: when the element lives inside an iframe,
+	// Rod's Click() uses iframe-LOCAL coordinates while CDP Input.dispatchMouseEvent
+	// operates in TOP-FRAME viewport coordinates — clicks land at the wrong place
+	// and report success silently. Route these through the coord-translated
+	// dispatch path which also runs Playwright-style hit-target verification.
+	// Top-frame elements (including those inside top-frame shadow roots) keep
+	// the existing path — getBoundingClientRect() is already in top-frame
+	// coords for them, so Rod's Click() is correct. (Issues #71/#72 acting layer.)
+	inIframe, _ := elem.Eval(`() => window.__maestro._isInIframe(this)`)
+	if inIframe != nil && inIframe.Value.Bool() {
+		return d.tapOnCrossRoot(elem, info, step)
+	}
+
 	if err := elem.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		// Fallback: use JS click (handles elements that can't receive CDP input events)
 		if _, jsErr := elem.Eval(`() => this.click()`); jsErr != nil {
@@ -53,11 +66,142 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Tapped on %s", step.Selector.DescribeQuoted()), info)
 }
 
+// tapOnCrossRoot dispatches a tap against an element nested inside an iframe
+// (or iframe + open shadow root). See dispatchCrossRoot for the full pattern.
+// (Issues #71/#72 acting layer.)
+func (d *Driver) tapOnCrossRoot(elem *rod.Element, info *core.ElementInfo, step *flow.TapOnStep) *core.CommandResult {
+	desc := step.Selector.DescribeQuoted()
+	return d.dispatchCrossRoot(elem, info, desc, "Tapped", func(x, y float64) error {
+		m := d.page.Mouse
+		if err := m.MoveTo(proto.NewPoint(x, y)); err != nil {
+			return err
+		}
+		return m.Click(proto.InputMouseButtonLeft, 1)
+	})
+}
+
+// dispatchCrossRoot is the shared coord-translated + hit-target-verified
+// dispatch path used by every gesture command whose target lives inside an
+// iframe (or iframe + open shadow root).
+//
+// Pattern:
+//  1. Compute top-frame viewport coords for the element via
+//     window.__maestro.topFrameClickPoint(elem). Walks up the frame chain
+//     adding each iframe's box.left/top + content-area inset. Throws on
+//     transformed-iframe ancestors (Playwright bails on transforms rather
+//     than computing through DOMMatrix; we follow that decision).
+//  2. Pre-flight expectHitTarget + install trusted-event interceptor via
+//     window.__maestro.setupHitTargetInterceptor(elem, {x, y}). Pre-flight
+//     runs elementsFromPoint per shadow root and walks slot/host chain to
+//     verify the click point would land on the target — if occluded, we
+//     get back {error: hitTargetDescription} and bail before dispatch.
+//  3. Run the caller-supplied `dispatch(x, y)` closure. This is the only
+//     thing that differs across gestures (single click vs. double click vs.
+//     down/up vs. swipe motion).
+//  4. Poll the captured verify outcome via
+//     window.__maestro.pollHitTargetResult(token).
+//
+// Ports microsoft/playwright `_checkFrameIsHitTarget` (server/dom.ts) and
+// `setupHitTargetInterceptor` (injected/injectedScript.ts) into a shared
+// dispatcher. (Issues #71/#72 acting layer; PR #73 introduced the original
+// tapOn-only version, generalised here for doubleTapOn / longPressOn /
+// tapOnPoint / swipe / scrollUntilVisible coverage.)
+//
+// `verbed` is the past-tense action word for the success message ("Tapped",
+// "Double tapped", "Long pressed", etc.).
+func (d *Driver) dispatchCrossRoot(elem *rod.Element, info *core.ElementInfo, desc, verbed string, dispatch func(x, y float64) error) *core.CommandResult {
+	// Step 1: top-frame click point.
+	ptRes, err := elem.Eval(`() => {
+		var p = window.__maestro.topFrameClickPoint(this);
+		return [p.x, p.y];
+	}`)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Cross-root setup failed for %s: %v", desc, err))
+	}
+	arr := ptRes.Value.Arr()
+	if len(arr) != 2 {
+		return errorResult(
+			fmt.Errorf("topFrameClickPoint returned %d values", len(arr)),
+			fmt.Sprintf("Failed to compute cross-root click point for %s", desc))
+	}
+	x := arr[0].Num()
+	y := arr[1].Num()
+
+	// Step 2: pre-flight + install interceptor.
+	setupRes, err := elem.Eval(
+		`(x, y) => window.__maestro.setupHitTargetInterceptor(this, {x: x, y: y})`,
+		x, y)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to set up hit-target interceptor for %s", desc))
+	}
+	if setupRes.Value.Has("error") {
+		errMsg := setupRes.Value.Get("error").Str()
+		return errorResult(
+			fmt.Errorf("hit-target pre-flight: %s blocks %s", errMsg, desc),
+			fmt.Sprintf("Click on %s blocked by overlay (%s)", desc, errMsg))
+	}
+	if !setupRes.Value.Has("token") {
+		return errorResult(
+			fmt.Errorf("interceptor returned no token"),
+			fmt.Sprintf("Failed to set up hit-target interceptor for %s", desc))
+	}
+	token := setupRes.Value.Get("token").Int()
+	defer func() {
+		_, _ = d.page.Eval(`(t) => window.__maestro.disposeHitTargetInterceptor(t)`, token)
+	}()
+
+	// Step 3: caller-supplied dispatch (the only per-gesture-type variation).
+	if err := dispatch(x, y); err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to dispatch input for %s", desc))
+	}
+
+	// Step 4: poll hit-target verify.
+	for i := 0; i < 5; i++ {
+		pollRes, pollErr := d.page.Eval(`(t) => window.__maestro.pollHitTargetResult(t)`, token)
+		if pollErr != nil {
+			return errorResult(pollErr, fmt.Sprintf("Failed to poll hit-target result for %s", desc))
+		}
+		v := pollRes.Value
+		if v.Has("hitTargetDescription") {
+			hd := v.Get("hitTargetDescription").Str()
+			return errorResult(
+				fmt.Errorf("input did not reach %s — landed on %s", desc, hd),
+				fmt.Sprintf("Input on %s did not reach the target (landed on %s)", desc, hd))
+		}
+		switch v.Str() {
+		case "pending":
+			time.Sleep(20 * time.Millisecond)
+			continue
+		case "done":
+			return successResult(fmt.Sprintf("%s on %s", verbed, desc), info)
+		default:
+			return successResult(fmt.Sprintf("%s on %s", verbed, desc), info)
+		}
+	}
+	return errorResult(
+		fmt.Errorf("hit-target verify did not capture trusted event within timeout"),
+		fmt.Sprintf("Input on %s dispatched but verification timed out", desc))
+}
+
 // doubleTapOn double-clicks an element.
 func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
 	elem, info, err := d.findElement(step.Selector, isOptional(step.Selector.Optional), step.TimeoutMs)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to find element %s", step.Selector.DescribeQuoted()))
+	}
+
+	// Iframe / shadow-root branch — same coord-translation issue as tapOn.
+	// Top-frame elements keep the existing Rod path (correct for them).
+	inIframe, _ := elem.Eval(`() => window.__maestro._isInIframe(this)`)
+	if inIframe != nil && inIframe.Value.Bool() {
+		return d.dispatchCrossRoot(elem, info, step.Selector.DescribeQuoted(), "Double tapped",
+			func(x, y float64) error {
+				m := d.page.Mouse
+				if err := m.MoveTo(proto.NewPoint(x, y)); err != nil {
+					return err
+				}
+				return m.Click(proto.InputMouseButtonLeft, 2)
+			})
 	}
 
 	if err := elem.Click(proto.InputMouseButtonLeft, 2); err != nil {
@@ -72,6 +216,25 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 	elem, info, err := d.findElement(step.Selector, isOptional(step.Selector.Optional), step.TimeoutMs)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to find element %s", step.Selector.DescribeQuoted()))
+	}
+
+	// Iframe / shadow-root branch — coord translation + hit-target verify.
+	// WaitInteractable below uses iframe-local coords for cross-root targets,
+	// so we route those through dispatchCrossRoot (same root-cause as tapOn).
+	inIframe, _ := elem.Eval(`() => window.__maestro._isInIframe(this)`)
+	if inIframe != nil && inIframe.Value.Bool() {
+		return d.dispatchCrossRoot(elem, info, step.Selector.DescribeQuoted(), "Long pressed",
+			func(x, y float64) error {
+				m := d.page.Mouse
+				if err := m.MoveTo(proto.NewPoint(x, y)); err != nil {
+					return err
+				}
+				if err := m.Down(proto.InputMouseButtonLeft, 1); err != nil {
+					return err
+				}
+				time.Sleep(1 * time.Second)
+				return m.Up(proto.InputMouseButtonLeft, 1)
+			})
 	}
 
 	// Scroll into view and wait for interactable
@@ -122,7 +285,15 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 }
 
 // assertVisible asserts that an element is visible.
-// Uses the JS helper's visibility check for consistency with waitUntil.
+// Uses the JS helper's visibility check for plain selectors (RAF-based polling
+// in the browser, faster than CDP round-trips). Falls back to the Go-side
+// finder for selectors the JS fast path can't handle correctly:
+//   - state filters (Enabled / Checked / Focused / Selected) — the Go finder
+//     applies these via matchesStateFilters; the JS waitForVisible path does not.
+//   - Nth > 0 — the Go finder respects index/out-of-range; the JS path just
+//     checks "any visible".
+//   - Role selectors — implicit ARIA roles (e.g. <a> as "link") need the CDP
+//     accessibility tree, which only the Go path uses.
 func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult {
 	timeoutMs := step.TimeoutMs
 	if timeoutMs == 0 {
@@ -130,8 +301,12 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 	}
 	desc := step.Selector.DescribeQuoted()
 
+	// Track unsupported-field warnings even when we take the JS fast path
+	// (findElement records them but the fast path bypasses findElement).
+	d.recordUnsupportedFields(&step.Selector)
+
 	selectorType, selectorValue := jsSelectorTypeValue(step.Selector)
-	if selectorType != "" {
+	if selectorType != "" && !needsGoFinder(step.Selector) {
 		// Use RAF-based JS polling: consistent with waitUntil visibility checks
 		result, err := d.page.Timeout(time.Duration(timeoutMs+1000) * time.Millisecond).Evaluate(
 			rod.Eval(`(type, value, timeout) => window.__maestro.waitForVisible(type, value, timeout)`,
@@ -161,6 +336,36 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		)
 	}
 	return successResult(fmt.Sprintf("Element %s is visible", desc), info)
+}
+
+// needsGoFinder reports whether a selector has features the JS fast-path
+// (waitForVisible) does not implement, so the caller must route through the
+// Go-side findElement instead. Keep this in sync with the Go finder's
+// capabilities.
+func needsGoFinder(sel flow.Selector) bool {
+	if sel.Enabled != nil || sel.Checked != nil || sel.Focused != nil || sel.Selected != nil {
+		return true
+	}
+	if sel.EffectiveNth() > 0 {
+		return true
+	}
+	if sel.Role != "" {
+		return true
+	}
+	return false
+}
+
+// recordUnsupportedFields registers any web-unsupported selector fields in
+// d.warnedFields so consumers (and tests) can detect them, and logs each new
+// field once. Callers that bypass findElement still need to call this.
+func (d *Driver) recordUnsupportedFields(sel *flow.Selector) {
+	unsupported := flow.CheckUnsupportedFields(sel, "web")
+	for _, field := range unsupported {
+		if !d.warnedFields[field] {
+			d.warnedFields[field] = true
+			log.Printf("[browser] warning: %q is not supported on web — will be ignored", field)
+		}
+	}
 }
 
 // assertNotVisible asserts that an element is NOT visible.
@@ -342,6 +547,15 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 }
 
 // scrollUntilVisible scrolls until an element is visible.
+//
+// Top-frame elements use the existing direction-based wheel scroll (so flows
+// that depend on `direction: down` still steer the viewport). Elements
+// nested inside a same-origin iframe (or iframe + open shadow root) call
+// the native Element.scrollIntoView() inside the element's own document
+// context — top-frame mouse-wheel scrolls don't reach iframe content, and
+// translating wheel coords into the iframe is fragile. scrollIntoView is
+// the right primitive: it scrolls every ancestor scroll container in every
+// frame up the chain. Issues #71/#72 acting layer.
 func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.CommandResult {
 	dir := strings.ToLower(step.Direction)
 	if dir == "" {
@@ -359,12 +573,33 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 
 	center := d.viewportCenter()
 	for i := 0; i < maxScrolls; i++ {
-		_, info, err := d.findElementOnce(step.Element)
+		elem, info, err := d.findElementOnce(step.Element)
 		if err == nil && info != nil && info.Visible {
 			return successResult(
 				fmt.Sprintf("Element visible after %d scrolls", i),
 				info,
 			)
+		}
+
+		// Iframe / shadow-root branch: top-frame Mouse.Scroll dispatches a
+		// wheel event at the top-frame viewport — inert against iframe
+		// content. Use the element's own scrollIntoView() instead.
+		if elem != nil {
+			inIframe, _ := elem.Eval(`() => window.__maestro._isInIframe(this)`)
+			if inIframe != nil && inIframe.Value.Bool() {
+				blockArg := "end"
+				if dy < 0 {
+					blockArg = "start"
+				}
+				if _, scrollErr := elem.Eval(
+					`(b) => this.scrollIntoView({block: b, behavior: 'instant'})`,
+					blockArg,
+				); scrollErr != nil {
+					log.Printf("[browser] scrollUntilVisible: scrollIntoView failed: %v", scrollErr)
+				}
+				time.Sleep(300 * time.Millisecond)
+				continue
+			}
 		}
 
 		mouse := d.page.Mouse
