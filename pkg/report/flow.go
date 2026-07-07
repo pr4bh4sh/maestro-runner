@@ -90,8 +90,10 @@ func (w *FlowWriter) CommandEndWithSubs(cmdIndex int, status Status, element *El
 	w.updateIndexProgress()
 }
 
-// End marks the flow as complete.
-func (w *FlowWriter) End(status Status) {
+// End marks the flow as complete. flowLevelError, when non-empty, is used
+// as the failure message when no individual command recorded one — covers
+// flow-level failures like failOnConsoleError.
+func (w *FlowWriter) End(status Status, flowLevelError ...string) {
 	now := time.Now()
 	w.flow.EndTime = &now
 
@@ -112,6 +114,12 @@ func (w *FlowWriter) End(status Status) {
 				break
 			}
 		}
+		// Fall back to flow-level error (no command failed but the flow did
+		// — e.g. failOnConsoleError).
+		if errMsg == nil && len(flowLevelError) > 0 && flowLevelError[0] != "" {
+			fle := flowLevelError[0]
+			errMsg = &fle
+		}
 	}
 
 	w.updateIndex(status, nil, &now, &duration)
@@ -130,6 +138,13 @@ func (w *FlowWriter) End(status Status) {
 // SetFlowArtifacts sets flow-level artifacts (video, logs).
 func (w *FlowWriter) SetFlowArtifacts(artifacts FlowArtifacts) {
 	w.flow.Artifacts = artifacts
+	w.flush()
+}
+
+// SetConsoleLogs records browser console / page error entries captured during
+// the flow. Web flows only — mobile / native drivers leave this nil.
+func (w *FlowWriter) SetConsoleLogs(logs []ConsoleLog) {
+	w.flow.ConsoleLogs = logs
 	w.flush()
 }
 

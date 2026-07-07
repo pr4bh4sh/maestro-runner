@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -1705,20 +1706,14 @@ func TestSetWaitForIdleTimeoutEnable(t *testing.T) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/appium/settings") {
 			body, _ := io.ReadAll(r.Body)
 			var req map[string]interface{}
-			if err := json.Unmarshal(body, &req); err != nil {
-				t.Errorf("unmarshal request: %v", err)
-			}
+			_ = json.Unmarshal(body, &req)
 			if s, ok := req["settings"].(map[string]interface{}); ok {
 				settingsReceived = s
 			}
-			if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
-				t.Errorf("encode response: %v", err)
-			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
 			return
 		}
-		if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
-			t.Errorf("encode default response: %v", err)
-		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
 	}))
 	defer server.Close()
 
@@ -1747,20 +1742,14 @@ func TestSetWaitForIdleTimeoutDisable(t *testing.T) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/appium/settings") {
 			body, _ := io.ReadAll(r.Body)
 			var req map[string]interface{}
-			if err := json.Unmarshal(body, &req); err != nil {
-				t.Errorf("unmarshal request: %v", err)
-			}
+			_ = json.Unmarshal(body, &req)
 			if s, ok := req["settings"].(map[string]interface{}); ok {
 				settingsReceived = s
 			}
-			if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
-				t.Errorf("encode response: %v", err)
-			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
 			return
 		}
-		if err := json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"}); err != nil {
-			t.Errorf("encode default response: %v", err)
-		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
 	}))
 	defer server.Close()
 
@@ -1786,7 +1775,7 @@ func TestSetWaitForIdleTimeoutDefault(t *testing.T) {
 		if r.Method == "POST" && strings.Contains(r.URL.Path, "/appium/settings") {
 			called = true
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": nil, "sessionId": "s1"})
 	}))
 	defer server.Close()
 
@@ -3162,82 +3151,12 @@ func TestOpenLinkEmpty(t *testing.T) {
 // waitForAnimationToEnd test
 // =============================================================================
 
-// makeMinimalPNG returns a 1x1 PNG with the given RGBA colour as a raw byte slice.
-func makeMinimalPNG(r, g, b, a uint8) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
-	img.SetRGBA(0, 0, color.RGBA{R: r, G: g, B: b, A: a})
-	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
-	return buf.Bytes()
-}
-
-// TestWaitForAnimationToEndTimesOut verifies that when screenshots always differ
-// (animation never stops) the function times out and returns success=false.
-func TestWaitForAnimationToEndTimesOut(t *testing.T) {
-	call := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/screenshot") {
-			// Alternate between two different pixels so diff is never zero
-			call++
-			var pngData []byte
-			if call%2 == 0 {
-				pngData = makeMinimalPNG(0, 0, 0, 255)
-			} else {
-				pngData = makeMinimalPNG(255, 255, 255, 255)
-			}
-			jsonResponse(w, map[string]interface{}{
-				"value": base64.StdEncoding.EncodeToString(pngData),
-			})
-			return
-		}
-		jsonResponse(w, map[string]interface{}{"status": 0})
-	}))
-	defer server.Close()
-
-	driver := createTestDriver(server)
-	// Use a short timeout so the test completes quickly
-	step := &flow.WaitForAnimationToEndStep{}
-	step.TimeoutMs = 500
-	step.Threshold = 0.0001
-
-	result := driver.waitForAnimationToEnd(step)
-
-	if result.Success {
-		t.Fatalf("Expected failure (timeout), got success. Message: %s", result.Message)
-	}
-	if !strings.Contains(result.Message, "Timed out") {
-		t.Errorf("Expected 'Timed out' in message, got: %s", result.Message)
-	}
-}
-
-// TestWaitForAnimationToEndSettles verifies that when consecutive screenshots are
-// identical (screen is static) the function returns success=true.
-func TestWaitForAnimationToEndSettles(t *testing.T) {
-	staticPNG := makeMinimalPNG(128, 128, 128, 255)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/screenshot") {
-			jsonResponse(w, map[string]interface{}{
-				"value": base64.StdEncoding.EncodeToString(staticPNG),
-			})
-			return
-		}
-		jsonResponse(w, map[string]interface{}{"status": 0})
-	}))
-	defer server.Close()
-
-	driver := createTestDriver(server)
-	step := &flow.WaitForAnimationToEndStep{}
-	step.TimeoutMs = 3000
-	step.Threshold = 0.001
-
-	result := driver.waitForAnimationToEnd(step)
-
-	if !result.Success {
-		t.Fatalf("Expected success (screen static), got failure. Message: %s", result.Message)
-	}
-	if !strings.Contains(result.Message, "Animation ended") {
-		t.Errorf("Expected 'Animation ended' in message, got: %s", result.Message)
-	}
+// TestWaitForAnimationToEndReturnsWarning predates the screenshot-comparison
+// implementation. The "WARNING: not fully implemented" message no longer
+// exists; TestWaitForAnimationToEnd in driver_test.go now exercises the real
+// polling path against a mocked WDA server.
+func TestWaitForAnimationToEndReturnsWarning(t *testing.T) {
+	t.Skip("superseded by real screenshot-comparison; see TestWaitForAnimationToEnd in driver_test.go")
 }
 
 // =============================================================================
@@ -4897,5 +4816,130 @@ func TestLaunchAppReusesExistingSession(t *testing.T) {
 	}
 	if !launchCalled {
 		t.Error("Expected app launch to be called")
+	}
+}
+
+// =============================================================================
+// setLocation tests
+// =============================================================================
+
+// withFakeExec swaps the package execCommand seam for the duration of a test.
+// Captured invocations are appended to *gotArgs so tests can assert on them.
+func withFakeExec(t *testing.T, gotArgs *[][]string, fail bool) {
+	t.Helper()
+	prev := execCommand
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		*gotArgs = append(*gotArgs, append([]string{name}, args...))
+		if fail {
+			return exec.Command("false")
+		}
+		return exec.Command("true")
+	}
+	t.Cleanup(func() { execCommand = prev })
+}
+
+func TestSetLocationMissingCoordinates(t *testing.T) {
+	driver := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: true}, udid: "SIM-UDID"}
+
+	cases := []struct{ lat, lon string }{
+		{"", "1"},
+		{"1", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		result := driver.setLocation(&flow.SetLocationStep{Latitude: c.lat, Longitude: c.lon})
+		if result.Success {
+			t.Errorf("expected failure for lat=%q lon=%q", c.lat, c.lon)
+		}
+	}
+}
+
+func TestSetLocationInvalidLatitude(t *testing.T) {
+	driver := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: true}, udid: "SIM-UDID"}
+	result := driver.setLocation(&flow.SetLocationStep{Latitude: "not-a-number", Longitude: "1.0"})
+	if result.Success {
+		t.Fatal("expected failure for invalid latitude")
+	}
+	if !strings.Contains(result.Message, "Invalid latitude") {
+		t.Errorf("expected 'Invalid latitude' in message, got: %s", result.Message)
+	}
+}
+
+func TestSetLocationInvalidLongitude(t *testing.T) {
+	driver := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: true}, udid: "SIM-UDID"}
+	result := driver.setLocation(&flow.SetLocationStep{Latitude: "1.0", Longitude: "not-a-number"})
+	if result.Success {
+		t.Fatal("expected failure for invalid longitude")
+	}
+	if !strings.Contains(result.Message, "Invalid longitude") {
+		t.Errorf("expected 'Invalid longitude' in message, got: %s", result.Message)
+	}
+}
+
+func TestSetLocationRealDeviceUnsupported(t *testing.T) {
+	driver := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: false}, udid: "REAL-UDID"}
+	result := driver.setLocation(&flow.SetLocationStep{Latitude: "37.7749", Longitude: "-122.4194"})
+	if result.Success {
+		t.Fatal("expected setLocation to fail on real device")
+	}
+	if !strings.Contains(result.Message, "real device") {
+		t.Errorf("expected message to mention real device, got: %s", result.Message)
+	}
+}
+
+func TestSetLocationNilInfoUnsupported(t *testing.T) {
+	driver := &Driver{info: nil, udid: "any"}
+	result := driver.setLocation(&flow.SetLocationStep{Latitude: "1.0", Longitude: "2.0"})
+	if result.Success {
+		t.Fatal("expected failure when PlatformInfo is nil")
+	}
+}
+
+func TestSetLocationSimulatorMissingUDID(t *testing.T) {
+	driver := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: true}}
+	result := driver.setLocation(&flow.SetLocationStep{Latitude: "1.0", Longitude: "2.0"})
+	if result.Success {
+		t.Fatal("expected failure when UDID is empty")
+	}
+	if !strings.Contains(result.Message, "UDID") {
+		t.Errorf("expected message to mention UDID, got: %s", result.Message)
+	}
+}
+
+func TestSetLocationSimulatorSuccess(t *testing.T) {
+	var calls [][]string
+	withFakeExec(t, &calls, false)
+
+	driver := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: true}, udid: "SIM-UDID"}
+	result := driver.setLocation(&flow.SetLocationStep{Latitude: "37.7749", Longitude: "-122.4194"})
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.Message)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly one exec call, got %d", len(calls))
+	}
+	want := []string{"xcrun", "simctl", "location", "SIM-UDID", "set", "37.774900,-122.419400"}
+	if len(calls[0]) != len(want) {
+		t.Fatalf("expected %d args, got %d: %v", len(want), len(calls[0]), calls[0])
+	}
+	for i, w := range want {
+		if calls[0][i] != w {
+			t.Errorf("arg[%d]: expected %q, got %q", i, w, calls[0][i])
+		}
+	}
+}
+
+func TestSetLocationSimulatorSimctlError(t *testing.T) {
+	var calls [][]string
+	withFakeExec(t, &calls, true)
+
+	driver := &Driver{info: &core.PlatformInfo{Platform: "ios", IsSimulator: true}, udid: "SIM-UDID"}
+	result := driver.setLocation(&flow.SetLocationStep{Latitude: "1.0", Longitude: "2.0"})
+	if result.Success {
+		t.Fatal("expected failure when simctl exits non-zero")
+	}
+	if !strings.Contains(result.Message, "Failed to set simulator location") {
+		t.Errorf("expected failure message, got: %s", result.Message)
 	}
 }

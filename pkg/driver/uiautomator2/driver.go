@@ -66,6 +66,9 @@ type Driver struct {
 	info   *core.PlatformInfo
 	device ShellExecutor // for ADB commands (launchApp, stopApp, clearState)
 
+	// Parent context for element-finding operations (nil = context.Background())
+	ctx context.Context
+
 	// Timeouts (0 = use defaults)
 	findTimeout         int // ms, for required elements
 	optionalFindTimeout int // ms, for optional elements
@@ -93,6 +96,19 @@ func (d *Driver) screenSize() (int, int, error) {
 		return d.info.ScreenWidth, d.info.ScreenHeight, nil
 	}
 	return 0, 0, fmt.Errorf("screen dimensions not available")
+}
+
+// SetContext sets the parent context for element-finding operations.
+func (d *Driver) SetContext(ctx context.Context) {
+	d.ctx = ctx
+}
+
+// parentContext returns the parent context for element-finding operations.
+func (d *Driver) parentContext() context.Context {
+	if d.ctx != nil {
+		return d.ctx
+	}
+	return context.Background()
 }
 
 // SetFindTimeout sets the timeout for finding required elements.
@@ -170,6 +186,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.back(s)
 	case *flow.PressKeyStep:
 		result = d.pressKey(s)
+	case *flow.OpenNotificationsStep:
+		result = d.openNotifications(s)
 
 	// App lifecycle
 	case *flow.LaunchAppStep:
@@ -218,6 +236,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.startRecording(s)
 	case *flow.StopRecordingStep:
 		result = d.stopRecording(s)
+	case *flow.RemoveMediaStep:
+		result = d.removeMedia(s)
 	case *flow.AddMediaStep:
 		result = d.addMedia(s)
 
@@ -323,7 +343,7 @@ func (d *Driver) findElementForTap(sel flow.Selector, optional bool, stepTimeout
 	// For relative selectors (below, above, etc.), use page source which handles them correctly
 	if sel.HasRelativeSelector() {
 		timeout := d.calculateTimeout(optional, stepTimeoutMs)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 		defer cancel()
 		return d.findElementRelativeWithContext(ctx, sel)
 	}
@@ -341,7 +361,7 @@ func (d *Driver) findElementForTap(sel flow.Selector, optional bool, stepTimeout
 	// For text-based selectors, use smart fallback strategy
 	if sel.Text != "" {
 		timeout := d.calculateTimeout(optional, stepTimeoutMs)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 		defer cancel()
 
 		return d.findElementForTapWithContext(ctx, sel)
@@ -445,7 +465,7 @@ func buildClickableOnlyStrategies(sel flow.Selector) ([]LocatorStrategy, error) 
 // Set fastMode=true for visibility checks (1 HTTP call), false for full info (3 HTTP calls).
 func (d *Driver) findElementWithOptions(sel flow.Selector, optional bool, stepTimeoutMs int, preferClickable bool, fastMode bool) (*uiautomator2.Element, *core.ElementInfo, error) {
 	timeout := d.calculateTimeout(optional, stepTimeoutMs)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 	defer cancel()
 
 	return d.findElementWithContext(ctx, sel, preferClickable, fastMode)
@@ -1071,17 +1091,38 @@ func buildSelectorsWithOptions(sel flow.Selector, timeoutMs int, preferClickable
 	var strategies []LocatorStrategy
 	stateFilters := buildStateFilters(sel)
 
-	// ID-based selector - use resourceIdMatches for partial matching
-	// Always wrap with .* — works for both literal IDs and regex patterns
+	// ID-based selector — exact match FIRST, substring fallback ONLY if exact
+	// fails. The substring-only behaviour from before this change silently
+	// returned the wrong element when the exact id wasn't in the rendered
+	// tree (e.g. lazy ListView with the target offscreen): UiAutomator's
+	// regex `resourceIdMatches(".*X.*")` triggers internal scrolling, and if
+	// no resource-id ever matched the substring, the search could still
+	// return an unrelated element it happened to land on. Mirrors the web
+	// driver's cascade: exact → testid → substring → name → aria-label.
 	if sel.ID != "" {
 		escaped := escapeUIAutomatorString(sel.ID)
 		if preferClickable {
-			// Try clickable first for tap commands
+			// Exact match — clickable first for tap commands.
+			strategies = append(strategies, LocatorStrategy{
+				Strategy: uiautomator2.StrategyUIAutomator,
+				Value:    `new UiSelector().resourceId("` + escaped + `").clickable(true)` + stateFilters,
+			})
+		}
+		// Exact match — any element.
+		strategies = append(strategies, LocatorStrategy{
+			Strategy: uiautomator2.StrategyUIAutomator,
+			Value:    `new UiSelector().resourceId("` + escaped + `")` + stateFilters,
+		})
+		if preferClickable {
+			// Substring fallback — clickable. Kept for backward compatibility
+			// with users relying on substring behaviour. Fires only after
+			// every exact-match strategy above failed.
 			strategies = append(strategies, LocatorStrategy{
 				Strategy: uiautomator2.StrategyUIAutomator,
 				Value:    `new UiSelector().resourceIdMatches(".*` + escaped + `.*").clickable(true)` + stateFilters,
 			})
 		}
+		// Substring fallback — any.
 		strategies = append(strategies, LocatorStrategy{
 			Strategy: uiautomator2.StrategyUIAutomator,
 			Value:    `new UiSelector().resourceIdMatches(".*` + escaped + `.*")` + stateFilters,
@@ -1112,9 +1153,11 @@ func buildSelectorsWithOptions(sel flow.Selector, timeoutMs int, preferClickable
 				Value:    `new UiSelector().descriptionMatches("` + pattern + `")` + stateFilters,
 			})
 		} else {
-			// Use textContains for literal text (case-insensitive by default)
-			// Escape only quotes for the string value
+			// Literal text: try case-sensitive textContains first (preserves existing behavior),
+			// then fall back to case-insensitive textMatches for cases like Android dialog
+			// buttons where textAllCaps displays "CANCEL" but hierarchy text is "Cancel".
 			escaped := escapeUIAutomatorString(sel.Text)
+			ciPattern := `(?is).*\Q` + escaped + `\E.*`
 			if preferClickable {
 				strategies = append(strategies, LocatorStrategy{
 					Strategy: uiautomator2.StrategyUIAutomator,
@@ -1132,6 +1175,25 @@ func buildSelectorsWithOptions(sel flow.Selector, timeoutMs int, preferClickable
 			strategies = append(strategies, LocatorStrategy{
 				Strategy: uiautomator2.StrategyUIAutomator,
 				Value:    `new UiSelector().descriptionContains("` + escaped + `")` + stateFilters,
+			})
+			// Case-insensitive fallback
+			if preferClickable {
+				strategies = append(strategies, LocatorStrategy{
+					Strategy: uiautomator2.StrategyUIAutomator,
+					Value:    `new UiSelector().textMatches("` + ciPattern + `").clickable(true)` + stateFilters,
+				})
+				strategies = append(strategies, LocatorStrategy{
+					Strategy: uiautomator2.StrategyUIAutomator,
+					Value:    `new UiSelector().descriptionMatches("` + ciPattern + `").clickable(true)` + stateFilters,
+				})
+			}
+			strategies = append(strategies, LocatorStrategy{
+				Strategy: uiautomator2.StrategyUIAutomator,
+				Value:    `new UiSelector().textMatches("` + ciPattern + `")` + stateFilters,
+			})
+			strategies = append(strategies, LocatorStrategy{
+				Strategy: uiautomator2.StrategyUIAutomator,
+				Value:    `new UiSelector().descriptionMatches("` + ciPattern + `")` + stateFilters,
 			})
 		}
 	}

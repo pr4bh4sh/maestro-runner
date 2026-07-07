@@ -43,6 +43,20 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %s", step.Selector.Describe()))
 	}
 
+	cx, cy := info.Bounds.Center()
+
+	// If duration is set (or longPress: true), hold the press for that long.
+	if step.DurationMs > 0 || step.LongPress {
+		duration := step.DurationMs
+		if duration <= 0 {
+			duration = 1000
+		}
+		if err := d.client.LongPress(cx, cy, duration); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to press for %dms", duration))
+		}
+		return successResult(fmt.Sprintf("Pressed on element for %dms", duration), info)
+	}
+
 	// On iOS, store the element ID so inputText can use ElementSendKeys
 	// to atomically focus + type (bypasses keyboard focus timing issues).
 	if d.platform == "ios" && info.ID != "" {
@@ -57,7 +71,6 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return successResult(fmt.Sprintf("Tapped on element '%s'", info.ID), info)
 	}
 
-	cx, cy := info.Bounds.Center()
 	if err := d.client.Tap(cx, cy); err != nil {
 		return errorResult(err, "Failed to tap")
 	}
@@ -97,7 +110,10 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %s", step.Selector.Describe()))
 	}
 
-	duration := 1000 // Default 1 second for long press
+	duration := step.DurationMs
+	if duration <= 0 {
+		duration = 1000 // Default 1 second for long press
+	}
 
 	cx, cy := info.Bounds.Center()
 	if err := d.client.LongPress(cx, cy, duration); err != nil {
@@ -120,6 +136,17 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 		if err != nil {
 			return errorResult(err, "Invalid point coordinates")
 		}
+	}
+
+	if step.DurationMs > 0 || step.LongPress {
+		duration := step.DurationMs
+		if duration <= 0 {
+			duration = 1000
+		}
+		if err := d.client.LongPress(x, y, duration); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to press at point for %dms", duration))
+		}
+		return successResult(fmt.Sprintf("Pressed at (%d, %d)", x, y), nil)
 	}
 
 	if err := d.client.Tap(x, y); err != nil {
@@ -256,6 +283,10 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
+		if err := d.parentContext().Err(); err != nil {
+			return errorResult(fmt.Errorf("scroll cancelled: %w", err), "")
+		}
+
 		// Check if element is visible
 		info, err := d.findElement(step.Element, 1*time.Second)
 		if err == nil && info != nil {
@@ -605,10 +636,9 @@ func (d *Driver) copyTextFrom(step *flow.CopyTextFromStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("element has no text"), "")
 	}
 
-	if err := d.client.SetClipboard(text); err != nil {
-		return errorResult(err, "Failed to set clipboard")
-	}
-
+	// Don't push to device clipboard — Appium 3.x UIA2 returns 404 for
+	// /appium/device/set_clipboard, and the executor already keeps the
+	// copied text in memory (script.SetCopiedText) for pasteText to reuse.
 	result := successResult(fmt.Sprintf("Copied text: '%s' (len=%d)", text, len(text)), info)
 	result.Data = text
 	return result
@@ -884,7 +914,7 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 		timeout = time.Duration(step.TimeoutMs) * time.Millisecond
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 	defer cancel()
 
 	var selector *flow.Selector
@@ -1009,6 +1039,11 @@ func parsePercentageCoords(coord string) (float64, float64, error) {
 // grantPermissions grants permissions via mobile: shell pm grant.
 // If the permissions map is provided, only those are granted (keys are permission names).
 // If empty/nil, all common runtime permissions are granted.
+//
+// Note: `mobile: shell` requires Appium's `adb_shell` insecure feature to
+// be enabled. On hosts that disable it (e.g. Sauce Labs by default), pass
+// `appium:autoGrantPermissions: true` in caps so Appium grants declared
+// permissions during install, and avoid using this step explicitly.
 func (d *Driver) grantPermissions(appID string, permissions map[string]string) {
 	if len(permissions) > 0 {
 		for perm := range permissions {

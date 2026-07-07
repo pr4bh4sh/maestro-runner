@@ -82,6 +82,11 @@ Examples:
 			Aliases: []string{"e"},
 			Usage:   "Environment variables (KEY=VALUE)",
 		},
+		&cli.StringFlag{
+			Name:    "env-file",
+			Usage:   "Path to .env file (KEY=VALUE per line, # comments, single/double quoting)",
+			EnvVars: []string{"MAESTRO_ENV_FILE"},
+		},
 
 		// Tag filtering
 		&cli.StringSliceFlag{
@@ -126,6 +131,11 @@ Examples:
 			Usage:   "Browser to use: chrome, chromium, or path to binary (web only)",
 			EnvVars: []string{"MAESTRO_BROWSER"},
 		},
+		&cli.StringFlag{
+			Name:    "user-data-dir",
+			Usage:   "Chrome user-data-dir for a persistent profile across runs (web only). Cookies / localStorage / extensions are reused.",
+			EnvVars: []string{"MAESTRO_USER_DATA_DIR"},
+		},
 
 		// Driver settings
 		&cli.IntFlag{
@@ -133,6 +143,12 @@ Examples:
 			Usage:   "Wait for device idle in ms (0 = disabled, default 200)",
 			Value:   200,
 			EnvVars: []string{"MAESTRO_WAIT_FOR_IDLE_TIMEOUT"},
+		},
+		&cli.IntFlag{
+			Name:    "condition-timeout",
+			Usage:   "Default timeout in ms for when:/while: condition checks (default 1000). Override per condition with `timeout:`.",
+			Value:   1000,
+			EnvVars: []string{"MAESTRO_CONDITION_TIMEOUT"},
 		},
 		&cli.IntFlag{
 			Name:    "typing-frequency",
@@ -144,12 +160,32 @@ Examples:
 			Name:  "no-flutter-fallback",
 			Usage: "Disable automatic Flutter VM Service fallback",
 		},
+		&cli.BoolFlag{
+			Name:  "android-tcp-forward",
+			Usage: "Force TCP-to-TCP adb forward for Android drivers (auto-enabled when $DEVICEFARM_DEVICE_UDID is set; needed on AWS Device Farm and similar sandboxes that block localfilesystem:/localabstract: forwards)",
+		},
+		&cli.StringFlag{
+			Name:  "artifacts",
+			Usage: "When to capture screenshots/hierarchy: on-failure (default), always, never",
+			Value: "on-failure",
+		},
 
 		// Emulator management flags (start-emulator, auto-start-emulator,
 		// shutdown-after, boot-timeout) are global flags defined in cli.go.
 
 	},
 	Action: runTest,
+}
+
+func parseArtifactMode(s string) executor.ArtifactMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "always":
+		return executor.ArtifactAlways
+	case "never":
+		return executor.ArtifactNever
+	default:
+		return executor.ArtifactOnFailure
+	}
 }
 
 // parseDevices parses the --device flag value into a slice of device UDIDs.
@@ -445,7 +481,7 @@ type RunConfig struct {
 	// Execution
 	Continuous bool
 	Headed     bool   // Show browser window (web only, default is headless)
-	Browser    string // chrome, chromium, or path to binary (web only)
+	Browser    string // chrome, chromium, or path to binary (web only)UserDataDir string // Persistent Chrome profile directory (web only)
 
 	// Device
 	Platform string
@@ -455,13 +491,19 @@ type RunConfig struct {
 	AppID    string // App bundle ID or package name
 
 	// Driver
-	Driver       string                 // uiautomator2, appium
-	AppiumURL    string                 // Appium server URL
-	CapsFile     string                 // Appium capabilities JSON file path
-	Capabilities map[string]interface{} // Parsed Appium capabilities
+	Driver    string // uiautomator2, appium
+	AppiumURL string // Appium server URL
+	// AppiumSessionFile, when set, makes maestro-runner publish live Appium
+	// session info (sessionId + appiumUrl per device) to this JSON file via the
+	// session-export provider, so external tools can attach without polling
+	// reports. Runs alongside any detected cloud provider. See issue #91.
+	AppiumSessionFile string
+	CapsFile          string                 // Appium capabilities JSON file path
+	Capabilities      map[string]interface{} // Parsed Appium capabilities
 
 	// Driver settings
 	WaitForIdleTimeout int    // Wait for device idle in ms (0 = disabled, default 200)
+	ConditionTimeout   int    // Default timeout (ms) for when:/while: condition checks (default 1000)
 	TypingFrequency    int    // WDA typing frequency in keys/sec (0 = use WDA default of 60)
 	TeamID             string // Apple Development Team ID for WDA code signing
 	WDABundleID        string // Custom WDA bundle identifier
@@ -473,12 +515,26 @@ type RunConfig struct {
 	ShutdownAfter     bool   // Shutdown emulators/simulators started by maestro-runner after tests
 	BootTimeout       int    // Device boot timeout in seconds
 
+	// Driver start
+	DriverStartTimeout int // Override driver start timeout in seconds (0 = use driver default — 30s Android, 90s iOS WDA)
+
 	// Install control
 	NoAppInstall    bool // Skip app installation
 	NoDriverInstall bool // Skip driver installation
 
 	// Flutter
 	NoFlutterFallback bool // Disable automatic Flutter VM Service fallback
+
+	// Android driver — TCP forward override
+	// Forces TCP-to-TCP adb forward instead of the Unix-socket forward
+	// we use on Linux/Mac. Auto-enabled when $DEVICEFARM_DEVICE_UDID is
+	// set (AWS Device Farm). Use the flag to opt in manually for other
+	// sandboxed environments that block localfilesystem:/localabstract:
+	// forwards.
+	AndroidTCPForward bool
+
+	// Artifacts
+	Artifacts executor.ArtifactMode // When to capture screenshots/hierarchy
 
 	// Cloud provider (detected from AppiumURL, nil if not a cloud provider)
 	CloudProvider cloud.Provider
@@ -592,15 +648,30 @@ func runTest(c *cli.Context) error {
 		}
 	}
 
-	// Merge env variables: workspace config env + CLI env (CLI takes precedence)
+	// Load --env-file if specified. Values from the file slot between the
+	// workspace config (lowest precedence) and -e CLI flags (highest).
+	var envFileVars map[string]string
+	if envFilePath := getString("env-file"); envFilePath != "" {
+		var err error
+		envFileVars, err = ParseEnvFile(envFilePath)
+		if err != nil {
+			return fmt.Errorf("env-file: %w", err)
+		}
+	}
+
+	// Merge env variables. Precedence (lowest → highest):
+	//   workspace config Env  <  --env-file values  <  -e CLI flag values
 	mergedEnv := make(map[string]string)
 	if workspaceConfig != nil {
 		for k, v := range workspaceConfig.Env {
 			mergedEnv[k] = v
 		}
 	}
+	for k, v := range envFileVars {
+		mergedEnv[k] = v // --env-file overrides workspace config
+	}
 	for k, v := range env {
-		mergedEnv[k] = v // CLI overrides workspace config
+		mergedEnv[k] = v // -e CLI overrides --env-file and workspace config
 	}
 
 	// Get appId from workspace config or will be extracted from flows later
@@ -621,6 +692,7 @@ func runTest(c *cli.Context) error {
 		Continuous:         getBool("continuous"),
 		Headed:             getBool("headed"),
 		Browser:            getString("browser"),
+		UserDataDir:        getString("user-data-dir"),
 		Platform:           getString("platform"),
 		Devices:            parseDevices(getString("device")),
 		Verbose:            getBool("verbose"),
@@ -628,9 +700,11 @@ func runTest(c *cli.Context) error {
 		AppID:              appID,
 		Driver:             getString("driver"),
 		AppiumURL:          getString("appium-url"),
+		AppiumSessionFile:  getString("appium-session-file"),
 		CapsFile:           capsFile,
 		Capabilities:       caps,
 		WaitForIdleTimeout: getInt("wait-for-idle-timeout"),
+		ConditionTimeout:   getInt("condition-timeout"),
 		TypingFrequency:    getInt("typing-frequency"),
 		TeamID:             getString("team-id"),
 		WDABundleID:        getString("wda-bundle-id"),
@@ -639,9 +713,12 @@ func runTest(c *cli.Context) error {
 		AutoStartEmulator:  getBool("auto-start-emulator"),
 		ShutdownAfter:      getBool("shutdown-after"),
 		BootTimeout:        getInt("boot-timeout"),
+		DriverStartTimeout: getInt("driver-start-timeout"),
 		NoAppInstall:       getBool("no-app-install"),
 		NoDriverInstall:    getBool("no-driver-install"),
 		NoFlutterFallback:  getBool("no-flutter-fallback"),
+		AndroidTCPForward:  getBool("android-tcp-forward"),
+		Artifacts:          parseArtifactMode(getString("artifacts")),
 	}
 
 	// Apply waitForIdleTimeout with priority:
@@ -769,18 +846,27 @@ func executeTest(cfg *RunConfig) error {
 	// Appium handles everything via capabilities — no --app-file or --team-id needed.
 	if strings.EqualFold(cfg.Platform, "ios") && cfg.Driver != "appium" {
 		// team-id is only required for real devices, not simulators.
-		isSimTarget := cfg.StartSimulator != "" ||
-			(len(cfg.Devices) > 0 && isIOSSimulator(cfg.Devices[0])) ||
-			(len(cfg.Devices) == 0 && hasBootedSimulator())
+		isSimTarget := iosTargetsSimulator(cfg)
 		if cfg.TeamID == "" && !isSimTarget {
 			return fmt.Errorf("iOS with WDA driver requires --team-id for code signing (real devices only)\n" +
 				"Usage: maestro-runner --platform ios --team-id <APPLE_TEAM_ID> test <flow-files>\n" +
 				"Note: --team-id is not required for simulators")
 		}
-		if cfg.AppFile == "" && flowsUseClearState(flows) {
-			return fmt.Errorf("clearState on iOS requires --app-file to reinstall the app after uninstalling\n" +
+		// clearState on iOS uninstalls + reinstalls. On real devices the host
+		// can't reach the installed .app bundle, so --app-file is mandatory.
+		// On simulators the runner auto-discovers the installed bundle via
+		// `simctl get_app_container` and stages a copy before uninstall, so
+		// --app-file is optional (matches Maestro CLI's behavior).
+		if cfg.AppFile == "" && !isSimTarget && flowsUseClearState(flows) {
+			return fmt.Errorf("clearState on real iOS devices requires --app-file — " +
+				"the installed bundle isn't reachable from the host. On simulators no flag is needed.\n" +
 				"Usage: maestro-runner --app-file <path-to-ipa-or-app> --platform ios test <flow-files>")
 		}
+
+		// Advisory only: surface Flutter debug-build pitfall before the run
+		// starts. Standalone debug builds crash and produce a port-forward
+		// flood — easy to misread as a maestro-runner bug.
+		warnIfFlutterDebugBuild(cfg.AppFile)
 	}
 
 	// Extract appId/url from first flow if not in config
@@ -1279,22 +1365,24 @@ func executeSingleDevice(cfg *RunConfig, flows []flow.Flow) (*executor.RunResult
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
-		OnFlowStart:        onFlowStart,
+		OnFlowStart:        onFlowStartWithCloud(cfg),
 		OnStepComplete:     onStepComplete,
 		OnNestedStep:       onNestedStep,
 		OnNestedFlowStart:  onNestedFlowStart,
-		OnFlowEnd:          onFlowEnd,
+		OnFlowEnd:          onFlowEndWithCloud(cfg),
 	})
 
+	notifyCloudRunStart(cfg, len(flows))
 	return runner.Run(context.Background(), flows)
 }
 
@@ -1319,22 +1407,24 @@ func ExecuteFlowWithDriver(driver core.Driver, cfg *RunConfig, f flow.Flow) (*ex
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
-		OnFlowStart:        onFlowStart,
+		OnFlowStart:        onFlowStartWithCloud(cfg),
 		OnStepComplete:     onStepComplete,
 		OnNestedStep:       onNestedStep,
 		OnNestedFlowStart:  onNestedFlowStart,
-		OnFlowEnd:          onFlowEnd,
+		OnFlowEnd:          onFlowEndWithCloud(cfg),
 	})
 
+	notifyCloudRunStart(cfg, 1)
 	return runner.Run(context.Background(), []flow.Flow{f})
 }
 
@@ -1386,6 +1476,51 @@ func onFlowStart(flowIdx, totalFlows int, name, file string) {
 		color(colorCyan), flowIdx+1, totalFlows, color(colorReset),
 		color(colorBold), name, color(colorReset), file)
 	fmt.Println(strings.Repeat("─", 60))
+}
+
+// notifyCloudRunStart fires CloudProvider.OnRunStart once before the first flow.
+// Errors are logged and do not abort the run.
+func notifyCloudRunStart(cfg *RunConfig, totalFlows int) {
+	if cfg.CloudProvider == nil {
+		return
+	}
+	if err := cfg.CloudProvider.OnRunStart(cfg.CloudMeta, totalFlows); err != nil {
+		logger.Warn("%s OnRunStart failed: %v", cfg.CloudProvider.Name(), err)
+	}
+}
+
+// onFlowStartWithCloud returns a flow-start callback that logs console progress
+// and fires CloudProvider.OnFlowStart when a cloud provider is configured.
+func onFlowStartWithCloud(cfg *RunConfig) func(flowIdx, totalFlows int, name, file string) {
+	return func(flowIdx, totalFlows int, name, file string) {
+		onFlowStart(flowIdx, totalFlows, name, file)
+		if cfg.CloudProvider == nil {
+			return
+		}
+		if err := cfg.CloudProvider.OnFlowStart(cfg.CloudMeta, flowIdx, totalFlows, name, file); err != nil {
+			logger.Warn("%s OnFlowStart failed: %v", cfg.CloudProvider.Name(), err)
+		}
+	}
+}
+
+// onFlowEndWithCloud returns a flow-end callback that logs console progress
+// and fires CloudProvider.OnFlowEnd when a cloud provider is configured.
+func onFlowEndWithCloud(cfg *RunConfig) func(name string, passed bool, durationMs int64, errMsg string) {
+	return func(name string, passed bool, durationMs int64, errMsg string) {
+		onFlowEnd(name, passed, durationMs, errMsg)
+		if cfg.CloudProvider == nil {
+			return
+		}
+		fr := &cloud.FlowResult{
+			Name:     name,
+			Passed:   passed,
+			Duration: durationMs,
+			Error:    errMsg,
+		}
+		if err := cfg.CloudProvider.OnFlowEnd(cfg.CloudMeta, fr); err != nil {
+			logger.Warn("%s OnFlowEnd failed: %v", cfg.CloudProvider.Name(), err)
+		}
+	}
 }
 
 func onStepComplete(idx int, desc string, passed bool, durationMs int64, errMsg string) {
@@ -1591,22 +1726,24 @@ func executeAppiumSingleSession(cfg *RunConfig, flows []flow.Flow) (*executor.Ru
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
 		DriverName:         "appium",
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
-		OnFlowStart:        onFlowStart,
+		OnFlowStart:        onFlowStartWithCloud(cfg),
 		OnStepComplete:     onStepComplete,
 		OnNestedStep:       onNestedStep,
 		OnNestedFlowStart:  onNestedFlowStart,
-		OnFlowEnd:          onFlowEnd,
+		OnFlowEnd:          onFlowEndWithCloud(cfg),
 	})
 
+	notifyCloudRunStart(cfg, len(flows))
 	return runner.Run(context.Background(), flows)
 }
 
@@ -1644,14 +1781,23 @@ func executeAppiumParallel(cfg *RunConfig, count int, flows []flow.Flow) (*execu
 		return nil, err
 	}
 
-	// Report to cloud providers per-worker (each session = separate cloud job)
+	// Report to cloud providers per-worker (each session = separate cloud job).
+	// Each worker filters down to only the flows it actually ran, so the cloud
+	// dashboard's job page reflects that worker's slice of the run rather than
+	// the run-wide totals.
 	for i, cm := range cloudMetas {
 		if cm.provider == nil {
 			continue
 		}
-		// Collect flow results that ran on this worker
+		workerSessionID := workers[i].SessionID
+
 		var workerFlows []cloud.FlowResult
+		var passedCount, failedCount int
+		var durationMs int64
 		for _, f := range result.FlowResults {
+			if f.SessionID != workerSessionID {
+				continue
+			}
 			workerFlows = append(workerFlows, cloud.FlowResult{
 				Name:     f.Name,
 				File:     f.SourceFile,
@@ -1659,20 +1805,27 @@ func executeAppiumParallel(cfg *RunConfig, count int, flows []flow.Flow) (*execu
 				Duration: f.Duration,
 				Error:    f.Error,
 			})
+			durationMs += f.Duration
+			switch f.Status {
+			case report.StatusPassed:
+				passedCount++
+			case report.StatusFailed:
+				failedCount++
+			}
 		}
 		cloudResult := &cloud.TestResult{
-			Passed:      result.Status == report.StatusPassed,
-			Total:       result.TotalFlows,
-			PassedCount: result.PassedFlows,
-			FailedCount: result.FailedFlows,
-			Duration:    result.Duration,
+			Passed:      failedCount == 0 && len(workerFlows) > 0,
+			Total:       len(workerFlows),
+			PassedCount: passedCount,
+			FailedCount: failedCount,
+			Duration:    durationMs,
 			OutputDir:   cfg.OutputDir,
 			Flows:       workerFlows,
 		}
 		if err := cm.provider.ReportResult(cfg.AppiumURL, cm.meta, cloudResult); err != nil {
 			logger.Warn("[appium-%d] %s result reporting failed: %v", i+1, cm.provider.Name(), err)
 		} else {
-			logger.Info("[appium-%d] %s job updated: passed=%v", i+1, cm.provider.Name(), cloudResult.Passed)
+			logger.Info("[appium-%d] %s job updated: passed=%v (flows=%d)", i+1, cm.provider.Name(), cloudResult.Passed, len(workerFlows))
 		}
 	}
 
@@ -1775,12 +1928,23 @@ func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	info := driver.GetPlatformInfo()
 	logger.Info("Appium session created successfully: %s", info.DeviceID)
 
-	// Detect cloud provider and extract metadata
+	// Build the provider chain: detected cloud provider (if any) + the session
+	// exporter (if --appium-session-file is set). Composite runs them all, so a
+	// cloud provider and the session file work together. See issue #91.
+	var providers []cloud.Provider
 	if p := cloud.Detect(cfg.AppiumURL); p != nil {
-		cfg.CloudProvider = p
+		providers = append(providers, p)
+	}
+	if cfg.AppiumSessionFile != "" {
+		providers = append(providers, cloud.NewSessionExporter(cfg.AppiumSessionFile))
+	}
+	if cp := cloud.Composite(providers...); cp != nil {
+		cfg.CloudProvider = cp
 		cfg.CloudMeta = make(map[string]string)
-		p.ExtractMeta(driver.SessionID(), driver.SessionCaps(), cfg.CloudMeta)
-		logger.Info("Cloud provider detected: %s", p.Name())
+		cp.ExtractMeta(driver.SessionID(), driver.SessionCaps(), cfg.CloudMeta)
+		cfg.CloudMeta[cloud.MetaAppiumURL] = strings.TrimSpace(cfg.AppiumURL)
+		cfg.CloudMeta[cloud.MetaDeviceID] = info.DeviceID
+		logger.Info("Cloud provider(s): %s", cp.Name())
 	}
 
 	// Print session details
@@ -2050,7 +2214,8 @@ func isSocketInUse(socketPath string) bool {
 	return device.IsOwnerAlive(socketPath)
 }
 
-// autoDetectDevicesFn can be overridden in tests to avoid host-dependent device state.
+// autoDetectDevicesFn is the device-discovery function used by
+// determineExecutionMode. Tests override it to make discovery hermetic.
 var autoDetectDevicesFn = autoDetectDevices
 
 // autoDetectDevices finds N available devices for the specified platform.
@@ -2246,12 +2411,26 @@ func createAppiumWorkers(cfg *RunConfig, count int) ([]executor.DeviceWorker, []
 		}
 	}
 
+	// Preserve the caller's Devices so we can swap in per-worker UDIDs and
+	// restore them at the end. When the user supplies len(Devices) >= count,
+	// we round-robin so each Appium session targets a distinct device. When
+	// fewer devices are configured (e.g. cloud mode where Appium picks), every
+	// session runs against the same caps.
+	originalDevices := cfg.Devices
+
 	for i := 0; i < count; i++ {
 		workerID := fmt.Sprintf("appium-%d", i+1)
 		printSetupStep(fmt.Sprintf("[%s] Creating Appium session...", workerID))
 
+		if len(originalDevices) >= count {
+			cfg.Devices = []string{originalDevices[i]}
+		} else {
+			cfg.Devices = originalDevices
+		}
+
 		driver, cleanup, err := createAppiumDriver(cfg)
 		if err != nil {
+			cfg.Devices = originalDevices
 			logger.Warn("Failed to create session for %s: %v", workerID, err)
 			cleanupAll()
 			return nil, nil, fmt.Errorf("failed to create %s: %w", workerID, err)
@@ -2263,24 +2442,54 @@ func createAppiumWorkers(cfg *RunConfig, count int) ([]executor.DeviceWorker, []
 			sessionID = appDrv.SessionID()
 		}
 
+		// Capture per-worker cloud metadata (each session = separate cloud job).
+		// Bound the closures below to *this* iteration's provider/meta.
+		workerProvider := cfg.CloudProvider
+		workerMeta := cfg.CloudMeta
+		workerName := workerID
+
+		var onFlowStart func(flowIdx, totalFlows int, name, file string)
+		var onFlowEnd func(name string, passed bool, durationMs int64, errMsg string)
+		if workerProvider != nil {
+			onFlowStart = func(flowIdx, totalFlows int, name, file string) {
+				if err := workerProvider.OnFlowStart(workerMeta, flowIdx, totalFlows, name, file); err != nil {
+					logger.Warn("[%s] %s OnFlowStart failed: %v", workerName, workerProvider.Name(), err)
+				}
+			}
+			onFlowEnd = func(name string, passed bool, durationMs int64, errMsg string) {
+				fr := &cloud.FlowResult{
+					Name:     name,
+					Passed:   passed,
+					Duration: durationMs,
+					Error:    errMsg,
+				}
+				if err := workerProvider.OnFlowEnd(workerMeta, fr); err != nil {
+					logger.Warn("[%s] %s OnFlowEnd failed: %v", workerName, workerProvider.Name(), err)
+				}
+			}
+		}
+
 		workers = append(workers, executor.DeviceWorker{
-			ID:        i,
-			DeviceID:  workerID,
-			SessionID: sessionID,
-			Driver:    driver,
-			Cleanup:   cleanup,
+			ID:          i,
+			DeviceID:    workerID,
+			SessionID:   sessionID,
+			Driver:      driver,
+			Cleanup:     cleanup,
+			OnFlowStart: onFlowStart,
+			OnFlowEnd:   onFlowEnd,
 		})
 		cleanups = append(cleanups, cleanup)
 
-		// Capture per-worker cloud metadata (each session = separate cloud job)
 		cloudMetas = append(cloudMetas, appiumWorkerMeta{
-			provider: cfg.CloudProvider,
-			meta:     cfg.CloudMeta,
+			provider: workerProvider,
+			meta:     workerMeta,
 		})
 		// Reset for next worker so createAppiumDriver detects fresh
 		cfg.CloudProvider = nil
 		cfg.CloudMeta = nil
 	}
+
+	cfg.Devices = originalDevices
 
 	return workers, cloudMetas, nil
 }
@@ -2295,13 +2504,14 @@ func createParallelRunner(cfg *RunConfig, workers []executor.DeviceWorker, platf
 	runnerConfig := executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
-		Artifacts:          executor.ArtifactOnFailure,
+		Artifacts:          cfg.Artifacts,
 		Device:             deviceInfo,
 		App:                buildAppReport(firstDriver),
 		RunnerVersion:      Version,
 		DriverName:         driverName,
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
+		ConditionTimeout:   cfg.ConditionTimeout,
 		TypingFrequency:    cfg.TypingFrequency,
 		// Callbacks will be set per-worker in parallel.go with device info
 	}

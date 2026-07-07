@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
@@ -31,6 +32,10 @@ type FlowRunner struct {
 	stepsSkipped int
 	// Sub-command tracking for compound steps (runFlow, repeat, retry)
 	subCommands []report.Command
+	// Effective wait-for-idle timeout (0 = disabled, used to skip settle)
+	waitForIdleTimeout int
+	// Active runFlow timeout label (e.g. "3s") for enriching sub-step errors
+	runFlowTimeout string
 }
 
 // Run executes the flow and returns the result.
@@ -47,6 +52,9 @@ func (fr *FlowRunner) Run() FlowResult {
 	// Initialize script engine
 	fr.script = NewScriptEngine()
 	defer fr.script.Close()
+
+	// Set parent context on driver so element-finding respects cancellation
+	fr.driver.SetContext(fr.ctx)
 
 	// Import system environment variables
 	fr.script.ImportSystemEnv()
@@ -74,12 +82,19 @@ func (fr *FlowRunner) Run() FlowResult {
 	if appID := fr.flow.Config.EffectiveAppID(); appID != "" {
 		fr.script.SetVariable("APP_ID", appID)
 	}
-	fr.script.SetVariables(fr.flow.Config.Env)
+	// Expand flow config env values to support ${VAR || "default"} syntax
+	for k, v := range fr.flow.Config.Env {
+		fr.script.SetVariable(k, fr.script.ExpandVariables(v))
+	}
 
 	// Apply commandTimeout if specified - overrides driver's default find timeout
 	if fr.flow.Config.CommandTimeout > 0 {
 		fr.driver.SetFindTimeout(fr.flow.Config.CommandTimeout)
 	}
+
+	// Apply the global condition-check timeout for when:/while: checks. 0 keeps
+	// the engine's fast default; --condition-timeout / config overrides it (#110).
+	fr.script.SetConditionTimeout(fr.config.ConditionTimeout)
 
 	// Apply waitForIdleTimeout with priority:
 	// Flow config > CLI flag > Workspace config > Cap file > Default (5000ms)
@@ -89,6 +104,7 @@ func (fr *FlowRunner) Run() FlowResult {
 	if fr.flow.Config.WaitForIdleTimeout != nil {
 		waitForIdleTimeout = *fr.flow.Config.WaitForIdleTimeout // flow override (highest priority)
 	}
+	fr.waitForIdleTimeout = waitForIdleTimeout
 	if err := fr.driver.SetWaitForIdleTimeout(waitForIdleTimeout); err != nil {
 		// Log warning but continue - some drivers don't support this
 		_ = err // ignore error, just continue
@@ -108,8 +124,19 @@ func (fr *FlowRunner) Run() FlowResult {
 	// Ensure a WDA session exists before execution starts.
 	// If launchApp runs later, it reuses this session and updates settings.
 	// Use Unwrap to reach through wrapper layers (e.g. FlutterDriver).
-	if ensurer, ok := core.Unwrap(fr.driver).(core.SessionEnsurer); ok {
-		appID := fr.flow.Config.EffectiveAppID()
+	innerDriver := core.Unwrap(fr.driver)
+	// Let the driver inspect the flow before session creation. The WDA
+	// driver uses this to register XCTest's alert monitor only when the
+	// flow contains a launchApp step (matches maestro's behavior of
+	// auto-handling permission alerts only when permissions are configured).
+	if preparer, ok := innerDriver.(core.FlowAware); ok {
+		preparer.PrepareForFlow(fr.collectStepsForPrepare())
+	}
+	if ensurer, ok := innerDriver.(core.SessionEnsurer); ok {
+		// Expand ${VAR} placeholders in top-level appId so CLI -e variables
+		// substitute correctly (the YAML's appId field doesn't go through
+		// ExpandStep — that runs on step selectors, not flow config).
+		appID := fr.script.ExpandVariables(fr.flow.Config.EffectiveAppID())
 		if appID != "" {
 			if err := ensurer.EnsureSession(appID); err != nil {
 				logger.Warn("failed to ensure session: %v", err)
@@ -126,6 +153,14 @@ func (fr *FlowRunner) Run() FlowResult {
 
 	// Mark flow as started
 	fr.flowWriter.Start()
+
+	// Reset any console / page-error noise captured before the first step
+	// ran. The CDP browser driver subscribes to Runtime events during
+	// construction and the initial navigation to cfg.URL fires events
+	// before the user's flow begins — we don't want those polluting the
+	// flow's report or double-counting alongside the launchApp navigation.
+	// No-op for drivers that don't implement consoleLogReporter.
+	resetConsoleLogs(fr.driver)
 
 	// Execute all steps
 	flowStatus := report.StatusPassed
@@ -146,8 +181,8 @@ func (fr *FlowRunner) Run() FlowResult {
 			result := fr.executeNestedStep(step)
 			if !result.Success && !step.IsOptional() {
 				// onFlowStart failed - fail the flow
-				fr.flowWriter.End(report.StatusFailed)
 				errMsg := fmt.Sprintf("onFlowStart failed: %v", result.Error)
+				fr.flowWriter.End(report.StatusFailed, errMsg)
 				if fr.config.OnFlowEnd != nil {
 					fr.config.OnFlowEnd(flowName, false, time.Since(flowStart).Milliseconds(), errMsg)
 				}
@@ -225,8 +260,34 @@ func (fr *FlowRunner) Run() FlowResult {
 		}
 	}
 
-	// Mark flow as complete
-	fr.flowWriter.End(flowStatus)
+	// Pull console / page error entries from the driver (web only).
+	// Any driver that exposes ConsoleLogReport() — the CDP browser driver
+	// does today, others return nothing — surfaces its captured entries
+	// into the flow report so users see JS errors without writing an
+	// explicit `assertNoJSErrors` / `getConsoleLogs` step.
+	consoleLogs := collectConsoleLogs(fr.driver)
+	if len(consoleLogs) > 0 {
+		fr.flowWriter.SetConsoleLogs(consoleLogs)
+	}
+
+	// Opt-in stricter mode: fail the flow if the captured console contains
+	// any error / exception entries. Equivalent to running `assertNoJSErrors`
+	// at flow end, without requiring the user to add the step explicitly.
+	// Only takes effect when the flow's `failOnConsoleError: true` config is
+	// set AND the flow didn't already fail for another reason (we don't want
+	// to flip status from failed back to a different failure shape).
+	if fr.flow.Config.FailOnConsoleError && flowStatus != report.StatusFailed {
+		if msg := jsErrorSummary(consoleLogs); msg != "" {
+			flowStatus = report.StatusFailed
+			flowError = msg
+		}
+	}
+
+	// Mark flow as complete. Pass the flow-level error so the report picks
+	// up failures that didn't originate from a command (e.g.
+	// failOnConsoleError or runFlow timeout) — End() falls back to this
+	// when no command-level error is present.
+	fr.flowWriter.End(flowStatus, flowError)
 
 	// Calculate duration
 	flowDuration := time.Since(flowStart).Milliseconds()
@@ -309,26 +370,33 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 		fr.subCommands = nil
 		result = fr.executeRunFlow(s)
 
-	// App lifecycle steps - inject flow's appId/url if not specified
+	// App lifecycle steps - inject flow's appId/url if not specified.
+	// ExpandStep above runs BEFORE the config copy, so any ${VAR} in the
+	// flow's top-level `appId:` would otherwise leak through unexpanded.
+	// Re-expand after the copy so CLI -e variables substitute correctly.
 	case *flow.LaunchAppStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 	case *flow.StopAppStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 	case *flow.KillAppStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 	case *flow.ClearStateStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 
 	// EvalBrowserScript - execute JS in browser, store output variable
@@ -437,6 +505,11 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 			result = fr.driver.Execute(step)
 		}
 
+	// Tap steps - apply repeat/delay/retry/settle options
+	case *flow.TapOnStep, *flow.DoubleTapOnStep, *flow.LongPressOnStep:
+		opts, _ := extractTapOptions(step)
+		result = fr.executeTapWithOptions(step, opts)
+
 	// All other steps - delegate to driver
 	default:
 		result = fr.driver.Execute(step)
@@ -506,6 +579,60 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 	return status, errorMsg, stepDuration
 }
 
+// maxPrepareScanDepth bounds runFlow expansion during pre-session scanning so a
+// cyclic or deeply nested subflow graph can't loop forever.
+const maxPrepareScanDepth = 10
+
+// collectStepsForPrepare returns the steps a FlowAware driver should inspect
+// before session creation, in execution order: the onFlowStart hook steps
+// followed by the body, with runFlow subflows (inline and file-based) expanded
+// inline. This lets the WDA driver find the launchApp that actually launches the
+// app — and its permissions — even when it lives in onFlowStart or a runFlow
+// subflow, instead of only the main body (#108). On a physical iOS device that
+// gap left defaultAlertAction empty, so system permission dialogs weren't
+// auto-accepted and could wedge the device; it also diverged from the simulator.
+//
+// onFlowStart comes first so a driver that takes the first launchApp selects the
+// one reached first at runtime. runFlow wrappers are dropped and their children
+// inlined; file-based subflows are parsed best-effort (parse errors are ignored
+// here — they surface during execution). A visited set + depth cap guard cycles.
+func (fr *FlowRunner) collectStepsForPrepare() []flow.Step {
+	var out []flow.Step
+	seen := make(map[string]bool)
+
+	var expand func(steps []flow.Step, depth int)
+	expand = func(steps []flow.Step, depth int) {
+		if depth > maxPrepareScanDepth {
+			return
+		}
+		for _, s := range steps {
+			rf, ok := s.(*flow.RunFlowStep)
+			if !ok {
+				out = append(out, s)
+				continue
+			}
+			// Inline subflow steps are already parsed.
+			if len(rf.Steps) > 0 {
+				expand(rf.Steps, depth+1)
+			}
+			// File-based subflow: parse it to reach its launchApp.
+			if rf.File != "" {
+				path := fr.script.ResolvePath(rf.File)
+				if !seen[path] {
+					seen[path] = true
+					if sub, err := flow.ParseFile(path); err == nil {
+						expand(sub.Steps, depth+1)
+					}
+				}
+			}
+		}
+	}
+
+	expand(fr.flow.Config.OnFlowStart, 0)
+	expand(fr.flow.Steps, 0)
+	return out
+}
+
 // executeRepeat handles repeat step execution.
 func (fr *FlowRunner) executeRepeat(step *flow.RepeatStep) *core.CommandResult {
 	hasWhile := step.While.Visible != nil || step.While.NotVisible != nil || step.While.Script != ""
@@ -514,7 +641,14 @@ func (fr *FlowRunner) executeRepeat(step *flow.RepeatStep) *core.CommandResult {
 	if hasWhile && step.Times == "" {
 		defaultTimes = 1000 // Max iterations for while loops without explicit times
 	}
-	times := fr.script.ParseInt(step.Times, defaultTimes)
+	times, err := fr.script.ParseIntStrict(step.Times, defaultTimes)
+	if err != nil {
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: fmt.Sprintf("repeat: invalid 'times' value: %v", err),
+		}
+	}
 	if times <= 0 {
 		times = 1
 	}
@@ -529,9 +663,14 @@ func (fr *FlowRunner) executeRepeat(step *flow.RepeatStep) *core.CommandResult {
 			}
 		}
 
-		// Check while condition
+		// Check while condition. Expand a fresh copy of the condition each
+		// iteration: step.While keeps the pristine ${...} template so a loop
+		// body that mutates the interpolated variable is picked up next pass
+		// (in-place expansion would replace the template after iteration 1).
 		if hasWhile {
-			if !fr.script.CheckCondition(fr.ctx, step.While, fr.driver) {
+			whileCond := step.While
+			fr.script.ExpandCondition(&whileCond)
+			if !fr.script.CheckCondition(fr.ctx, whileCond, fr.driver) {
 				break // Condition no longer met
 			}
 		}
@@ -559,7 +698,14 @@ func (fr *FlowRunner) executeRepeat(step *flow.RepeatStep) *core.CommandResult {
 
 // executeRetry handles retry step execution.
 func (fr *FlowRunner) executeRetry(step *flow.RetryStep) *core.CommandResult {
-	maxRetries := fr.script.ParseInt(step.MaxRetries, 3)
+	maxRetries, err := fr.script.ParseIntStrict(step.MaxRetries, 3)
+	if err != nil {
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: fmt.Sprintf("retry: invalid 'maxRetries' value: %v", err),
+		}
+	}
 
 	// Apply env variables with restore
 	defer fr.script.withEnvVars(step.Env)()
@@ -616,14 +762,35 @@ func (fr *FlowRunner) executeRetry(step *flow.RetryStep) *core.CommandResult {
 
 // executeRunFlow handles runFlow step execution.
 func (fr *FlowRunner) executeRunFlow(step *flow.RunFlowStep) *core.CommandResult {
-	// Check when condition
+	// Check when condition. When false, prefer the else branch over skipping
+	// if one was provided.
 	if step.When != nil {
 		if !fr.script.CheckCondition(fr.ctx, *step.When, fr.driver) {
+			if step.ElseFile != "" || len(step.ElseSteps) > 0 {
+				return fr.executeRunFlowElse(step)
+			}
 			return &core.CommandResult{
 				Success: true,
 				Message: "Skipped (when condition not met)",
 			}
 		}
+	}
+
+	// Apply runFlow timeout if specified
+	if step.TimeoutMs > 0 {
+		timeout := time.Duration(step.TimeoutMs) * time.Millisecond
+		ctx, cancel := context.WithTimeout(fr.ctx, timeout)
+		defer cancel()
+		origCtx := fr.ctx
+		origTimeout := fr.runFlowTimeout
+		fr.ctx = ctx
+		fr.runFlowTimeout = timeout.String()
+		fr.driver.SetContext(ctx)
+		defer func() {
+			fr.ctx = origCtx
+			fr.runFlowTimeout = origTimeout
+			fr.driver.SetContext(origCtx)
+		}()
 	}
 
 	// Report nested flow start
@@ -638,12 +805,28 @@ func (fr *FlowRunner) executeRunFlow(step *flow.RunFlowStep) *core.CommandResult
 	// Apply env variables with restore
 	defer fr.script.withEnvVars(step.Env)()
 
+	// Format timeout limit for error messages
+	timeoutLimit := ""
+	if step.TimeoutMs > 0 {
+		timeoutLimit = (time.Duration(step.TimeoutMs) * time.Millisecond).String()
+	}
+
 	// Execute inline steps if present
 	if len(step.Steps) > 0 {
+		var lastStep string
 		for _, nestedStep := range step.Steps {
+			if fr.ctx.Err() != nil {
+				msg := fmt.Sprintf("runFlow timed out (%s timeout) — last completed: %s", timeoutLimit, lastStep)
+				return &core.CommandResult{
+					Success: false,
+					Error:   fmt.Errorf("%s", msg),
+					Message: msg,
+				}
+			}
+			lastStep = nestedStep.Describe()
 			result := fr.executeNestedStep(nestedStep)
 			if !result.Success && !nestedStep.IsOptional() {
-				return result
+				return fr.wrapRunFlowTimeout(result, step, lastStep, timeoutLimit)
 			}
 		}
 		return &core.CommandResult{
@@ -671,7 +854,147 @@ func (fr *FlowRunner) executeRunFlow(step *flow.RunFlowStep) *core.CommandResult
 		}
 	}
 
-	return fr.executeSubFlow(*subFlow)
+	result := fr.executeSubFlow(*subFlow)
+	if !result.Success {
+		return fr.wrapRunFlowTimeout(result, step, "", timeoutLimit)
+	}
+	return result
+}
+
+// executeRunFlowElse runs the fallback branch of a runFlow step (the `else:`
+// or `elseCommands:` block) when the `when:` condition evaluated false.
+// Mirrors the body of executeRunFlow for the else inputs — same depth bump,
+// env handling, timeout propagation, and sub-flow loading semantics.
+func (fr *FlowRunner) executeRunFlowElse(step *flow.RunFlowStep) *core.CommandResult {
+	// Apply runFlow timeout if specified (same as main branch).
+	if step.TimeoutMs > 0 {
+		timeout := time.Duration(step.TimeoutMs) * time.Millisecond
+		ctx, cancel := context.WithTimeout(fr.ctx, timeout)
+		defer cancel()
+		origCtx := fr.ctx
+		origTimeout := fr.runFlowTimeout
+		fr.ctx = ctx
+		fr.runFlowTimeout = timeout.String()
+		fr.driver.SetContext(ctx)
+		defer func() {
+			fr.ctx = origCtx
+			fr.runFlowTimeout = origTimeout
+			fr.driver.SetContext(origCtx)
+		}()
+	}
+
+	if fr.config.OnNestedFlowStart != nil && step.ElseFile != "" {
+		fr.config.OnNestedFlowStart(fr.depth+1, "Run "+step.ElseFile+" (else)")
+	}
+
+	fr.depth++
+	defer func() { fr.depth-- }()
+
+	defer fr.script.withEnvVars(step.Env)()
+
+	timeoutLimit := ""
+	if step.TimeoutMs > 0 {
+		timeoutLimit = (time.Duration(step.TimeoutMs) * time.Millisecond).String()
+	}
+
+	// Inline else steps take precedence over ElseFile when both are set.
+	if len(step.ElseSteps) > 0 {
+		var lastStep string
+		for _, nestedStep := range step.ElseSteps {
+			if fr.ctx.Err() != nil {
+				msg := fmt.Sprintf("runFlow else timed out (%s timeout) — last completed: %s", timeoutLimit, lastStep)
+				return &core.CommandResult{
+					Success: false,
+					Error:   fmt.Errorf("%s", msg),
+					Message: msg,
+				}
+			}
+			lastStep = nestedStep.Describe()
+			result := fr.executeNestedStep(nestedStep)
+			if !result.Success && !nestedStep.IsOptional() {
+				return fr.wrapRunFlowTimeout(result, step, lastStep, timeoutLimit)
+			}
+		}
+		return &core.CommandResult{
+			Success: true,
+			Message: "Else branch completed",
+		}
+	}
+
+	if step.ElseFile == "" {
+		return &core.CommandResult{
+			Success: false,
+			Error:   fmt.Errorf("runFlow else: no fallback file or steps specified"),
+			Message: "runFlow else requires file or inline steps",
+		}
+	}
+
+	filePath := fr.script.ResolvePath(step.ElseFile)
+	subFlow, err := flow.ParseFile(filePath)
+	if err != nil {
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: fmt.Sprintf("Failed to parse else flow file: %s", filePath),
+		}
+	}
+
+	result := fr.executeSubFlow(*subFlow)
+	if !result.Success {
+		return fr.wrapRunFlowTimeout(result, step, "", timeoutLimit)
+	}
+	return result
+}
+
+// wrapRunFlowTimeout replaces cryptic context errors with a clear timeout message
+// when a runFlow step fails due to its timeout expiring.
+func (fr *FlowRunner) wrapRunFlowTimeout(result *core.CommandResult, step *flow.RunFlowStep, lastStep, timeoutLimit string) *core.CommandResult {
+	if timeoutLimit == "" || fr.ctx.Err() == nil {
+		return result // not a timeout — return original error
+	}
+
+	// Build informative message: include timeout value, flow file, and what was running
+	var msg string
+	if step.File != "" {
+		msg = fmt.Sprintf("runFlow '%s' timed out (%s timeout)", step.File, timeoutLimit)
+	} else {
+		msg = fmt.Sprintf("runFlow timed out (%s timeout)", timeoutLimit)
+	}
+	if lastStep != "" {
+		msg += fmt.Sprintf(" while executing: %s", lastStep)
+	}
+
+	return &core.CommandResult{
+		Success: false,
+		Error:   fmt.Errorf("%s", msg),
+		Message: msg,
+	}
+}
+
+// enrichTimeoutError replaces cryptic "context deadline exceeded" in sub-step errors
+// with a message that references the active runFlow timeout.
+func (fr *FlowRunner) enrichTimeoutError(result *core.CommandResult) *core.CommandResult {
+	timeout := fr.runFlowTimeout
+	enriched := *result // shallow copy
+
+	reason := fmt.Sprintf("runFlow timeout (%s) exceeded", timeout)
+
+	if enriched.Error != nil {
+		orig := enriched.Error.Error()
+		// Replace the cryptic Go context error with timeout context
+		cleaned := strings.ReplaceAll(orig, "context deadline exceeded", reason)
+		if cleaned == orig {
+			// No replacement happened — append the timeout info
+			cleaned = orig + " (" + reason + ")"
+		}
+		enriched.Error = fmt.Errorf("%s", cleaned)
+	}
+
+	if enriched.Message != "" {
+		enriched.Message = strings.ReplaceAll(enriched.Message, "context deadline exceeded", reason)
+	}
+
+	return &enriched
 }
 
 // executeNestedStep executes a step without report tracking (for nested execution).
@@ -715,6 +1038,34 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	case *flow.RunFlowStep:
 		fr.script.ExpandStep(step)
 		result = fr.executeRunFlow(s)
+
+	// App lifecycle steps - inject flow's appId if not specified.
+	// Mirrors executeStep so hooks (onFlowStart/onFlowComplete) and other nested
+	// invocations resolve the default appId the same way as top-level steps.
+	case *flow.LaunchAppStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
+	case *flow.StopAppStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
+	case *flow.KillAppStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
+	case *flow.ClearStateStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
 	case *flow.TakeScreenshotStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)
@@ -795,6 +1146,11 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 				fr.script.SetCopiedText(text)
 			}
 		}
+	case *flow.TapOnStep, *flow.DoubleTapOnStep, *flow.LongPressOnStep:
+		fr.script.ExpandStep(step)
+		opts, _ := extractTapOptions(step)
+		result = fr.executeTapWithOptions(step, opts)
+
 	default:
 		// Expand variables before driver execution
 		fr.script.ExpandStep(step)
@@ -802,6 +1158,11 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	}
 
 	duration := time.Since(start).Milliseconds()
+
+	// Enrich sub-step errors with runFlow timeout context
+	if !result.Success && fr.runFlowTimeout != "" && fr.ctx.Err() != nil {
+		result = fr.enrichTimeoutError(result)
+	}
 
 	// Track nested step counts (compound steps like runFlow/repeat/retry don't count themselves)
 	if !isCompoundStep {
@@ -871,14 +1232,20 @@ func (fr *FlowRunner) executeSubFlow(subFlow flow.Flow) *core.CommandResult {
 	defer fr.script.withEnvVars(subFlow.Config.Env)()
 
 	// Execute steps
+	var lastStepDesc string
 	for _, step := range subFlow.Steps {
 		if fr.ctx.Err() != nil {
+			msg := "Sub-flow cancelled"
+			if lastStepDesc != "" {
+				msg = fmt.Sprintf("Sub-flow cancelled after: %s", lastStepDesc)
+			}
 			return &core.CommandResult{
 				Success: false,
 				Error:   fr.ctx.Err(),
-				Message: "Sub-flow cancelled",
+				Message: msg,
 			}
 		}
+		lastStepDesc = step.Describe()
 
 		// Inject subflow's appId/url into app lifecycle steps (same as executeStep does for main flow)
 		switch s := step.(type) {
@@ -969,4 +1336,59 @@ func (fr *FlowRunner) captureArtifacts(cmdIdx int, timing string) report.Command
 	}
 
 	return artifacts
+}
+
+// consoleLogReporter is a duck-typed interface drivers can optionally
+// implement to surface browser console / page error entries into the flow
+// report. The CDP browser driver implements it (see
+// pkg/driver/browser/cdp). Mobile / native drivers don't, and that's fine
+// — the type assertion fails and we leave ConsoleLogs nil.
+//
+// ClearConsoleLogReport is called at the start of each top-level flow so
+// noise captured during driver construction (initial navigation before any
+// user step ran) doesn't pollute the flow's report.
+type consoleLogReporter interface {
+	ConsoleLogReport() []report.ConsoleLog
+	ClearConsoleLogReport()
+}
+
+// collectConsoleLogs extracts console entries from a driver if it
+// implements consoleLogReporter, returning nil otherwise.
+func collectConsoleLogs(d core.Driver) []report.ConsoleLog {
+	provider, ok := core.Unwrap(d).(consoleLogReporter)
+	if !ok {
+		return nil
+	}
+	return provider.ConsoleLogReport()
+}
+
+// resetConsoleLogs clears the driver's captured-console buffer if it
+// supports it. Called at flow start so pre-flow events (driver
+// construction's initial navigation) are discarded — only events the
+// flow's own steps trigger are included in the per-flow report.
+func resetConsoleLogs(d core.Driver) {
+	if provider, ok := core.Unwrap(d).(consoleLogReporter); ok {
+		provider.ClearConsoleLogReport()
+	}
+}
+
+// jsErrorSummary returns a human-readable string listing the error- and
+// exception-level entries in a captured console buffer, or "" if there are
+// none. Used by the failOnConsoleError flow config to produce the failure
+// message. Mirrors what `assertNoJSErrors` produces.
+func jsErrorSummary(logs []report.ConsoleLog) string {
+	if len(logs) == 0 {
+		return ""
+	}
+	var errs []string
+	for _, e := range logs {
+		if e.Level == "error" || e.Level == "exception" {
+			errs = append(errs, fmt.Sprintf("[%s] %s", e.Level, e.Message))
+		}
+	}
+	if len(errs) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("failOnConsoleError: %d JS error(s) detected:\n%s",
+		len(errs), strings.Join(errs, "\n"))
 }

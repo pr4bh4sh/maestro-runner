@@ -3,6 +3,7 @@ package uiautomator2
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -54,6 +55,19 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 			return errorResult(err, fmt.Sprintf("Failed to tap at relative point: %v", err))
 		}
 		return successResult(fmt.Sprintf("Tapped at relative point (%d, %d) on element", x, y), info)
+	}
+
+	// If duration is set, hold the press for that long (also covers longPress: true via tapOn).
+	if step.DurationMs > 0 || step.LongPress {
+		duration := step.DurationMs
+		if duration <= 0 {
+			duration = 1000
+		}
+		x, y := info.Bounds.Center()
+		if err := d.client.LongClick(x, y, duration); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to press for %dms: %v", duration, err))
+		}
+		return successResult("Pressed on element", info)
 	}
 
 	// For relative selectors, elem is nil but we have bounds - tap at center
@@ -129,7 +143,10 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %v", err))
 	}
 
-	duration := 1000 // default 1 second
+	duration := step.DurationMs
+	if duration <= 0 {
+		duration = 1000 // default 1 second
+	}
 
 	// For relative selectors, elem is nil but we have bounds - long press at center
 	if elem == nil {
@@ -164,6 +181,17 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 
 	if x == 0 && y == 0 {
 		return errorResult(fmt.Errorf("no point specified"), "Either point or x/y coordinates required")
+	}
+
+	if step.DurationMs > 0 || step.LongPress {
+		duration := step.DurationMs
+		if duration <= 0 {
+			duration = 1000
+		}
+		if err := d.client.LongClick(x, y, duration); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to press at point for %dms: %v", duration, err))
+		}
+		return successResult(fmt.Sprintf("Pressed at (%d, %d)", x, y), nil)
 	}
 
 	if err := d.client.Click(x, y); err != nil {
@@ -289,9 +317,6 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 				}
 				return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), nil)
 			}
-		}
-		if err := active.SendKeys(text); err != nil {
-			return errorResult(err, fmt.Sprintf("Failed to input text: %v", err))
 		}
 	}
 
@@ -422,6 +447,19 @@ func (d *Driver) hideKeyboardBack() *core.CommandResult {
 	return errorResult(nil, "BACK key failed to hide keyboard")
 }
 
+	// Appium's call didn't take. Fall back to BACK, but only while the keyboard
+	// is still shown so we can't trigger a stray back-navigation.
+	if d.isKeyboardVisible() {
+		if err := d.client.PressKeyCode(uiautomator2.KeyCodeBack); err == nil && d.waitKeyboardHidden() {
+			return successResult("Keyboard hidden (via back key)", nil)
+		}
+	}
+
+	// Couldn't confirm dismissal — don't fail the step (the keyboard may already
+	// be gone on a device we can't inspect).
+	return successResult("Hide keyboard (dismissal not confirmed)", nil)
+}
+
 func (d *Driver) inputRandom(step *flow.InputRandomStep) *core.CommandResult {
 	length := step.Length
 	if length <= 0 {
@@ -468,20 +506,14 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 		direction = "down"
 	}
 
-	// Get screen size for dynamic scroll area
 	width, height, err := d.screenSize()
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
 	}
 
-	// Use most of screen for scroll area (leave margins)
-	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
-
-	// /appium/gestures/scroll already uses scroll semantics — no inversion needed
-	if err := d.client.ScrollInArea(area, direction, 0.5, 0); err != nil {
+	if err := d.performScroll(direction, width, height, step.Engine, 0.5); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to scroll: %v", err))
 	}
-
 	return successResult(fmt.Sprintf("Scrolled %s", direction), nil)
 }
 
@@ -501,25 +533,28 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 	deadline := time.Now().Add(timeout)
 
-	// Get screen size for dynamic scroll area
 	width, height, err := d.screenSize()
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
 	}
 
-	// Use most of screen for scroll area (leave margins)
-	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
-
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		// Try to find element (short timeout - includes page source fallback)
 		_, info, err := d.findElement(step.Element, true, 1000)
 		if err == nil && info != nil {
-			// Element found - return success
-			return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+			// UIAutomator's view hierarchy can include items in a ScrollView
+			// that are off-screen. Confirm the element actually overlaps the
+			// viewport before declaring success, otherwise scrollUntilVisible
+			// can short-circuit without ever scrolling.
+			if isElementOnScreen(info, width, height) {
+				return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+			}
+		} else if err != nil && !isElementNotFoundError(err) {
+			// Real infrastructure failure — bail rather than silently looping.
+			return errorResult(err, "Failed to find element")
 		}
 
-		// /appium/gestures/scroll already uses scroll semantics — no inversion needed
-		if err := d.client.ScrollInArea(area, direction, 0.3, 0); err != nil {
+		if err := d.performScroll(direction, width, height, step.Engine, 0.3); err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to scroll: %v", err))
 		}
 
@@ -527,6 +562,95 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found after %d scrolls", maxScrolls))
+}
+
+// scrollDurationMs is the swipe duration (in ms) used for adb input swipe.
+const scrollDurationMs = 300
+
+// performScroll dispatches a scroll gesture. Default ("" or "adb") uses adb
+// input swipe (matches upstream Maestro and is the most reliable path across
+// Android skins, including OneUI where /appium/gestures/scroll often no-ops).
+// "agent" uses the existing UIA2-server Appium gesture path. ADB falls back
+// to the Appium path (with a warning) when no shell executor is available.
+// percent controls the swipe distance as a fraction of screen dimension —
+// callers use ~0.5 for plain scroll and ~0.3 for scrollUntilVisible (which
+// wants smaller steps to avoid overshooting the target).
+func (d *Driver) performScroll(direction string, width, height int, engine string, percent float64) error {
+	useAgent := strings.EqualFold(engine, "agent")
+	if !useAgent {
+		if d.device != nil {
+			return d.scrollByAdb(direction, width, height, percent)
+		}
+		logger.Warn("scroll: ADB shell unavailable, falling back to Appium gesture (may be unreliable on some Android skins)")
+	}
+	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
+	return d.client.ScrollInArea(area, direction, percent, 0)
+}
+
+// scrollByAdb issues `adb shell input swipe` over the local shell executor.
+// percent is the swipe distance as a fraction of the screen dimension along
+// the scroll axis. Direction uses Maestro scroll semantics (what becomes
+// visible — "down" reveals content below by swiping the finger UP).
+func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, percent float64) error {
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+	halfV := int(float64(screenHeight) * percent / 2)
+	halfH := int(float64(screenWidth) * percent / 2)
+	var fromX, fromY, toX, toY int
+	switch direction {
+	case "up":
+		fromX, fromY = centerX, centerY-halfV
+		toX, toY = centerX, centerY+halfV
+	case "down":
+		fromX, fromY = centerX, centerY+halfV
+		toX, toY = centerX, centerY-halfV
+	case "left":
+		fromX, fromY = centerX-halfH, centerY
+		toX, toY = centerX+halfH, centerY
+	case "right":
+		fromX, fromY = centerX+halfH, centerY
+		toX, toY = centerX-halfH, centerY
+	default:
+		fromX, fromY = centerX, centerY+halfV
+		toX, toY = centerX, centerY-halfV
+	}
+	cmd := fmt.Sprintf("input swipe %d %d %d %d %d", fromX, fromY, toX, toY, scrollDurationMs)
+	_, err := d.device.Shell(cmd)
+	return err
+}
+
+// isElementOnScreen reports whether an element's bounds overlap the visible
+// viewport. Malformed bounds (non-positive width/height — e.g. a clipped rect
+// with top>bottom) count as off-screen, so scrollUntilVisible keeps scrolling
+// instead of declaring success on a degenerate rect.
+func isElementOnScreen(info *core.ElementInfo, screenWidth, screenHeight int) bool {
+	b := info.Bounds
+	if b.Width <= 0 || b.Height <= 0 {
+		return false
+	}
+	return b.X+b.Width > 0 && b.X < screenWidth && b.Y+b.Height > 0 && b.Y < screenHeight
+}
+
+// isElementNotFoundError distinguishes expected "not on screen yet" lookups
+// (which scrollUntilVisible should swallow and keep scrolling) from real
+// infrastructure failures that should propagate immediately.
+func isElementNotFoundError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, phrase := range []string{
+		"not found",
+		"no elements match",
+		"no such element",
+		"could not be located",
+		"context deadline exceeded",
+	} {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
@@ -545,81 +669,67 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		direction = "up"
 	}
 
-	uiaDir := mapDirection(direction)
-
-	// If selector specified, swipe within that element's bounds
+	// If selector specified, derive swipe coordinates from the element's
+	// bounds and route through the same ADB `input swipe` path used by
+	// screen-percentage swipes. `SwipeInArea` (the previous path) does not
+	// honor `step.Duration`, producing a fast flick — sufficient for scroll
+	// containers but too fast for native drag targets (Compose sliders,
+	// custom drag-handlers), which discard the gesture. Using the ADB path
+	// with an element-derived start/end matches classic Maestro's semantics.
 	if step.Selector != nil && !step.Selector.IsEmpty() {
 		_, info, err := d.findElement(*step.Selector, step.IsOptional(), step.TimeoutMs)
 		if err != nil {
 			return errorResult(err, fmt.Sprintf("Element not found for swipe: %v", err))
 		}
 		if info != nil && info.Bounds.Width > 0 {
-			area := uiautomator2.NewRect(
-				info.Bounds.X,
-				info.Bounds.Y,
-				info.Bounds.Width,
-				info.Bounds.Height,
-			)
-			if err := d.client.SwipeInArea(area, uiaDir, 0.7, 0); err != nil {
-				return errorResult(err, fmt.Sprintf("Failed to swipe in element: %v", err))
-			}
-			return successResult(fmt.Sprintf("Swiped %s in element", direction), info)
+			startX, startY, endX, endY := swipeCoordsInBounds(direction, info.Bounds)
+			return d.swipeWithAbsoluteCoords(startX, startY, endX, endY, step.Duration)
 		}
 	}
 
-	// Get screen size
+	// No selector — use screen coordinates directly (matches Maestro behavior)
 	width, height, err := d.screenSize()
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
 	}
-
-	// No selector specified - try to find a scrollable element
-	// Wait up to 10 seconds for page to load and find scrollable
-	scrollableInfo, scrollableCount := d.findScrollableElement(10000)
-
-	// Print debug info about scrollable elements found
-	if scrollableInfo != nil {
-		b := scrollableInfo.Bounds
-		fmt.Printf("[swipe] Found %d scrollable(s), using: bounds=[%d,%d,%d,%d]\n",
-			scrollableCount, b.X, b.Y, b.Width, b.Height)
-
-		// Swipe within scrollable bounds using Maestro Android coordinates
-		var sX, sY, eX, eY int
-		switch direction {
-		case "up":
-			sX = b.X + b.Width*50/100
-			sY = b.Y + b.Height*50/100
-			eX = b.X + b.Width*50/100
-			eY = b.Y + b.Height*10/100
-		case "down":
-			sX = b.X + b.Width*50/100
-			sY = b.Y + b.Height*20/100
-			eX = b.X + b.Width*50/100
-			eY = b.Y + b.Height*90/100
-		case "left":
-			sX = b.X + b.Width*90/100
-			sY = b.Y + b.Height*50/100
-			eX = b.X + b.Width*10/100
-			eY = b.Y + b.Height*50/100
-		case "right":
-			sX = b.X + b.Width*10/100
-			sY = b.Y + b.Height*50/100
-			eX = b.X + b.Width*90/100
-			eY = b.Y + b.Height*50/100
-		default:
-			sX = b.X + b.Width*50/100
-			sY = b.Y + b.Height*50/100
-			eX = b.X + b.Width*50/100
-			eY = b.Y + b.Height*10/100
-		}
-
-		fmt.Printf("[swipe] Coords in scrollable: (%d,%d) → (%d,%d)\n", sX, sY, eX, eY)
-		return d.swipeWithAbsoluteCoords(sX, sY, eX, eY, step.Duration)
-	}
-
-	fmt.Printf("[swipe] No scrollable found, using screen coordinates (50%% center)\n")
-	// Fallback: Use coordinates starting from 50% center
 	return d.swipeWithMaestroCoordinates(direction, width, height, step.Duration)
+}
+
+// swipeCoordsInBounds returns absolute start/end coordinates for a
+// direction-based swipe anchored on an element. The swipe starts inside
+// the element (so the touch is captured by that element) and ends past
+// the opposite edge (so drag-based targets like native sliders reach
+// their extreme value). This matches classic Maestro's semantics on the
+// two common use cases:
+//   - scroll containers: touch starts inside and moves outward, scrolling
+//     the container by the drag distance
+//   - drag targets (sliders, drag handles): the release position past
+//     the edge pins the drag target to its extreme in that direction
+//
+// Negative coordinates are clamped to 0 (screen origin) so `adb input
+// swipe` receives on-screen coordinates even for elements flush against
+// a screen edge.
+func swipeCoordsInBounds(direction string, b core.Bounds) (startX, startY, endX, endY int) {
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	pctX := func(p int) int { return clamp(b.X + b.Width*p/100) }
+	pctY := func(p int) int { return clamp(b.Y + b.Height*p/100) }
+	switch direction {
+	case "up":
+		return pctX(50), pctY(90), pctX(50), pctY(-10)
+	case "down":
+		return pctX(50), pctY(10), pctX(50), pctY(110)
+	case "left":
+		return pctX(90), pctY(50), pctX(-10), pctY(50)
+	case "right":
+		return pctX(10), pctY(50), pctX(110), pctY(50)
+	default:
+		return pctX(50), pctY(50), pctX(50), pctY(0)
+	}
 }
 
 // findScrollableElement waits for and finds a scrollable element.
@@ -782,6 +892,16 @@ func (d *Driver) back(_ *flow.BackStep) *core.CommandResult {
 	}
 
 	return successResult("Pressed back", nil)
+}
+
+func (d *Driver) openNotifications(_ *flow.OpenNotificationsStep) *core.CommandResult {
+	if d.device == nil {
+		return errorResult(fmt.Errorf("no shell executor"), "openNotifications requires shell access")
+	}
+	if _, err := d.device.Shell("cmd statusbar expand-notifications"); err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to open notification shade: %v", err))
+	}
+	return successResult("Opened notification shade", nil)
 }
 
 func (d *Driver) pressKey(step *flow.PressKeyStep) *core.CommandResult {
@@ -1463,6 +1583,22 @@ func (d *Driver) takeScreenshot(step *flow.TakeScreenshotStep) *core.CommandResu
 		return errorResult(err, fmt.Sprintf("Failed to take screenshot: %v", err))
 	}
 
+	if step.CropOn != nil {
+		_, info, findErr := d.findElement(*step.CropOn, false, 0)
+		if findErr != nil || info == nil {
+			return errorResult(findErr, fmt.Sprintf("cropOn: element not found: %v", findErr))
+		}
+		sw, sh, dimErr := d.screenSize()
+		if dimErr != nil {
+			return errorResult(dimErr, "cropOn requires screen dimensions")
+		}
+		cropped, cropErr := core.CropScreenshot(data, info.Bounds, sw, sh)
+		if cropErr != nil {
+			return errorResult(cropErr, fmt.Sprintf("cropOn: %v", cropErr))
+		}
+		data = cropped
+	}
+
 	// Return screenshot data; caller handles saving to file if path specified
 	return &core.CommandResult{
 		Success: true,
@@ -1509,6 +1645,34 @@ func (d *Driver) addMedia(step *flow.AddMediaStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Added %d media files", len(step.Files)), nil)
+}
+
+func (d *Driver) removeMedia(_ *flow.RemoveMediaStep) *core.CommandResult {
+	if d.device == nil {
+		return errorResult(fmt.Errorf("device not configured"), "removeMedia requires device access")
+	}
+
+	// Clear the MediaStore index. The package name differs by Android version —
+	// try the modular provider first, then the legacy one. We swallow individual
+	// errors and only fail when both attempts fail, because devices have one or
+	// the other depending on version.
+	var lastErr error
+	cleared := false
+	for _, pkg := range []string{
+		"com.google.android.providers.media.module",
+		"com.android.providers.media",
+	} {
+		if _, err := d.device.Shell("pm clear " + pkg); err == nil {
+			cleared = true
+		} else {
+			lastErr = err
+		}
+	}
+	if !cleared {
+		return errorResult(lastErr, fmt.Sprintf("Failed to clear media providers: %v", lastErr))
+	}
+
+	return successResult("Cleared MediaStore index", nil)
 }
 
 func (d *Driver) startRecording(step *flow.StartRecordingStep) *core.CommandResult {
@@ -1561,7 +1725,7 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 		timeout = time.Duration(step.TimeoutMs) * time.Millisecond
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 	defer cancel()
 
 	// Determine selector for error messages
@@ -1606,157 +1770,42 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 	}
 }
 
-const (
-	defaultAnimationTimeoutMs = 15000
-	defaultAnimationSleepMs   = 200   // pause between the two comparison screenshots
-	screenshotDiffThreshold   = 0.005 // 0.5 % — default pixel-diff threshold
-	screenshotRetryIntervalMs = 100   // outer loop retry interval
-)
-
 func (d *Driver) waitForAnimationToEnd(step *flow.WaitForAnimationToEndStep) *core.CommandResult {
-	timeoutMs := step.TimeoutMs
+	return waitForScreenStatic(d, step.TimeoutMs)
+}
+
+// waitForScreenStatic polls two consecutive screenshots and returns when the
+// pixel-difference falls below the threshold, or after the timeout.
+//
+// Matches upstream Maestro: default 15s timeout, 0.5% threshold. The step is
+// "soft" — it never fails, even when the screen never stabilizes, since the
+// surrounding flow may genuinely involve an indefinite animation and we don't
+// want to block test progress.
+func waitForScreenStatic(d *Driver, timeoutMs int) *core.CommandResult {
 	if timeoutMs <= 0 {
-		timeoutMs = defaultAnimationTimeoutMs
+		timeoutMs = 15000
 	}
+	const threshold = 0.005 // 0.5%, matches upstream Maestro
 
-	sleepMs := step.SleepMs
-	if sleepMs <= 0 {
-		sleepMs = defaultAnimationSleepMs
-	}
-
-	threshold := step.Threshold
-	if threshold <= 0 {
-		threshold = screenshotDiffThreshold
-	}
-
-	logger.Info("waitForAnimationToEnd starting: timeoutMs=%d sleepMs=%d threshold=%.4f",
-		timeoutMs, sleepMs, threshold)
-
-	settled, iterations, elapsed, allDiffs := d.waitUntilScreenIsStatic(
-		time.Duration(timeoutMs)*time.Millisecond,
-		time.Duration(sleepMs)*time.Millisecond,
-		threshold,
-	)
-
-	if settled {
-		logger.Info("waitForAnimationToEnd: screen became static after %d iteration(s) (%.0fms elapsed), diffs=%s",
-			iterations, elapsed.Seconds()*1000, formatAnimationDiffs(allDiffs))
-		return successResult(
-			fmt.Sprintf("Animation ended (screen became static) after %d iteration(s) in %.0fms, diffs=%s",
-				iterations, elapsed.Seconds()*1000, formatAnimationDiffs(allDiffs)),
-			nil,
-		)
-	}
-
-	logger.Info("waitForAnimationToEnd: timed out after %d iteration(s) (%.0fms), diffs=%s threshold=%.4f",
-		iterations, elapsed.Seconds()*1000, formatAnimationDiffs(allDiffs), threshold)
-	return &core.CommandResult{
-		Success: false,
-		Message: fmt.Sprintf(
-			"Timed out after %dms (%d iteration(s)) waiting for screen to become static; diffs=%s threshold=%.4f",
-			timeoutMs, iterations, formatAnimationDiffs(allDiffs), threshold,
-		),
-	}
-}
-
-// formatAnimationDiffs formats a slice of diff values as "[0.000764 0.000821 ...]"
-func formatAnimationDiffs(diffs []float64) string {
-	if len(diffs) == 0 {
-		return "[]"
-	}
-	parts := make([]string, len(diffs))
-	for i, d := range diffs {
-		parts[i] = fmt.Sprintf("%.6f", d)
-	}
-	return "[" + strings.Join(parts, " ") + "]"
-}
-
-// waitUntilScreenIsStatic polls until two consecutive screenshots taken sleepMs
-// apart are pixel-similar within threshold, or the deadline is reached.
-// Returns: (settled, iterations, elapsed, allDiffs).
-func (d *Driver) waitUntilScreenIsStatic(timeout, sleep time.Duration, threshold float64) (bool, int, time.Duration, []float64) {
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 	start := time.Now()
-	deadline := start.Add(timeout)
-	var allDiffs []float64
-	i := 0
 	for time.Now().Before(deadline) {
-		i++
-		diff, err := d.consecutiveScreenshotDiff(sleep)
+		prev, err := d.client.Screenshot()
 		if err != nil {
-			logger.Debug("waitForAnimationToEnd iter=%d screenshot error: %v", i, err)
-			time.Sleep(time.Duration(screenshotRetryIntervalMs) * time.Millisecond)
-			continue
+			return errorResult(err, fmt.Sprintf("Failed to take screenshot: %v", err))
 		}
-		allDiffs = append(allDiffs, diff)
-		elapsed := time.Since(start)
-		logger.Debug("waitForAnimationToEnd iter=%d elapsed=%.0fms diff=%.6f threshold=%.4f",
-			i, elapsed.Seconds()*1000, diff, threshold)
+		curr, err := d.client.Screenshot()
+		if err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to take screenshot: %v", err))
+		}
+		diff := core.ImageDifference(prev, curr)
 		if diff <= threshold {
-			return true, i, elapsed, allDiffs
-		}
-		time.Sleep(time.Duration(screenshotRetryIntervalMs) * time.Millisecond)
-	}
-	return false, i, time.Since(start), allDiffs
-}
-
-// consecutiveScreenshotDiff takes two screenshots separated by sleep and
-// returns the pixel-diff percentage.  Returns (0, nil) if bytes are identical.
-func (d *Driver) consecutiveScreenshotDiff(sleep time.Duration) (float64, error) {
-	startBytes, err := d.client.Screenshot()
-	if err != nil {
-		return 0, fmt.Errorf("screenshot 1: %w", err)
-	}
-
-	time.Sleep(sleep)
-
-	endBytes, err := d.client.Screenshot()
-	if err != nil {
-		return 0, fmt.Errorf("screenshot 2: %w", err)
-	}
-
-	if bytes.Equal(startBytes, endBytes) {
-		return 0, nil
-	}
-
-	startImg, err := png.Decode(bytes.NewReader(startBytes))
-	if err != nil {
-		return 0, fmt.Errorf("decode screenshot 1: %w", err)
-	}
-	endImg, err := png.Decode(bytes.NewReader(endBytes))
-	if err != nil {
-		return 0, fmt.Errorf("decode screenshot 2: %w", err)
-	}
-
-	sb := startImg.Bounds()
-	eb := endImg.Bounds()
-	if sb.Dx() != eb.Dx() || sb.Dy() != eb.Dy() {
-		// Dimensions changed — treat as maximally different
-		return 1.0, nil
-	}
-
-	return screenshotDiffPercent(startImg, endImg), nil
-}
-
-func screenshotDiffPercent(a, b image.Image) float64 {
-	ab := a.Bounds()
-	bb := b.Bounds()
-	w, h := ab.Dx(), ab.Dy()
-	if w <= 0 || h <= 0 || w != bb.Dx() || h != bb.Dy() {
-		return 1.0
-	}
-	var total float64
-	const max = 65535.0
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			ar, ag, abC, aa := a.At(ab.Min.X+x, ab.Min.Y+y).RGBA()
-			br, bg, bbC, ba := b.At(bb.Min.X+x, bb.Min.Y+y).RGBA()
-			total += math.Abs(float64(ar) - float64(br))
-			total += math.Abs(float64(ag) - float64(bg))
-			total += math.Abs(float64(abC) - float64(bbC))
-			total += math.Abs(float64(aa) - float64(ba))
+			elapsed := time.Since(start)
+			return successResult(fmt.Sprintf("Animation ended (%.1f%% diff, %dms)", diff*100, elapsed.Milliseconds()), nil)
 		}
 	}
-	return total / (float64(w*h) * 4.0 * max)
+
+	return successResult(fmt.Sprintf("Animation did not settle within %dms — continuing", timeoutMs), nil)
 }
 
 // ============================================================================

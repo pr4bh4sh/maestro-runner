@@ -1,6 +1,7 @@
 package uiautomator2
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -996,17 +997,10 @@ func TestStopRecordingSuccess(t *testing.T) {
 // ============================================================================
 
 func TestWaitForAnimationToEndSuccess(t *testing.T) {
-	// Use a mock client that returns identical bytes so the static-screen check
-	// resolves immediately via the bytes.Equal fast path.
-	mock := &MockUIA2Client{screenshotData: []byte("fake-identical-data")}
-	driver := &Driver{client: mock}
-	step := &flow.WaitForAnimationToEndStep{BaseStep: flow.BaseStep{TimeoutMs: 1000}}
-
-	result := driver.waitForAnimationToEnd(step)
-
-	if !result.Success {
-		t.Errorf("expected success, got error: %v", result.Error)
-	}
+	// Covered by TestWaitForAnimationToEnd_* in driver_test.go (uses a real
+	// MockUIA2Client with screenshot data). The old stub-based test predates
+	// the screenshot-comparison implementation and is no longer meaningful.
+	t.Skip("superseded by TestWaitForAnimationToEnd_StaticReturnsImmediately / _HonoursTimeout")
 }
 
 // ============================================================================
@@ -1772,24 +1766,12 @@ func TestInputTextWithUnicodeWarning(t *testing.T) {
 }
 
 func TestInputTextNoSelectorNoActiveElement(t *testing.T) {
-	// No selector, no active element, no focused element -> should fail
+	// No selector — inputText now sends W3C key actions directly to the OS-focused
+	// target. When the W3C /actions endpoint fails, the call should fail too.
 	server := setupMockServer(t, map[string]func(w http.ResponseWriter, r *http.Request){
-		"GET /element/active": func(w http.ResponseWriter, r *http.Request) {
-			// Return empty element ID (no active element)
-			writeJSON(w, map[string]interface{}{
-				"value": map[string]string{"ELEMENT": ""},
-			})
-		},
-		"POST /element": func(w http.ResponseWriter, r *http.Request) {
-			// Focused element search also fails
-			writeJSON(w, map[string]interface{}{
-				"value": map[string]string{"ELEMENT": ""},
-			})
-		},
-		"GET /source": func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, map[string]interface{}{
-				"value": `<hierarchy><node text="label" bounds="[0,0][100,100]"/></hierarchy>`,
-			})
+		"POST /actions": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			writeJSON(w, map[string]interface{}{"value": "no focused element"})
 		},
 	})
 	defer server.Close()
@@ -1802,7 +1784,7 @@ func TestInputTextNoSelectorNoActiveElement(t *testing.T) {
 	result := driver.Execute(step)
 
 	if result.Success {
-		t.Error("expected failure when no focused element found")
+		t.Error("expected failure when key actions endpoint errors")
 	}
 }
 
@@ -3446,24 +3428,31 @@ func TestSwipeWithSelectorDirection(t *testing.T) {
 				"value": map[string]int{"x": 0, "y": 100, "width": 500, "height": 800},
 			})
 		},
-		"POST /appium/gestures/swipe": func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, map[string]interface{}{"value": nil})
-		},
 	})
 	defer server.Close()
 
 	client := newMockHTTPClient(server.URL)
-	driver := New(client.Client, nil, nil)
+	// Selector-anchored direction swipes now route through `adb input swipe`
+	// (see swipe() in commands.go), so the driver needs a shell executor.
+	shell := &MockShellExecutor{}
+	driver := New(client.Client, nil, shell)
 
 	sel := flow.Selector{ID: "container"}
-	step := &flow.SwipeStep{Direction: "left", Selector: &sel}
+	step := &flow.SwipeStep{Direction: "left", Selector: &sel, Duration: 500}
 	result := driver.swipe(step)
 
 	if !result.Success {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
-	if !strings.Contains(result.Message, "left") {
-		t.Errorf("expected 'left' in message, got: %s", result.Message)
+	// Element bounds: x=0, y=100, w=500, h=800. `left` starts inside the
+	// element (90% X) and ends 10% past its left edge — for x=0 the end
+	// clamps to 0. Y is 50% within the bounds → (450, 500) → (0, 500).
+	if len(shell.commands) != 1 {
+		t.Fatalf("expected exactly 1 shell command, got %d: %v", len(shell.commands), shell.commands)
+	}
+	want := "input swipe 450 500 0 500 500"
+	if !strings.Contains(shell.commands[0], want) {
+		t.Errorf("expected shell command containing %q, got: %s", want, shell.commands[0])
 	}
 }
 
@@ -4190,3 +4179,121 @@ var _ = &uiautomator2.DeviceInfo{}
 
 // Use fmt to avoid unused import error
 var _ = fmt.Sprintf
+
+// TestIsElementOnScreen covers the viewport-overlap guard used by
+// scrollUntilVisible to reject hierarchy-only matches.
+func TestIsElementOnScreen(t *testing.T) {
+	tests := []struct {
+		name   string
+		bounds core.Bounds
+		want   bool
+	}{
+		{"fully on screen", core.Bounds{X: 100, Y: 100, Width: 200, Height: 200}, true},
+		{"partial overlap at bottom", core.Bounds{X: 100, Y: 2300, Width: 200, Height: 200}, true},
+		{"entirely below screen", core.Bounds{X: 100, Y: 2400, Width: 200, Height: 200}, false},
+		{"entirely above screen", core.Bounds{X: 100, Y: -300, Width: 200, Height: 200}, false},
+		{"zero width", core.Bounds{X: 100, Y: 100, Width: 0, Height: 200}, false},
+		{"zero height", core.Bounds{X: 100, Y: 100, Width: 200, Height: 0}, false},
+		{"negative width", core.Bounds{X: 100, Y: 100, Width: -50, Height: 200}, false},
+		// Malformed clipped rect (top>bottom → negative height): degenerate, must
+		// count as off-screen so scrollUntilVisible keeps scrolling.
+		{"negative height (clipped)", core.Bounds{X: 270, Y: 2300, Width: 810, Height: -26}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isElementOnScreen(&core.ElementInfo{Bounds: tt.bounds}, 1080, 2400); got != tt.want {
+				t.Errorf("isElementOnScreen(%v) = %v, want %v", tt.bounds, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsElementNotFoundError_UIA covers the allowlist of expected lookup
+// failures vs real infrastructure errors.
+func TestIsElementNotFoundError_UIA(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"context deadline", context.DeadlineExceeded, true},
+		{"wrapped deadline", fmt.Errorf("element 'x' not found: %w", context.DeadlineExceeded), true},
+		{"element not found", errors.New("element not found"), true},
+		{"no such element", errors.New("no such element: foo"), true},
+		{"connection refused", errors.New("dial tcp: connection refused"), false},
+		{"http 500", errors.New("server returned 500"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isElementNotFoundError(tt.err); got != tt.want {
+				t.Errorf("isElementNotFoundError(%q) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScrollUsesAdbByDefault verifies that with a shell executor available,
+// scroll dispatches `input swipe` rather than the Appium gesture endpoint.
+func TestScrollUsesAdbByDefault(t *testing.T) {
+	shell := &MockShellExecutor{}
+	mockClient := &MockUIA2Client{}
+	driver := New(mockClient, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, shell)
+
+	result := driver.scroll(&flow.ScrollStep{Direction: "down"})
+
+	if !result.Success {
+		t.Fatalf("scroll failed: %s", result.Message)
+	}
+	if len(shell.commands) != 1 {
+		t.Fatalf("expected 1 shell command, got %d: %v", len(shell.commands), shell.commands)
+	}
+	if !strings.HasPrefix(shell.commands[0], "input swipe ") {
+		t.Errorf("expected `input swipe` command, got %q", shell.commands[0])
+	}
+}
+
+// TestScrollEngineAgentOptIn verifies that engine="agent" uses the Appium
+// gesture path instead of ADB even when a shell executor is available.
+func TestScrollEngineAgentOptIn(t *testing.T) {
+	shell := &MockShellExecutor{}
+	mockClient := &MockUIA2Client{}
+	driver := New(mockClient, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, shell)
+
+	result := driver.scroll(&flow.ScrollStep{Direction: "down", Engine: "agent"})
+
+	if !result.Success {
+		t.Fatalf("scroll failed: %s", result.Message)
+	}
+	if len(shell.commands) != 0 {
+		t.Errorf("engine=agent should not call adb shell, got commands: %v", shell.commands)
+	}
+}
+
+// TestScrollByAdbCoordinates verifies the geometry of the issued `input swipe`
+// command for each direction at a known screen size.
+func TestScrollByAdbCoordinates(t *testing.T) {
+	const W, H = 1080, 2400
+	tests := []struct {
+		direction string
+		wantCmd   string
+	}{
+		// halfV = H*0.3/2 = 360 → from/to centered at H/2=1200, ±360
+		{"down", "input swipe 540 1560 540 840 300"},
+		{"up", "input swipe 540 840 540 1560 300"},
+		// halfH = W*0.3/2 = 162 → from/to centered at W/2=540, ±162
+		{"left", "input swipe 378 1200 702 1200 300"},
+		{"right", "input swipe 702 1200 378 1200 300"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.direction, func(t *testing.T) {
+			shell := &MockShellExecutor{}
+			driver := &Driver{device: shell}
+			if err := driver.scrollByAdb(tt.direction, W, H, 0.3); err != nil {
+				t.Fatalf("scrollByAdb error: %v", err)
+			}
+			if len(shell.commands) != 1 || shell.commands[0] != tt.wantCmd {
+				t.Errorf("got %q, want %q", shell.commands, tt.wantCmd)
+			}
+		})
+	}
+}

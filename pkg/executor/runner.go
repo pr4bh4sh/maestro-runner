@@ -46,6 +46,7 @@ type RunnerConfig struct {
 	// Driver settings
 	WaitForIdleTimeout int // Global wait for idle timeout in ms
 	TypingFrequency    int // Global WDA typing frequency in keys/sec (0 = WDA default)
+	ConditionTimeout   int // Default timeout (ms) for when:/while: condition checks (0 = engine default)
 
 	// Device information (set by executor)
 	DeviceInfo *report.Device
@@ -81,6 +82,10 @@ type FlowResult struct {
 	StepsPassed  int
 	StepsFailed  int
 	StepsSkipped int
+	// SessionID identifies the worker (Appium session) that ran this flow.
+	// Empty for sequential single-device runs; set by ParallelRunner so cloud
+	// providers can filter results to the worker that produced them.
+	SessionID string
 }
 
 // Runner orchestrates flow execution.

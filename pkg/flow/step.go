@@ -22,6 +22,7 @@ const (
 	StepScrollUntilVisible StepType = "scrollUntilVisible"
 	StepBack               StepType = "back"
 	StepHideKeyboard       StepType = "hideKeyboard"
+	StepOpenNotifications  StepType = "openNotifications"
 	StepAcceptAlert        StepType = "acceptAlert"
 	StepDismissAlert       StepType = "dismissAlert"
 
@@ -107,6 +108,7 @@ const (
 	StepStartRecording StepType = "startRecording"
 	StepStopRecording  StepType = "stopRecording"
 	StepAddMedia       StepType = "addMedia"
+	StepRemoveMedia    StepType = "removeMedia"
 
 	// Queries
 	StepIsKeyboardVisible StepType = "isKeyboardVisible"
@@ -157,6 +159,7 @@ type TapOnStep struct {
 	LongPress             bool     `yaml:"longPress" json:"longPress,omitempty"`
 	Repeat                int      `yaml:"repeat" json:"repeat,omitempty"`
 	DelayMs               int      `yaml:"delay" json:"delay,omitempty"`
+	DurationMs            int      `yaml:"duration"`
 	Point                 string   `yaml:"point" json:"point,omitempty"`
 	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange" json:"retryTapIfNoChange,omitempty"`
 	WaitUntilVisible      *bool    `yaml:"waitUntilVisible" json:"waitUntilVisible,omitempty"`
@@ -176,6 +179,7 @@ type DoubleTapOnStep struct {
 type LongPressOnStep struct {
 	BaseStep              `yaml:",inline" json:",inline"`
 	Selector              Selector `yaml:",inline" json:"selector"`
+	DurationMs            int      `yaml:"duration"`
 	RetryTapIfNoChange    *bool    `yaml:"retryTapIfNoChange" json:"retryTapIfNoChange,omitempty"`
 	WaitUntilVisible      *bool    `yaml:"waitUntilVisible" json:"waitUntilVisible,omitempty"`
 	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
@@ -189,15 +193,21 @@ type TapOnPointStep struct {
 	Point                 string `yaml:"point" json:"point,omitempty"`
 	LongPress             bool   `yaml:"longPress" json:"longPress,omitempty"`
 	Repeat                int    `yaml:"repeat" json:"repeat,omitempty"`
+	DurationMs            int    `yaml:"duration"`
 	RetryTapIfNoChange    *bool  `yaml:"retryTapIfNoChange" json:"retryTapIfNoChange,omitempty"`
 	WaitToSettleTimeoutMs int    `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
 // SwipeStep performs a swipe gesture.
+//
+// `Selector` anchors the swipe on an element. It is populated from either the
+// `from:` YAML key (matching upstream Maestro syntax) or the historical
+// `selector:` key. Custom `UnmarshalYAML` handles the mapping — both keys
+// resolve to the same field, with `from:` taking precedence if both are set.
 type SwipeStep struct {
 	BaseStep              `yaml:",inline" json:",inline"`
 	Direction             string    `yaml:"direction" json:"direction,omitempty"` // UP, DOWN, LEFT, RIGHT
-	Selector              *Selector `yaml:"selector" json:"selector,omitempty"`
+	Selector              *Selector `yaml:"-" json:"selector,omitempty"`
 	Start                 string    `yaml:"start" json:"start,omitempty"`       // "x%, y%"
 	End                   string    `yaml:"end" json:"end,omitempty"`           // "x%, y%"
 	StartX                int       `yaml:"startX" json:"startX,omitempty"`     // Absolute X start
@@ -209,10 +219,44 @@ type SwipeStep struct {
 	WaitToSettleTimeoutMs int       `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
+// UnmarshalYAML decodes SwipeStep and maps both `from:` (upstream Maestro
+// spelling) and `selector:` (historical) to the `Selector` field. Without
+// this, `from: {id: X}` was silently discarded and direction-swipes fell
+// through to a screen-percentage swipe that ignores the anchor element.
+// See devicelab-dev/maestro-runner#112.
+func (s *SwipeStep) UnmarshalYAML(node *yaml.Node) error {
+	type swipeAlias SwipeStep
+	var a swipeAlias
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	*s = SwipeStep(a)
+
+	var anchor struct {
+		From     *Selector `yaml:"from"`
+		Selector *Selector `yaml:"selector"`
+	}
+	if err := node.Decode(&anchor); err != nil {
+		return err
+	}
+	if anchor.From != nil {
+		s.Selector = anchor.From
+	} else if anchor.Selector != nil {
+		s.Selector = anchor.Selector
+	}
+	return nil
+}
+
 // ScrollStep scrolls the screen.
 type ScrollStep struct {
 	BaseStep  `yaml:",inline" json:",inline"`
 	Direction string `yaml:"direction" json:"direction,omitempty"`
+	// Engine selects the scroll backend on Android.
+	// "" (default) and "adb" → adb input swipe (matches upstream Maestro).
+	// "agent" → driver's existing on-device gesture path (UIA2 server
+	// /appium/gestures/scroll for the uiautomator2 driver, RPC MotionEvent
+	// injection for the devicelab driver). Ignored on iOS/web.
+	Engine string `yaml:"engine"`
 }
 
 // ScrollUntilVisibleStep scrolls until element is visible.
@@ -225,6 +269,8 @@ type ScrollUntilVisibleStep struct {
 	VisibilityPercentage  int      `yaml:"visibilityPercentage" json:"visibilityPercentage,omitempty"`
 	CenterElement         bool     `yaml:"centerElement" json:"centerElement,omitempty"`
 	WaitToSettleTimeoutMs int      `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
+	// Engine selects the scroll backend. See ScrollStep.Engine.
+	Engine string `yaml:"engine"`
 }
 
 // BackStep presses back.
@@ -242,6 +288,12 @@ type HideKeyboardStep struct {
 // IsKeyboardVisibleStep queries whether the soft keyboard is currently shown.
 type IsKeyboardVisibleStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
+}
+
+// OpenNotificationsStep pulls down the Android notification shade.
+// Android-only (no-op on iOS).
+type OpenNotificationsStep struct {
+	BaseStep `yaml:",inline"`
 }
 
 // AcceptAlertStep accepts a system alert dialog (taps Allow/OK).
@@ -322,7 +374,7 @@ type AssertTrueStep struct {
 type Condition struct {
 	Visible    *Selector `yaml:"visible" json:"visible,omitempty"`
 	NotVisible *Selector `yaml:"notVisible" json:"notVisible,omitempty"`
-	Script     string    `yaml:"scriptCondition" json:"scriptCondition,omitempty"`
+	Script     string    `yaml:"true" json:"scriptCondition,omitempty"`
 	Platform   string    `yaml:"platform" json:"platform,omitempty"`
 	Timeout    int       `yaml:"timeout" json:"timeout,omitempty"` // Timeout in ms for visible/notVisible checks
 }
@@ -448,9 +500,15 @@ type SetOrientationStep struct {
 }
 
 // SetAirplaneModeStep sets airplane mode.
+//
+// YAML accepts either a bool (`enabled: true`) or a string that may contain
+// variable interpolation (`enabled: ${OFFLINE}`). EnabledRaw captures the raw
+// YAML scalar; the executor's variable-expansion pass writes the resolved
+// boolean into Enabled before the driver runs the step.
 type SetAirplaneModeStep struct {
-	BaseStep `yaml:",inline" json:",inline"`
-	Enabled  bool `yaml:"enabled" json:"enabled,omitempty"`
+	BaseStep   `yaml:",inline" json:",inline"`
+	Enabled    bool `yaml:"-"`
+	EnabledRaw any  `yaml:"enabled" json:"enabled,omitempty"`
 }
 
 // ToggleAirplaneModeStep toggles airplane mode.
@@ -501,12 +559,17 @@ type RetryStep struct {
 }
 
 // RunFlowStep runs another flow.
+//
+// When `when:` evaluates false, execution falls through to the else branch
+// (ElseFile / ElseSteps). If no else branch is set, the step is skipped.
 type RunFlowStep struct {
-	BaseStep `yaml:",inline" json:",inline"`
-	File     string            `yaml:"file" json:"file,omitempty"`
-	Steps    []Step            `yaml:"-" json:"-"` // Inline steps
-	When     *Condition        `yaml:"when" json:"when,omitempty"`
-	Env      map[string]string `yaml:"env" json:"env,omitempty"`
+	BaseStep  `yaml:",inline" json:",inline"`
+	File      string            `yaml:"file" json:"file,omitempty"`
+	Steps     []Step            `yaml:"-" json:"-"` // Inline steps (commands)
+	ElseFile  string            `yaml:"-"` // Fallback flow file when `when` is false
+	ElseSteps []Step            `yaml:"-"` // Inline fallback steps (else / elseCommands)
+	When      *Condition        `yaml:"when" json:"when,omitempty"`
+	Env       map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 // RunScriptStep runs a script.
@@ -727,10 +790,14 @@ type ClearNetworkMocksStep struct {
 // Media Steps
 // ============================================
 
-// TakeScreenshotStep takes a screenshot.
+// TakeScreenshotStep takes a screenshot. When CropOn is set, the screenshot
+// is cropped to the bounds of the matched element instead of capturing the
+// whole screen. Mirrors Maestro's takeScreenshot.cropOn (see
+// https://docs.maestro.dev/reference/commands-available/takescreenshot).
 type TakeScreenshotStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
-	Path     string `yaml:"path" json:"path,omitempty"`
+	Path     string    `yaml:"path" json:"path,omitempty"`
+	CropOn   *Selector `yaml:"cropOn,omitempty"`
 }
 
 // StartRecordingStep starts recording.
@@ -749,6 +816,11 @@ type StopRecordingStep struct {
 type AddMediaStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
 	Files    []string `yaml:"files" json:"files,omitempty"`
+}
+
+// RemoveMediaStep clears media added by addMedia (Android: MediaStore index).
+type RemoveMediaStep struct {
+	BaseStep `yaml:",inline"`
 }
 
 // ============================================
@@ -773,6 +845,11 @@ type PressKeyStep struct {
 }
 
 // WaitForAnimationToEndStep waits for animations.
+//
+// Algorithm (matches upstream Maestro): take two consecutive screenshots, if
+// fewer than 0.5% of pixels differ, the screen is considered static. Otherwise
+// poll until static or timeout. Timeout comes from the inlined BaseStep
+// (`timeout:` YAML key); defaults to 15s when unset.
 type WaitForAnimationToEndStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
 	// SleepMs is the pause inserted between the two consecutive screenshots used

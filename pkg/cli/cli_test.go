@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -31,6 +32,7 @@ func (m *mockDriver) GetState() *core.StateSnapshot         { return nil }
 func (m *mockDriver) GetPlatformInfo() *core.PlatformInfo   { return m.platformInfo }
 func (m *mockDriver) SetFindTimeout(int)                    {}
 func (m *mockDriver) SetWaitForIdleTimeout(int) error       { return nil }
+func (m *mockDriver) SetContext(context.Context)            {}
 
 type mockEmulatorStarter struct {
 	startSerial string
@@ -87,6 +89,23 @@ func TestResolveOutputDir_FlattenWithoutOutput(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "--flatten requires --output") {
 		t.Errorf("expected error about --flatten requiring --output, got: %v", err)
+	}
+}
+
+func TestParseArtifactMode(t *testing.T) {
+	cases := map[string]executor.ArtifactMode{
+		"always":     executor.ArtifactAlways,
+		"ALWAYS":     executor.ArtifactAlways,
+		"  always  ": executor.ArtifactAlways,
+		"never":      executor.ArtifactNever,
+		"on-failure": executor.ArtifactOnFailure,
+		"":           executor.ArtifactOnFailure,
+		"garbage":    executor.ArtifactOnFailure,
+	}
+	for in, want := range cases {
+		if got := parseArtifactMode(in); got != want {
+			t.Errorf("parseArtifactMode(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 
@@ -179,6 +198,35 @@ func TestGlobalFlags(t *testing.T) {
 		if !flagNames[name] {
 			t.Errorf("expected flag %q to be defined", name)
 		}
+	}
+}
+
+// TestDriverStartTimeoutFlag verifies the --driver-start-timeout flag is
+// registered globally and reads to RunConfig.DriverStartTimeout. The override
+// only flows further (into uia2Cfg.Timeout / driverCfg.Timeout) when non-zero
+// — see createUIAutomator2Driver / createDeviceLabDriver in android.go.
+func TestDriverStartTimeoutFlag(t *testing.T) {
+	flagNames := make(map[string]bool)
+	for _, f := range GlobalFlags {
+		for _, name := range f.Names() {
+			flagNames[name] = true
+		}
+	}
+	if !flagNames["driver-start-timeout"] {
+		t.Fatal("expected --driver-start-timeout flag to be defined globally")
+	}
+
+	// Zero value: no override, drivers use their built-in defaults.
+	cfg := &RunConfig{DriverStartTimeout: 0}
+	if cfg.DriverStartTimeout != 0 {
+		t.Errorf("default DriverStartTimeout = %d, want 0", cfg.DriverStartTimeout)
+	}
+
+	// Non-zero value: persisted on the struct (driver-side wiring is covered
+	// by integration tests against a real Android device).
+	cfg.DriverStartTimeout = 120
+	if cfg.DriverStartTimeout != 120 {
+		t.Errorf("DriverStartTimeout = %d after assignment, want 120", cfg.DriverStartTimeout)
 	}
 }
 
@@ -388,6 +436,77 @@ func TestTestCommand_WithAllFlags(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestTestCommand_EnvFileFlag(t *testing.T) {
+	dir := t.TempDir()
+	flowFile := dir + "/test.yaml"
+	if err := os.WriteFile(flowFile, []byte(`- tapOn: "Button"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	envFile := dir + "/.env"
+	envContents := "USER=fromfile\nAPI_KEY=secret-from-env-file\n"
+	if err := os.WriteFile(envFile, []byte(envContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &cli.App{
+		Name:     "test-app",
+		Flags:    GlobalFlags,
+		Commands: []*cli.Command{testCommand},
+	}
+
+	oldStdout := os.Stdout
+	os.Stdout, _ = os.Open(os.DevNull)
+	defer func() { os.Stdout = oldStdout }()
+
+	// --env-file alone (no -e overrides) should succeed.
+	err := app.Run([]string{
+		"test-app", "-p", "mock", "test",
+		"--env-file", envFile,
+		flowFile,
+	})
+	if err != nil {
+		t.Errorf("--env-file alone: unexpected error: %v", err)
+	}
+
+	// --env-file + -e (-e should override file values). Verifies merge order.
+	err = app.Run([]string{
+		"test-app", "-p", "mock", "test",
+		"--env-file", envFile,
+		"-e", "USER=fromcli",
+		flowFile,
+	})
+	if err != nil {
+		t.Errorf("--env-file + -e: unexpected error: %v", err)
+	}
+}
+
+func TestTestCommand_EnvFileMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	flowFile := dir + "/test.yaml"
+	if err := os.WriteFile(flowFile, []byte(`- tapOn: "Button"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &cli.App{
+		Name:     "test-app",
+		Flags:    GlobalFlags,
+		Commands: []*cli.Command{testCommand},
+	}
+
+	oldStdout := os.Stdout
+	os.Stdout, _ = os.Open(os.DevNull)
+	defer func() { os.Stdout = oldStdout }()
+
+	err := app.Run([]string{
+		"test-app", "-p", "mock", "test",
+		"--env-file", "/nonexistent/.env",
+		flowFile,
+	})
+	if err == nil {
+		t.Error("expected error for missing --env-file path")
 	}
 }
 
@@ -1398,11 +1517,13 @@ func TestDetermineExecutionMode_ParallelWithoutAutoStart(t *testing.T) {
 	os.Stdout, _ = os.Open(os.DevNull)
 	defer func() { os.Stdout = oldStdout }()
 
-	oldDetect := autoDetectDevicesFn
+	// Make device discovery hermetic — pretend no devices are connected,
+	// regardless of what's actually attached to the host.
+	oldFn := autoDetectDevicesFn
 	autoDetectDevicesFn = func(platform string, count int) ([]string, error) {
-		return nil, fmt.Errorf("no available devices found")
+		return nil, fmt.Errorf("no devices found")
 	}
-	t.Cleanup(func() { autoDetectDevicesFn = oldDetect })
+	defer func() { autoDetectDevicesFn = oldFn }()
 
 	cfg := &RunConfig{
 		Parallel:          2,
@@ -2258,5 +2379,31 @@ func TestIsSocketInUse_SocketAndPidWithDeadProcess(t *testing.T) {
 	// Socket exists + dead PID -> stale, not in use
 	if isSocketInUse(socketPath) {
 		t.Error("expected socket with dead owner PID to not be in use")
+	}
+}
+
+// --- Regression tests for issue #111: --auto-start-emulator on iOS sims ---
+
+// TestIOSTargetsSimulator verifies the WDA team-id/app-file pre-check treats
+// simulator-implying flags as simulators. Before the fix, --auto-start-emulator
+// fell through to hasBootedSimulator() (false, since nothing is booted yet) and
+// the run errored demanding --team-id before auto-start could boot any sim.
+// These cases short-circuit before any system call, so the test is hermetic.
+func TestIOSTargetsSimulator(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *RunConfig
+		want bool
+	}{
+		{"auto-start-emulator implies simulator (#111)", &RunConfig{Platform: "ios", AutoStartEmulator: true}, true},
+		{"start-simulator implies simulator", &RunConfig{Platform: "ios", StartSimulator: "iPhone 15"}, true},
+		{"auto-start with parallel still a simulator", &RunConfig{Platform: "ios", AutoStartEmulator: true, Parallel: 2}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := iosTargetsSimulator(tc.cfg); got != tc.want {
+				t.Errorf("iosTargetsSimulator() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

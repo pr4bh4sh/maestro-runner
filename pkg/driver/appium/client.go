@@ -48,20 +48,32 @@ func (c *Client) Connect(capabilities map[string]interface{}) error {
 	// For iOS: disable auto-launch to prevent double-launch (once by Appium session,
 	// once by flow's launchApp). Double-launch causes duplicate permission alerts
 	// that interfere with element focus during text input.
+	//
+	// EXCEPT when the user explicitly set appium:autoLaunch in their caps file.
+	// Some workflows require Appium to launch the app during session creation —
+	// notably appium:processArguments (DYLD_INSERT_LIBRARIES for Applitools NML,
+	// etc.) only takes effect on the Appium-initiated launch. Overriding the
+	// user's autoLaunch=true would silently strip those side-effects.
 	if p, ok := capabilities["platformName"].(string); ok && strings.EqualFold(p, "ios") {
-		capabilities["appium:autoLaunch"] = false
+		if _, userSet := capabilities["appium:autoLaunch"]; !userSet {
+			capabilities["appium:autoLaunch"] = false
+		}
 	}
 
 	// For Android with clearState (noReset=false): disable auto-launch so we can
 	// grant permissions via pm grant before the app starts (avoids permission popups).
 	// When noReset is true (default), permissions persist across sessions so this isn't needed.
+	// Same caveat as iOS — respect the user's explicit autoLaunch setting so that
+	// appium:processArguments and similar launch-time-only capabilities still apply.
 	var androidAppPackage, androidAppActivity string
 	if p, ok := capabilities["platformName"].(string); ok && strings.EqualFold(p, "android") {
 		if noReset, ok := capabilities["appium:noReset"].(bool); ok && !noReset {
 			if pkg, ok := capabilities["appium:appPackage"].(string); ok && pkg != "" {
 				androidAppPackage = pkg
 				androidAppActivity, _ = capabilities["appium:appActivity"].(string)
-				capabilities["appium:autoLaunch"] = false
+				if _, userSet := capabilities["appium:autoLaunch"]; !userSet {
+					capabilities["appium:autoLaunch"] = false
+				}
 			}
 		}
 	}
@@ -158,13 +170,30 @@ func (c *Client) Connect(capabilities map[string]interface{}) error {
 
 		// Grant all permissions and launch app (autoLaunch was disabled above)
 		if androidAppPackage != "" {
-			for _, perm := range getAllPermissions() {
-				// Ignore errors - permission might not be declared by the app
-				if _, err := c.ExecuteMobile("shell", map[string]interface{}{
-					"command": "pm",
-					"args":    []string{"grant", androidAppPackage, perm},
-				}); err != nil {
-					logger.Debug("grant %s failed (expected if not declared): %v", perm, err)
+			// If the caller already passed `appium:autoGrantPermissions: true`,
+			// Appium grants the app's declared permissions natively during the
+			// install/launch phase — no work for us at session-start time.
+			// Skip the explicit loop. This is the only path that works on
+			// Appium hosts that disable the `adb_shell` insecure feature
+			// (e.g. Sauce Labs by default): the customer sets the cap and
+			// maestro-runner stops trying to grant via shell.
+			autoGrant := false
+			if v, ok := capabilities["appium:autoGrantPermissions"].(bool); ok && v {
+				autoGrant = true
+			} else if v, ok := capabilities["autoGrantPermissions"].(bool); ok && v {
+				autoGrant = true
+			}
+			if !autoGrant {
+				for _, perm := range getAllPermissions() {
+					// Ignore errors - permission might not be declared by the app,
+					// or the host may block `adb_shell` (in which case set
+					// `appium:autoGrantPermissions: true` in caps instead).
+					if _, err := c.ExecuteMobile("shell", map[string]interface{}{
+						"command": "pm",
+						"args":    []string{"grant", androidAppPackage, perm},
+					}); err != nil {
+						logger.Debug("grant %s failed (expected if not declared or shell blocked): %v", perm, err)
+					}
 				}
 			}
 			if androidAppActivity != "" {
@@ -570,7 +599,14 @@ func (c *Client) ClearAppData(appID string) error {
 		return err
 	}
 
-	// Android: use mobile: shell to run pm clear (same as native driver)
+	// Android: use mobile: clearApp (native, no adb_shell required).
+	// Falls back to mobile: shell pm clear on older Appium servers where
+	// the native command isn't implemented.
+	if _, err := c.ExecuteMobile("clearApp", map[string]interface{}{"appId": appID}); err == nil {
+		return nil
+	} else {
+		logger.Debug("mobile: clearApp unavailable (%v) — falling back to mobile: shell pm clear", err)
+	}
 	_, err := c.post(c.sessionPath()+"/execute/sync", map[string]interface{}{
 		"script": "mobile: shell",
 		"args": []interface{}{map[string]interface{}{
