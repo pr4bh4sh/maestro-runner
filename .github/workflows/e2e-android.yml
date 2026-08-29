@@ -16,10 +16,35 @@ permissions:
   pull-requests: write
 
 jobs:
+  detect-changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      android: ${{ steps.filter.outputs.android }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+            android:
+              - 'e2e/android-animation-app/**'
+              - 'drivers/android/**'
+
   e2e-android:
     name: E2E Android (API 36)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [detect-changes]
+    if: ${{ needs.detect-changes.outputs.android == 'true' || needs.detect-changes.outputs.go == 'true' }}
 
     steps:
       - name: Checkout code
