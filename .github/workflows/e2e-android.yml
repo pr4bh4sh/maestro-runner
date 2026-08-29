@@ -38,6 +38,9 @@ jobs:
             android:
               - 'e2e/android-animation-app/**'
               - 'drivers/android/**'
+              - 'e2e/**'
+              - 'client/python/tests/**'
+              - 'client/typescript/tests/**'
 
   e2e-android:
     name: E2E Android (API 36)
