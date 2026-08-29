@@ -28,6 +28,8 @@ jobs:
       android-app: ${{ steps.filter.outputs.android-app }}
       driver-apk: ${{ steps.filter.outputs.driver-apk }}
       android-yaml: ${{ steps.filter.outputs.android-yaml }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+      docs: ${{ steps.filter.outputs.docs }}
       app: ${{ steps.filter.outputs.android-app }}
     steps:
       - name: Checkout code
@@ -56,6 +58,11 @@ jobs:
               - 'drivers/android/**'
             android-yaml:
               - 'e2e/workspaces/**'
+            workflow:
+              - '.github/workflows/**'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
 
   build-and-push-apk:
     name: Build and push animation test APK
@@ -114,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect-changes]
-    if: ${{ needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.py-lib == 'true' || needs.detect-changes.outputs.ts-lib == 'true' || needs.detect-changes.outputs.py-e2e == 'true' || needs.detect-changes.outputs.ts-e2e == 'true' || needs.detect-changes.outputs.android-app == 'true' || needs.detect-changes.outputs.driver-apk == 'true' || needs.detect-changes.outputs.android-yaml == 'true' }}
+    if: ${{ needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.py-lib == 'true' || needs.detect-changes.outputs.ts-lib == 'true' || needs.detect-changes.outputs.py-e2e == 'true' || needs.detect-changes.outputs.ts-e2e == 'true' || needs.detect-changes.outputs.android-app == 'true' || needs.detect-changes.outputs.driver-apk == 'true' || needs.detect-changes.outputs.android-yaml == 'true' || needs.detect-changes.outputs.workflow == 'true' }}
 
     steps:
       - name: Checkout code
