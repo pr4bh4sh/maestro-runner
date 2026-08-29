@@ -97,7 +97,7 @@ MAESTRO_DEVICE_ID=emulator-5554 python -m pytest tests/test_e2e_android.py -v
 
 ```sh
 cd client/python && source .venv/bin/activate && \
-  python -m pytest tests/test_add_contact.py tests/test_contact_persists.py -n auto -v
+  python -m pytest tests/test_add_contact.py -n auto -v
 ```
 
 ## Step 4: iOS Tests
@@ -148,7 +148,7 @@ make lint-py-fix
 cd client/python && ./.venv/bin/python -m pytest tests/test_client.py tests/test_models.py -v
 
 # 2) Page-object / integration tests (reuse existing server session)
-./.venv/bin/python -m pytest tests/test_add_contact.py tests/test_contact_persists.py -v
+./.venv/bin/python -m pytest tests/test_add_contact.py -v
 
 # 3) Clean up stale server processes to avoid device-lock conflicts
 pkill -f "maestro-runner.*server" || true

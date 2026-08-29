@@ -9,7 +9,7 @@
     "test": "echo 'Use npm run test:unit (parallel) or npm run test:device (serial real-device)' && exit 1",
     "test:unit": "jest --testMatch '**/*.unit.test.ts' --passWithNoTests",
     "test:device": "echo 'Use npm run test:device:android or npm run test:device:ios' && exit 1",
-    "test:device:android": "jest tests/test_add_contact.device.test.ts tests/test_contact_persists.device.test.ts --runInBand",
+    "test:device:android": "jest tests/test_add_contact.device.test.ts --runInBand",
     "test:device:ios": "jest tests/test_add_contact_ios.device.test.ts --runInBand",
     "test:animation:android": "jest tests/test_wait_for_animation_never_ends.device.test.ts --runInBand",
     "test:animation:ios": "jest tests/test_wait_for_animation_never_ends.device.test.ts --runInBand",

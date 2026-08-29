@@ -43,7 +43,7 @@ _FOCUS_TIMEOUT_S = 10
 
 def _launch_app() -> None:
     # Bring the WebView spinner app to the foreground.
-    subprocess.run(
+    subprocess.run(  # noqa: S603
         ["adb", "shell", "am", "start", "-n", _APP_ACTIVITY],  # noqa: S607
         capture_output=True, text=True, check=True,
     )
