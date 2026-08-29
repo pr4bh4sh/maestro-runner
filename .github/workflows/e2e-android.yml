@@ -188,6 +188,11 @@ jobs:
           #!/usr/bin/env bash
           set +e
           FAILED=0
+          # The maestro-runner server (auto-started by the Python/TS client conftest)
+          # resolves its drivers directory relative to MAESTRO_RUNNER_HOME. When the
+          # client runs `cd client/python`/`client/typescript`, CWD is no longer the
+          # repo root, so point it back at the repo root where drivers/android lives.
+          export MAESTRO_RUNNER_HOME="$(pwd)"
           mkdir -p reports/yaml reports/python reports/typescript ctrf
 
           # Detect emulator serial
@@ -209,6 +214,11 @@ jobs:
           if [ "${MAESTRO_DRIVER:-uiautomator2}" = "devicelab" ]; then
             adb install -r -g drivers/android/devicelab-android-driver.apk
             adb install -r -g drivers/android/devicelab-android-driver-test.apk
+            # The DeviceLab driver wraps uiautomator2.Driver, so the UIAutomator2
+            # server APK(s) must also be present on the device.
+            adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+            adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+            adb install -r -g drivers/android/settings_apk-debug.apk
           fi
 
           # --- YAML flow tests ---
