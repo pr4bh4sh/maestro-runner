@@ -193,7 +193,7 @@ jobs:
           # client runs `cd client/python`/`client/typescript`, CWD is no longer the
           # repo root, so point it back at the repo root where drivers/android lives.
           export MAESTRO_RUNNER_HOME="$(pwd)"
-          mkdir -p reports/yaml reports/python reports/typescript ctrf
+          mkdir -p reports/yaml reports/yaml/animation reports/python reports/typescript ctrf
 
           # Detect emulator serial
           DEVICE=$(adb devices | grep -E "emulator-[0-9]+" | head -1 | awk '{print $1}')
@@ -224,6 +224,11 @@ jobs:
           # --- YAML flow tests ---
           echo "::group::YAML flow tests"
           ./maestro-runner --driver "$MAESTRO_DRIVER" --platform android test --output reports/yaml e2e/workspaces/contacts/add_contact_android.yaml || FAILED=1
+
+          # Animation coverage: launch the offline WebView spinner app and run
+          # waitForAnimationToEnd through the YAML pipeline (mirrors the Python/TS
+          # never-ends e2e tests).
+          ./maestro-runner --driver "$MAESTRO_DRIVER" --platform android test --output reports/yaml/animation e2e/workspaces/animation/wait_for_animation_android.yaml || FAILED=1
           echo "::endgroup::"
 
           # --- Python e2e tests (conftest.py auto-starts server) ---

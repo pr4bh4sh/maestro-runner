@@ -1,0 +1,29 @@
+appId: dev.maestro.animationtest
+name: Wait for animation to end (Android infinite spinner)
+tags:
+  - android
+  - animation
+---
+# Launch the offline WebView spinner app. Its <canvas> spinner is driven by
+# setInterval and never stops, so the screen is permanently animating. This
+# mirrors the animation-app e2e coverage that already exists at the Python
+# (test_wait_for_animation_never_ends.py) and TypeScript
+# (test_wait_for_animation_never_ends.device.test.ts) client levels, but runs it
+# through the YAML flow pipeline.
+- launchApp:
+    clearState: true
+
+# The spinner is rendered into a full-screen WebView; confirm it came up.
+- assertVisible:
+    id: "dev.maestro.animationtest:id/webview"
+
+# waitForAnimationToEnd must detect the perpetual motion and time out. This
+# exercises the full YAML -> executor -> driver screenshot-diff path against the
+# real app. It is marked optional so the e2e flow stays green: the strict
+# "must time out" assertion is owned by the Python/TS never-ends tests, because
+# the plain YAML runner cannot express an expected-failure (negative) step.
+- waitForAnimationToEnd:
+    optional: true
+    timeout: 5000
+    sleepMs: 500
+    threshold: 0.0003
