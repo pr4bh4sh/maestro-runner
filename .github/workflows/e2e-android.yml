@@ -12,14 +12,116 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
+  detect-changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      py-lib: ${{ steps.filter.outputs.py-lib }}
+      ts-lib: ${{ steps.filter.outputs.ts-lib }}
+      py-e2e: ${{ steps.filter.outputs.py-e2e }}
+      ts-e2e: ${{ steps.filter.outputs.ts-e2e }}
+      android-app: ${{ steps.filter.outputs.android-app }}
+      driver-apk: ${{ steps.filter.outputs.driver-apk }}
+      android-yaml: ${{ steps.filter.outputs.android-yaml }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+      docs: ${{ steps.filter.outputs.docs }}
+      app: ${{ steps.filter.outputs.android-app }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+            py-lib:
+              - 'client/python/maestro_runner/**'
+            ts-lib:
+              - 'client/typescript/src/**'
+            py-e2e:
+              - 'client/python/tests/**'
+            ts-e2e:
+              - 'client/typescript/tests/**'
+            android-app:
+              - 'e2e/android-animation-app/**'
+            driver-apk:
+              - 'drivers/android/**'
+            android-yaml:
+              - 'e2e/workspaces/**'
+            workflow:
+              - '.github/workflows/**'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+
+  build-and-push-apk:
+    name: Build and push animation test APK
+    runs-on: ubuntu-latest
+    needs: [detect-changes]
+    if: ${{ needs.detect-changes.outputs.app == 'true' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Android SDK
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Make gradlew executable
+        run: chmod +x e2e/android-animation-app/gradlew
+
+      - name: Build animation test APK
+        run: cd e2e/android-animation-app && ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Commit and push if APK changed
+        run: |
+          BUILT="e2e/android-animation-app/app/build/outputs/apk/debug/app-debug.apk"
+          COMMITTED="drivers/android/animation-test-app-debug.apk"
+
+          if cmp -s "$BUILT" "$COMMITTED"; then
+            echo "APK unchanged, skipping push"
+            exit 0
+          fi
+
+          cp "$BUILT" "$COMMITTED"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "$COMMITTED"
+          git commit -m "build(anim-app): auto-rebuild animation test APK"
+          git push
+
   e2e-android:
     name: E2E Android (API 36)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [detect-changes]
+    if: ${{ needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.py-lib == 'true' || needs.detect-changes.outputs.ts-lib == 'true' || needs.detect-changes.outputs.py-e2e == 'true' || needs.detect-changes.outputs.ts-e2e == 'true' || needs.detect-changes.outputs.android-app == 'true' || needs.detect-changes.outputs.driver-apk == 'true' || needs.detect-changes.outputs.android-yaml == 'true' || needs.detect-changes.outputs.workflow == 'true' }}
 
     steps:
       - name: Checkout code
