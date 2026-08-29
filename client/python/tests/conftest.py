@@ -290,7 +290,8 @@ def _worker_index(worker_id: str) -> int:
 
 
 def _server_command(port: str, *, device_id: str | None = None) -> list[str]:
-    command = ["--platform", PLATFORM]
+    driver = os.environ.get("MAESTRO_DRIVER", "uiautomator2")
+    command = ["--driver", driver, "--platform", PLATFORM]
     if device_id:
         command.extend(["--device", device_id])
     command.extend(["server", "--port", port])

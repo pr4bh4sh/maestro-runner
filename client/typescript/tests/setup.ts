@@ -186,7 +186,8 @@ let sharedClient: MaestroClient | undefined;
 let assignedDevice: string | undefined;
 
 function serverCommand(port: number, deviceId?: string): string[] {
-  const command = ["--platform", PLATFORM];
+  const driver = process.env.MAESTRO_DRIVER ?? "uiautomator2";
+  const command = ["--driver", driver, "--platform", PLATFORM];
   if (deviceId) {
     command.push("--device", deviceId);
   }
