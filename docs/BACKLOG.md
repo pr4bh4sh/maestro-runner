@@ -49,3 +49,46 @@ floor and makes the sharded `Test Go` job finish in ~1-2 min.
 ### Acceptance
 - `cdp` tests run in CI again without blowing the overall time budget.
 - No single `Test Go` shard is an outlier by >2x vs the others.
+
+## Android animation testing: stoppable-animation feature & tests
+
+### Context
+The Android animation test app lives at `e2e/android-animation-app` (package
+`dev.maestro.animationtest`). Its `MainActivity.java` renders an **infinite
+canvas spinner** via `setInterval(draw, 16)` and currently has **NO stop
+control** — there is no Stop button, no `clearInterval`, and no pause. As a
+result:
+
+- **Continuous / never-ends** coverage exists:
+  `client/python/tests/test_wait_for_animation_never_ends.py`,
+  `client/typescript/tests/test_wait_for_animation_never_ends.device.test.ts`,
+  and the YAML flow `e2e/workspaces/animation/wait_for_animation_android.yaml`
+  (added in PR #10, `waitForAnimationToEnd` with `optional: true`).
+  Note the YAML coverage is `optional` / best-effort.
+- **"Animation settles" (positive) coverage** exists, but it is exercised
+  against **Android Settings** (launch + tap "Display" → transition →
+  `waitForAnimationToEnd` returns success), not the spinner app:
+  `client/python/tests/test_wait_for_animation_to_end.py`.
+- There is **no** test for "animation stops when the user clicks a Stop button"
+  because the app has no Stop button.
+
+### Plan
+1. **Continuous animation test** — already partially in place (never-ends) and
+   the YAML coverage is `optional` / best-effort. No new work required; backlog
+   merely records that this is covered.
+2. **New feature: Stop control in the animation app** — add a "Stop" button to
+   `MainActivity` that calls `clearInterval` to halt the spinner (optionally
+   also a "Start"/resume to restart it). This makes the animation stoppable.
+3. **New test: animation stops on click** — once the Stop button exists, add
+   e2e tests (YAML flow + Python/TS) that: launch the app, `tapOn` "Stop", then
+   `waitForAnimationToEnd` returns success (screen settles), confirming the
+   animation stopped. This gives both continuous (never-ends) and stoppable
+   (stops-on-click) coverage.
+4. **Acceptance** — CI should verify BOTH that an infinite spinner is detected
+   as "never ending" AND that a spinner halted via Stop is detected as "ended".
+
+### Acceptance
+- An infinite spinner is detected as "never ending" (continuous coverage
+  preserved, incl. the `optional` YAML flow).
+- A spinner halted via the Stop button is detected as "ended" (new
+  stop-on-click tests pass).
