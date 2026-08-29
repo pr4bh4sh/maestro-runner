@@ -21,8 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       go: ${{ steps.filter.outputs.go }}
-      android: ${{ steps.filter.outputs.android }}
-      app: ${{ steps.filter.outputs.app }}
+      py-lib: ${{ steps.filter.outputs.py-lib }}
+      ts-lib: ${{ steps.filter.outputs.ts-lib }}
+      py-e2e: ${{ steps.filter.outputs.py-e2e }}
+      ts-e2e: ${{ steps.filter.outputs.ts-e2e }}
+      android-app: ${{ steps.filter.outputs.android-app }}
+      driver-apk: ${{ steps.filter.outputs.driver-apk }}
+      android-yaml: ${{ steps.filter.outputs.android-yaml }}
+      app: ${{ steps.filter.outputs.android-app }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,14 +42,20 @@ jobs:
               - '**/*.go'
               - 'go.mod'
               - 'go.sum'
-            android:
-              - 'e2e/android-animation-app/**'
-              - 'drivers/android/**'
-              - 'e2e/**'
+            py-lib:
+              - 'client/python/maestro_runner/**'
+            ts-lib:
+              - 'client/typescript/src/**'
+            py-e2e:
               - 'client/python/tests/**'
+            ts-e2e:
               - 'client/typescript/tests/**'
-            app:
+            android-app:
               - 'e2e/android-animation-app/**'
+            driver-apk:
+              - 'drivers/android/**'
+            android-yaml:
+              - 'e2e/workspaces/**'
 
   build-and-push-apk:
     name: Build and push animation test APK
@@ -102,7 +114,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect-changes]
-    if: ${{ needs.detect-changes.outputs.android == 'true' || needs.detect-changes.outputs.go == 'true' }}
+    if: ${{ needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.py-lib == 'true' || needs.detect-changes.outputs.ts-lib == 'true' || needs.detect-changes.outputs.py-e2e == 'true' || needs.detect-changes.outputs.ts-e2e == 'true' || needs.detect-changes.outputs.android-app == 'true' || needs.detect-changes.outputs.driver-apk == 'true' || needs.detect-changes.outputs.android-yaml == 'true' }}
+    env:
+      E2E_ONLY: ${{ (needs.detect-changes.outputs.ts-e2e == 'true' && needs.detect-changes.outputs.go != 'true' && needs.detect-changes.outputs.py-lib != 'true' && needs.detect-changes.outputs.ts-lib != 'true' && needs.detect-changes.outputs.py-e2e != 'true' && needs.detect-changes.outputs.android-app != 'true' && needs.detect-changes.outputs.driver-apk != 'true' && needs.detect-changes.outputs.android-yaml != 'true') && 'ts' || 'all' }}
 
     steps:
       - name: Checkout code
@@ -178,23 +192,29 @@ jobs:
           adb install -r -g drivers/android/animation-test-app-debug.apk
 
           # --- YAML flow tests ---
-          echo "::group::YAML flow tests"
-          ./maestro-runner --platform android test --output reports/yaml e2e/workspaces/contacts/add_contact_android.yaml || FAILED=1
-          echo "::endgroup::"
+          if [ "${E2E_ONLY:-all}" = "all" ] || [ "${E2E_ONLY}" = "yaml" ]; then
+            echo "::group::YAML flow tests"
+            ./maestro-runner --platform android test --output reports/yaml e2e/workspaces/contacts/add_contact_android.yaml || FAILED=1
+            echo "::endgroup::"
+          fi
 
           # --- Python e2e tests (conftest.py auto-starts server) ---
-          echo "::group::Python e2e tests"
-          cd client/python
-          .venv/bin/python -m pytest tests/test_add_contact.py tests/test_wait_for_animation_to_end.py tests/test_wait_for_animation_never_ends.py -v --junit-xml=../../reports/python/junit.xml || FAILED=1
-          cd ../..
-          echo "::endgroup::"
+          if [ "${E2E_ONLY:-all}" = "all" ] || [ "${E2E_ONLY}" = "py" ]; then
+            echo "::group::Python e2e tests"
+            cd client/python
+            .venv/bin/python -m pytest tests/test_add_contact.py tests/test_wait_for_animation_to_end.py tests/test_wait_for_animation_never_ends.py -v --junit-xml=../../reports/python/junit.xml || FAILED=1
+            cd ../..
+            echo "::endgroup::"
+          fi
 
           # --- TypeScript e2e tests (setup.ts auto-starts server) ---
-          echo "::group::TypeScript e2e tests"
-          cd client/typescript
-          JEST_JUNIT_OUTPUT_DIR=../../reports/typescript JEST_JUNIT_OUTPUT_NAME=junit.xml npx jest tests/test_add_contact.device.test.ts tests/test_wait_for_animation_never_ends.device.test.ts --runInBand --reporters=default --reporters=jest-junit || FAILED=1
-          cd ../..
-          echo "::endgroup::"
+          if [ "${E2E_ONLY:-all}" = "all" ] || [ "${E2E_ONLY}" = "ts" ]; then
+            echo "::group::TypeScript e2e tests"
+            cd client/typescript
+            JEST_JUNIT_OUTPUT_DIR=../../reports/typescript JEST_JUNIT_OUTPUT_NAME=junit.xml npx jest tests/test_add_contact.device.test.ts tests/test_wait_for_animation_never_ends.device.test.ts --runInBand --reporters=default --reporters=jest-junit || FAILED=1
+            cd ../..
+            echo "::endgroup::"
+          fi
 
           exit $FAILED
           SCRIPT

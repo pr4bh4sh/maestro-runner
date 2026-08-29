@@ -12,9 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       go: ${{ steps.filter.outputs.go }}
-      python: ${{ steps.filter.outputs.python }}
-      typescript: ${{ steps.filter.outputs.typescript }}
-      android: ${{ steps.filter.outputs.android }}
+      py-lib: ${{ steps.filter.outputs.py-lib }}
+      ts-lib: ${{ steps.filter.outputs.ts-lib }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,13 +27,10 @@ jobs:
               - '**/*.go'
               - 'go.mod'
               - 'go.sum'
-            python:
-              - 'client/python/**'
-            typescript:
-              - 'client/typescript/**'
-            android:
-              - 'e2e/android-animation-app/**'
-              - 'drivers/android/**'
+            py-lib:
+              - 'client/python/maestro_runner/**'
+            ts-lib:
+              - 'client/typescript/src/**'
 
   lint-go:
     name: Lint Go
@@ -122,7 +118,7 @@ jobs:
     name: Test Python Client
     runs-on: ubuntu-latest
     needs: [detect-changes]
-    if: ${{ needs.detect-changes.outputs.python == 'true' }}
+    if: ${{ needs.detect-changes.outputs.py-lib == 'true' || needs.detect-changes.outputs.go == 'true' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -158,7 +154,7 @@ jobs:
     name: Test TypeScript Client
     runs-on: ubuntu-latest
     needs: [detect-changes]
-    if: ${{ needs.detect-changes.outputs.typescript == 'true' }}
+    if: ${{ needs.detect-changes.outputs.ts-lib == 'true' || needs.detect-changes.outputs.go == 'true' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
