@@ -122,6 +122,12 @@ jobs:
     timeout-minutes: 45
     needs: [detect-changes]
     if: ${{ needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.py-lib == 'true' || needs.detect-changes.outputs.ts-lib == 'true' || needs.detect-changes.outputs.py-e2e == 'true' || needs.detect-changes.outputs.ts-e2e == 'true' || needs.detect-changes.outputs.android-app == 'true' || needs.detect-changes.outputs.driver-apk == 'true' || needs.detect-changes.outputs.android-yaml == 'true' || needs.detect-changes.outputs.workflow == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [uiautomator2]
+    env:
+      MAESTRO_DRIVER: ${{ matrix.driver }}
 
     steps:
       - name: Checkout code
@@ -190,10 +196,13 @@ jobs:
           echo "Using device: $DEVICE"
           adb devices
 
-          # Install UIAutomator2 driver APKs (server before test harness)
-          adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
-          adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
-          adb install -r -g drivers/android/settings_apk-debug.apk
+          # Install UIAutomator2 server + settings (uiautomator2 driver)
+          if [ "${MAESTRO_DRIVER:-uiautomator2}" = "uiautomator2" ]; then
+            adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+            adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+            adb install -r -g drivers/android/settings_apk-debug.apk
+          fi
+          # Animation test app (needed by all Android drivers)
           adb install -r -g drivers/android/animation-test-app-debug.apk
 
           # --- YAML flow tests ---
