@@ -75,13 +75,6 @@ jobs:
               i = min(range(n), key=lambda k: totals[k])
               shards[i].append(p)
               totals[i] += d
-          # Diagnostics (stderr so it doesn't pollute the JSON on stdout).
-          print("Per-package durations (slowest first):", file=sys.stderr)
-          for p, d in pkgs:
-              print(f"  {d:8.2f}s  {p}", file=sys.stderr)
-          print("Balanced shard estimates:", file=sys.stderr)
-          for i in range(n):
-              print(f"  shard {i}: est {totals[i]:.2f}s across {len(shards[i])} pkgs", file=sys.stderr)
           print(json.dumps([{"shard": i, "packages": " ".join(shards[i])} for i in range(n)]))
           PY
           )
