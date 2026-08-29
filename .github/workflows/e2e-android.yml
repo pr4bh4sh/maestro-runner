@@ -125,7 +125,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        driver: [uiautomator2]
+        driver: [uiautomator2, devicelab]
     env:
       MAESTRO_DRIVER: ${{ matrix.driver }}
 
@@ -204,6 +204,12 @@ jobs:
           fi
           # Animation test app (needed by all Android drivers)
           adb install -r -g drivers/android/animation-test-app-debug.apk
+
+          # Install DeviceLab driver APKs (devicelab driver)
+          if [ "${MAESTRO_DRIVER:-uiautomator2}" = "devicelab" ]; then
+            adb install -r -g drivers/android/devicelab-android-driver.apk
+            adb install -r -g drivers/android/devicelab-android-driver-test.apk
+          fi
 
           # --- YAML flow tests ---
           echo "::group::YAML flow tests"
