@@ -34,7 +34,6 @@ client/python/
 │   ├── test_client.py    # Unit tests (requests-mock)
 │   ├── test_models.py    # Model serialization tests
 │   ├── test_add_contact.py
-│   ├── test_contact_persists.py
 │   └── test_e2e_android.py
 ├── pyproject.toml        # Build, dependencies, tool config (ruff, mypy, pytest)
 └── README.md
@@ -92,7 +91,7 @@ pytest
 pytest tests/test_client.py tests/test_models.py
 
 # Run e2e tests in parallel across connected devices
-pytest tests/test_add_contact.py tests/test_contact_persists.py -n auto -v
+pytest tests/test_add_contact.py -n auto -v
 
 # Run a specific test
 pytest tests/test_add_contact.py::test_add_contact -v

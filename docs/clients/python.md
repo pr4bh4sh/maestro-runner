@@ -181,7 +181,7 @@ info = c.device_info()
 ### Sequential (single device)
 
 ```bash
-pytest tests/test_add_contact.py tests/test_contact_persists.py -v
+pytest tests/test_add_contact.py -v
 ```
 
 ### Parallel (multiple devices)
@@ -199,7 +199,7 @@ specific device.
 
 ```bash
 # 2 emulators in parallel
-pytest tests/test_add_contact.py tests/test_contact_persists.py -n 2 -v
+pytest tests/test_add_contact.py -n 2 -v
 ```
 
 Worker `gw0` gets the first device (e.g. `emulator-5554`) on port `9999`, `gw1` gets the
