@@ -39,17 +39,19 @@ jobs:
       # Static sharding: no prepare step, no timing run. The slow CDP browser
       # package runs alone in its own shard (parallelized via t.Parallel()).
       # The remaining fast packages are split round-robin across the other 3
-      # shards. If packages are added/renamed, update the lists below.
+      # shards. Keep node_modules (e.g. the TS client's flatted dep) out of the
+      # lists — they are not repo tests. If packages are added/renamed, update
+      # the lists below.
       matrix:
         shard:
           - id: cdp
             packages: "github.com/devicelab-dev/maestro-runner/pkg/driver/browser/cdp"
           - id: s1
-            packages: "github.com/devicelab-dev/maestro-runner/drivers github.com/devicelab-dev/maestro-runner/pkg/config github.com/devicelab-dev/maestro-runner/pkg/driver/appium github.com/devicelab-dev/maestro-runner/pkg/driver/mock github.com/devicelab-dev/maestro-runner/pkg/emulator github.com/devicelab-dev/maestro-runner/pkg/flutter github.com/devicelab-dev/maestro-runner/pkg/maestro github.com/devicelab-dev/maestro-runner/pkg/simulator"
+            packages: "github.com/devicelab-dev/maestro-runner/pkg/cli github.com/devicelab-dev/maestro-runner/pkg/core github.com/devicelab-dev/maestro-runner/pkg/driver/devicelab github.com/devicelab-dev/maestro-runner/pkg/driver/uiautomator2 github.com/devicelab-dev/maestro-runner/pkg/executor github.com/devicelab-dev/maestro-runner/pkg/jsengine github.com/devicelab-dev/maestro-runner/pkg/report github.com/devicelab-dev/maestro-runner/pkg/uiautomator2"
           - id: s2
-            packages: "github.com/devicelab-dev/maestro-runner github.com/devicelab-dev/maestro-runner/pkg/cli github.com/devicelab-dev/maestro-runner/pkg/core github.com/devicelab-dev/maestro-runner/pkg/driver/devicelab github.com/devicelab-dev/maestro-runner/pkg/driver/uiautomator2 github.com/devicelab-dev/maestro-runner/pkg/executor github.com/devicelab-dev/maestro-runner/pkg/jsengine github.com/devicelab-dev/maestro-runner/pkg/report github.com/devicelab-dev/maestro-runner/pkg/uiautomator2"
+            packages: "github.com/devicelab-dev/maestro-runner github.com/devicelab-dev/maestro-runner/pkg/cloud github.com/devicelab-dev/maestro-runner/pkg/device github.com/devicelab-dev/maestro-runner/pkg/driver/devicelab_ios github.com/devicelab-dev/maestro-runner/pkg/driver/wda github.com/devicelab-dev/maestro-runner/pkg/flow github.com/devicelab-dev/maestro-runner/pkg/logger github.com/devicelab-dev/maestro-runner/pkg/server github.com/devicelab-dev/maestro-runner/pkg/validator"
           - id: s3
-            packages: "github.com/devicelab-dev/maestro-runner/client/typescript/node_modules/flatted/golang/pkg/flatted github.com/devicelab-dev/maestro-runner/pkg/cloud github.com/devicelab-dev/maestro-runner/pkg/device github.com/devicelab-dev/maestro-runner/pkg/driver/devicelab_ios github.com/devicelab-dev/maestro-runner/pkg/driver/wda github.com/devicelab-dev/maestro-runner/pkg/flow github.com/devicelab-dev/maestro-runner/pkg/logger github.com/devicelab-dev/maestro-runner/pkg/server github.com/devicelab-dev/maestro-runner/pkg/validator"
+            packages: "github.com/devicelab-dev/maestro-runner/drivers github.com/devicelab-dev/maestro-runner/pkg/config github.com/devicelab-dev/maestro-runner/pkg/driver/appium github.com/devicelab-dev/maestro-runner/pkg/driver/mock github.com/devicelab-dev/maestro-runner/pkg/emulator github.com/devicelab-dev/maestro-runner/pkg/flutter github.com/devicelab-dev/maestro-runner/pkg/maestro github.com/devicelab-dev/maestro-runner/pkg/simulator"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
