@@ -29,13 +29,23 @@ jobs:
         id: shards
         env:
           SHARD_COUNT: "4"
+          # CDP browser tests are disabled in CI (see docs/BACKLOG.md) — they
+          # take ~6-7 min alone and dominate the run. Exclude from timing + shards.
+          EXCLUDE_PKGS: "github.com/devicelab-dev/maestro-runner/pkg/driver/browser/cdp"
         run: |
           set -euo pipefail
+          # All test packages except explicitly excluded ones.
+          export ALL_PKGS
+          ALL_PKGS=$(go list ./... | grep -vF "$EXCLUDE_PKGS")
+          echo "Excluding from CI: $EXCLUDE_PKGS"
+          echo "Timing packages:"; echo "$ALL_PKGS"
           # Run the suite once (no -race) purely to measure per-package time.
-          go test -json -count=1 ./... > /tmp/timing.json 2>/dev/null || true
+          # shellcheck disable=SC2086
+          go test -json -count=1 $ALL_PKGS > /tmp/timing.json 2>/dev/null || true
           MATRIX=$(python3 - <<'PY'
           import json, os, sys
           n = int(os.environ.get("SHARD_COUNT", "4"))
+          all_pkgs = [p for p in os.environ.get("ALL_PKGS", "").split() if p]
           dur = {}
           try:
               with open("/tmp/timing.json") as f:
@@ -52,9 +62,9 @@ jobs:
                           dur[p] = max(dur.get(p, 0.0), float(e["Elapsed"]))
           except FileNotFoundError:
               pass
-          # Fallback if timing collection failed: spread packages round-robin.
+          # Fallback if timing collection failed: use the full package list.
           if not dur:
-              pkgs = sorted(p.strip() for p in os.popen("go list ./...").read().split() if p.strip())
+              pkgs = sorted(all_pkgs)
               dur = {p: 1.0 for p in pkgs}
           # Greedy bin-packing: assign each (slowest-first) package to the
           # currently least-loaded shard so total time is balanced, not count.
