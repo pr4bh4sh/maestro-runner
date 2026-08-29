@@ -66,12 +66,16 @@ jobs:
         run: go mod download
 
       - name: Run tests (shard ${{ matrix.shard.id }})
+        env:
+          # The CDP browser shard is slow under -race; drop it there (the fast
+          # shards keep -race). Set via expression so the flag is empty for cdp.
+          RACE_FLAG: ${{ matrix.shard.id == 'cdp' && '' || '-race' }}
         run: |
           PKGS="${{ matrix.shard.packages }}"
-          echo "Testing shard ${{ matrix.shard.id }}:"
+          echo "Testing shard ${{ matrix.shard.id }} (race='$RACE_FLAG'):"
           echo "$PKGS"
           # shellcheck disable=SC2086
-          go test -race -parallel "$CDP_PARALLEL" -v -coverprofile=coverage-${{ matrix.shard.id }}.out -covermode=atomic $PKGS
+          go test $RACE_FLAG -parallel "$CDP_PARALLEL" -v -coverprofile=coverage-${{ matrix.shard.id }}.out -covermode=atomic $PKGS
 
       - name: Upload coverage
         if: ${{ hashFiles(format('coverage-{0}.out', matrix.shard.id)) != '' }}
