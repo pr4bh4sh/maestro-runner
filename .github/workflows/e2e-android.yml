@@ -201,25 +201,25 @@ jobs:
           echo "Using device: $DEVICE"
           adb devices
 
-          # Install UIAutomator2 server + settings (uiautomator2 driver)
-          if [ "${MAESTRO_DRIVER:-uiautomator2}" = "uiautomator2" ]; then
-            adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
-            adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
-            adb install -r -g drivers/android/settings_apk-debug.apk
-          fi
+          # Driver-specific APK installs
+          case "${MAESTRO_DRIVER:-uiautomator2}" in
+            uiautomator2)
+              adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+              adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+              adb install -r -g drivers/android/settings_apk-debug.apk
+              ;;
+            devicelab)
+              # DeviceLab driver wraps uiautomator2.Driver, so the UIAutomator2
+              # server APK(s) must also be present on the device.
+              adb install -r -g drivers/android/devicelab-android-driver.apk
+              adb install -r -g drivers/android/devicelab-android-driver-test.apk
+              adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+              adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+              adb install -r -g drivers/android/settings_apk-debug.apk
+              ;;
+          esac
           # Animation test app (needed by all Android drivers)
           adb install -r -g drivers/android/animation-test-app-debug.apk
-
-          # Install DeviceLab driver APKs (devicelab driver)
-          if [ "${MAESTRO_DRIVER:-uiautomator2}" = "devicelab" ]; then
-            adb install -r -g drivers/android/devicelab-android-driver.apk
-            adb install -r -g drivers/android/devicelab-android-driver-test.apk
-            # The DeviceLab driver wraps uiautomator2.Driver, so the UIAutomator2
-            # server APK(s) must also be present on the device.
-            adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
-            adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
-            adb install -r -g drivers/android/settings_apk-debug.apk
-          fi
 
           # --- YAML flow tests ---
           echo "::group::YAML flow tests"
