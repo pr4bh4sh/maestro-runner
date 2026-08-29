@@ -213,7 +213,7 @@ jobs:
 
           # --- YAML flow tests ---
           echo "::group::YAML flow tests"
-          ./maestro-runner --platform android test --output reports/yaml e2e/workspaces/contacts/add_contact_android.yaml || FAILED=1
+          ./maestro-runner --driver "$MAESTRO_DRIVER" --platform android test --output reports/yaml e2e/workspaces/contacts/add_contact_android.yaml || FAILED=1
           echo "::endgroup::"
 
           # --- Python e2e tests (conftest.py auto-starts server) ---
