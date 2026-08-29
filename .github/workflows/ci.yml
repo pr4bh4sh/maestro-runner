@@ -31,18 +31,24 @@ jobs:
           SHARD_COUNT: "4"
           # CDP browser tests are re-enabled in CI. They are parallelized within
           # the package via t.Parallel() (see docs/BACKLOG.md), so they no longer
-          # dominate the run. Keep this in sync with the -parallel below.
+          # dominate the run. We skip CDP in the *timing* collection (it is the
+          # known-heavy package) and instead assign it a fixed estimate so it is
+          # isolated in its own shard — this keeps the prepare step fast instead
+          # of re-running CDP just to measure it (CDP runs once, in its shard).
           CDP_PARALLEL: "4"
+          HEAVY_PKGS: "github.com/devicelab-dev/maestro-runner/pkg/driver/browser/cdp"
         run: |
           set -euo pipefail
-          # All test packages (CDP included).
-          export ALL_PKGS
+          export ALL_PKGS TIMING_PKGS
           ALL_PKGS=$(go list ./...)
-          echo "Timing packages:"; echo "$ALL_PKGS"
+          TIMING_PKGS=$(printf '%s\n' "$ALL_PKGS" | grep -vF "$HEAVY_PKGS")
+          echo "Timing packages (CDP excluded from measurement, tested in its own shard):"
+          echo "$TIMING_PKGS"
           # Run the suite once (no -race) purely to measure per-package time.
           # -parallel matches the real sharded run so collected timings are accurate.
+          # CDP is intentionally omitted here to avoid re-running it just to time it.
           # shellcheck disable=SC2086
-          go test -json -count=1 -parallel "$CDP_PARALLEL" $ALL_PKGS > /tmp/timing.json 2>/dev/null || true
+          go test -json -count=1 -parallel "$CDP_PARALLEL" $TIMING_PKGS > /tmp/timing.json 2>/dev/null || true
           MATRIX=$(python3 - <<'PY'
           import json, os, sys
           n = int(os.environ.get("SHARD_COUNT", "4"))
@@ -63,6 +69,11 @@ jobs:
                           dur[p] = max(dur.get(p, 0.0), float(e["Elapsed"]))
           except FileNotFoundError:
               pass
+          # CDP is skipped in the timing run; assign a fixed large estimate so the
+          # bin-packer isolates this known-heavy package in its own shard.
+          heavy = os.environ.get("HEAVY_PKGS")
+          if heavy and heavy not in dur:
+              dur[heavy] = 200.0
           # Fallback if timing collection failed: use the full package list.
           if not dur:
               pkgs = sorted(all_pkgs)
@@ -137,7 +148,7 @@ jobs:
           echo "Testing shard ${{ matrix.shard.shard }}:"
           echo "$PKGS"
           # shellcheck disable=SC2086
-          go test -race -parallel "$CDP_PARALLEL" -coverprofile=coverage-${{ matrix.shard.shard }}.out -covermode=atomic $PKGS
+          go test -race -parallel "$CDP_PARALLEL" -v -coverprofile=coverage-${{ matrix.shard.shard }}.out -covermode=atomic $PKGS
 
       - name: Upload coverage
         if: ${{ hashFiles(format('coverage-{0}.out', matrix.shard.shard)) != '' }}
