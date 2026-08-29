@@ -69,7 +69,7 @@ jobs:
         env:
           # The CDP browser shard is slow under -race; drop it there (the fast
           # shards keep -race). Set via expression so the flag is empty for cdp.
-          RACE_FLAG: ${{ matrix.shard.id == 'cdp' && '' || '-race' }}
+          RACE_FLAG: ${{ matrix.shard.id != 'cdp' && '-race' || '' }}
         run: |
           PKGS="${{ matrix.shard.packages }}"
           echo "Testing shard ${{ matrix.shard.id }} (race='$RACE_FLAG'):"
