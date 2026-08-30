@@ -10,7 +10,7 @@ tags:
     clearState: true
 
 - assertVisible:
-    id: "dev.maestro.animationtest:id/webview"
+    text: "Animation WebView"
 
 - assertVisible:
     text: "Stop"
