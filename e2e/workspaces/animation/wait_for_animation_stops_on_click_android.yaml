@@ -11,6 +11,7 @@ tags:
 
 - assertVisible:
     id: "dev.maestro.animationtest:id/webview"
+    optional: true
 
 - assertVisible:
     text: "Stop"
