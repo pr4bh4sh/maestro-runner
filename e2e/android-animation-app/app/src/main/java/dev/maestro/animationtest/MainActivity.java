@@ -47,6 +47,8 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient());
         webView.getSettings().setJavaScriptEnabled(true);
         webView.getSettings().setDomStorageEnabled(true);
+        webView.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        webView.setContentDescription("Animation WebView");
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void onJsLog(String msg) { /* no-op, for debugging */ }
