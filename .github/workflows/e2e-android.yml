@@ -227,7 +227,7 @@ jobs:
           # --- TypeScript e2e tests (setup.ts auto-starts server) ---
           echo "::group::TypeScript e2e tests"
           cd client/typescript
-          JEST_JUNIT_OUTPUT_DIR=../../reports/typescript JEST_JUNIT_OUTPUT_NAME=junit.xml npx jest tests/test_add_contact.device.test.ts tests/test_wait_for_animation_never_ends.device.test.ts tests/test_wait_for_animation_stops_on_click.device.test.ts --runInBand --reporters=default --reporters=jest-junit || FAILED=1
+          JEST_JUNIT_OUTPUT_DIR=../../reports/typescript JEST_JUNIT_OUTPUT_NAME=junit.xml npx jest tests/test_add_contact.device.test.ts tests/test_wait_for_animation_to_end.device.test.ts tests/test_wait_for_animation_never_ends.device.test.ts tests/test_wait_for_animation_stops_on_click.device.test.ts --runInBand --reporters=default --reporters=jest-junit || FAILED=1
           cd ../..
           echo "::endgroup::"
 
