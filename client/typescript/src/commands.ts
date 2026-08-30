@@ -105,10 +105,12 @@ export function waitForAnimationToEnd(
   sleepMs?: number,
   threshold?: number,
   label?: string,
+  timeoutMs?: number,
 ): Step {
   const step: Step = { type: "waitForAnimationToEnd" };
   if (sleepMs != null) step.sleepMs = sleepMs;
   if (threshold != null) step.threshold = threshold;
+  if (timeoutMs != null) step.timeout = timeoutMs;
   if (label != null) step.label = label;
   return step;
 }
