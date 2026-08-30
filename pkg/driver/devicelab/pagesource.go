@@ -21,6 +21,7 @@ type ParsedElement struct {
 	Bounds      core.Bounds
 	Enabled     bool
 	Selected    bool
+	Checked     bool
 	Focused     bool
 	Displayed   bool
 	Clickable   bool
@@ -80,6 +81,8 @@ func ParsePageSource(xmlData string) ([]*ParsedElement, error) {
 						elem.Enabled = attr.Value == "true"
 					case "selected":
 						elem.Selected = attr.Value == "true"
+					case "checked":
+						elem.Checked = attr.Value == "true"
 					case "focused":
 						elem.Focused = attr.Value == "true"
 					case "displayed":
@@ -242,7 +245,7 @@ func matchesSelector(elem *ParsedElement, sel flow.Selector) bool {
 	if sel.Focused != nil && elem.Focused != *sel.Focused {
 		return false
 	}
-	if sel.Checked != nil && elem.Selected != *sel.Checked {
+	if sel.Checked != nil && elem.Checked != *sel.Checked {
 		// checked maps to selected in Android
 		return false
 	}
@@ -276,7 +279,16 @@ func matchesID(pattern, id string) bool {
 func matchesText(pattern, text, contentDesc, hintText string) bool {
 	// Check if pattern looks like a regex
 	if looksLikeRegex(pattern) {
-		re, err := regexp.Compile("(?i)" + pattern)
+		// Case-sensitive, deliberately. Compiling with (?i) meant an anchored
+		// pattern could not distinguish what it was written to distinguish:
+		// `^SIGN OUT$` matched a "Sign out" row as readily as the "SIGN OUT"
+		// button, and whichever came first in the page source won (#151).
+		// Maestro matches regex selectors case-sensitively, and a flow written
+		// against it has to behave the same here.
+		//
+		// Plain text selectors are untouched — they are not regexes, and fall
+		// to the case-insensitive contains path below.
+		re, err := regexp.Compile(pattern)
 		if err != nil {
 			// Invalid regex - fall back to literal matching
 			return containsIgnoreCase(text, pattern) ||
