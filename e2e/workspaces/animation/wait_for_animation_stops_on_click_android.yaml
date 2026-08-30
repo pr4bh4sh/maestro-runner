@@ -10,9 +10,6 @@ tags:
     clearState: true
 
 - assertVisible:
-    id: "dev.maestro.animationtest:id/webview"
-
-- assertVisible:
     text: "Stop"
 
 # Verify the spinner is continuously animating before Stop (must time out).

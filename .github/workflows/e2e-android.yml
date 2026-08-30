@@ -110,9 +110,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        driver: [uiautomator2, devicelab]
+        driver: [uiautomator2, devicelab, appium]
     env:
       MAESTRO_DRIVER: ${{ matrix.driver }}
+      APPIUM_URL: ${{ matrix.driver == 'appium' && 'http://localhost:4723' || '' }}
 
     steps:
       - name: Checkout code
@@ -148,6 +149,29 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: client/typescript/package-lock.json
+
+      - name: Setup Appium server (appium only)
+        if: ${{ matrix.driver == 'appium' }}
+        run: |
+          npm install -g appium@latest
+          appium driver install uiautomator2 || appium driver install --source=npm appium-uiautomator2-driver
+          nohup appium --port 4723 --log /tmp/appium.log > /tmp/appium.out 2>&1 &
+          echo $! > /tmp/appium.pid
+          echo "Waiting for Appium on :4723 ..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4723/status > /dev/null; then
+              echo "Appium ready"
+              break
+            fi
+            sleep 2
+            if [ "$i" -eq 30 ]; then
+              echo "Appium failed to start"
+              cat /tmp/appium.log || true
+              cat /tmp/appium.out || true
+              exit 1
+            fi
+          done
+          curl -s http://localhost:4723/status | head -c 500; echo
 
       - name: Build maestro-runner
         run: |
@@ -201,6 +225,10 @@ jobs:
               adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
               adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
               adb install -r -g drivers/android/settings_apk-debug.apk
+              ;;
+            appium)
+              # Appium manages the UIAutomator2 server itself; only the test
+              # app (installed below as common) is needed.
               ;;
           esac
           # Animation test app (needed by all Android drivers)

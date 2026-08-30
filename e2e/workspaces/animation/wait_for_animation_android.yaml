@@ -13,9 +13,11 @@ tags:
 - launchApp:
     clearState: true
 
-# The spinner is rendered into a full-screen WebView; confirm it came up.
+# The spinner app's native Stop button is reliably exposed on all drivers
+# (uiautomator2/devicelab/Appium), unlike the WebView's resourceId/content-desc.
+# Asserting Stop confirms the app came up without needing Appium-tolerant OR.
 - assertVisible:
-    id: "dev.maestro.animationtest:id/webview"
+    text: "Stop"
 
 # waitForAnimationToEnd must detect the perpetual motion and time out. This
 # exercises the full YAML -> executor -> driver screenshot-diff path against the
