@@ -681,6 +681,7 @@ def wait_for_animation_to_end(
     *,
     sleep_ms: int | None = None,
     threshold: float | None = None,
+    timeout_ms: int | None = None,
     label: str | None = None,
 ) -> dict[str, Any]:
     """Build a waitForAnimationToEnd step.
@@ -691,6 +692,8 @@ def wait_for_animation_to_end(
                    on the server side.
         threshold: Maximum pixel-diff percentage (0.0-1.0) still considered static.
                    Lower is stricter.  Defaults to 0.005 (0.5 %) on the server side.
+        timeout_ms: Maximum time to wait for the screen to become static.
+                    Defaults to 15000 ms (15 s) on the server side.
         label:     Optional step label shown in reports.
     """
     step: dict[str, Any] = {"type": "waitForAnimationToEnd"}
@@ -698,6 +701,8 @@ def wait_for_animation_to_end(
         step["sleepMs"] = sleep_ms
     if threshold is not None:
         step["threshold"] = threshold
+    if timeout_ms is not None:
+        step["timeout"] = timeout_ms
     if label is not None:
         step["label"] = label
     return step

@@ -214,10 +214,11 @@ class MaestroClient:
         *,
         sleep_ms: int | None = None,
         threshold: float | None = None,
+        timeout_ms: int | None = None,
         label: str | None = None,
     ) -> ExecutionResult:
         return self._exec(commands.wait_for_animation_to_end(
-            sleep_ms=sleep_ms, threshold=threshold, label=label
+            sleep_ms=sleep_ms, threshold=threshold, timeout_ms=timeout_ms, label=label
         ))
 
     # --- Scroll / Swipe ---

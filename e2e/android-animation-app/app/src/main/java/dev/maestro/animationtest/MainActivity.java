@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.os.Bundle;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.JavascriptInterface;
+import android.widget.Button;
 
 public class MainActivity extends Activity {
 
@@ -23,15 +25,17 @@ public class MainActivity extends Activity {
             "var c=document.getElementById('c'),x=c.getContext('2d');\n" +
             "function resize(){c.width=innerWidth;c.height=innerHeight;}\n" +
             "resize();addEventListener('resize',resize);\n" +
-            "var a=0;\n" +
+            "var a=0,iv;\n" +
             "function draw(){\n" +
             "  a=(a+3)%360;\n" +
             "  var w=c.width,h=c.height,cx=w/2,cy=h/2,r=Math.min(w,h)*0.18;\n" +
-            "  x.fillStyle='hsl('+a+',70%,90%)';x.fillRect(0,0,w,h);\n" +
+            "  x.fillStyle='#fff';x.fillRect(0,0,w,h);\n" +
             "  x.save();x.translate(cx,cy);x.rotate(a*Math.PI/180);\n" +
             "  x.fillStyle='#3498db';x.fillRect(-r,-r/6,r*2,r/3);x.restore();\n" +
             "}\n" +
-            "setInterval(draw,16);draw();\n" +
+            "iv=setInterval(draw,16);draw();\n" +
+            "function stopAnimation(){if(iv){clearInterval(iv);iv=null;}}\n" +
+            "function startAnimation(){if(!iv){iv=setInterval(draw,16);}}\n" +
             "</script></body></html>";
 
     @Override
@@ -43,6 +47,16 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new WebViewClient());
         webView.getSettings().setJavaScriptEnabled(true);
         webView.getSettings().setDomStorageEnabled(true);
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void onJsLog(String msg) { /* no-op, for debugging */ }
+        }, "Android");
         webView.loadDataWithBaseURL(null, SPINNER_HTML, "text/html", "utf-8", null);
+
+        Button stopButton = findViewById(R.id.stopButton);
+        stopButton.setOnClickListener(v -> webView.evaluateJavascript("stopAnimation();", null));
+
+        Button startButton = findViewById(R.id.startButton);
+        startButton.setOnClickListener(v -> webView.evaluateJavascript("startAnimation();", null));
     }
 }

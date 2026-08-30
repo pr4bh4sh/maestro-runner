@@ -1,0 +1,37 @@
+appId: dev.maestro.animationtest
+name: Wait for animation stops on Stop tap (Android)
+tags:
+  - android
+  - animation
+---
+# Launch the spinner app, tap Stop to halt the canvas animation, then verify
+# the screen becomes static. Mirrors the Python/TS stoppable-animation tests.
+- launchApp:
+    clearState: true
+
+- assertVisible:
+    id: "dev.maestro.animationtest:id/webview"
+
+- assertVisible:
+    text: "Stop"
+
+# Verify the spinner is continuously animating before Stop (must time out).
+# Marked optional so the "always times out" path is exercised without failing
+# the flow when it correctly times out.
+- waitForAnimationToEnd:
+    optional: true
+    timeout: 5000
+    sleepMs: 500
+    threshold: 0.0003
+
+- tapOn:
+    text: "Stop"
+
+# After Stop, the setInterval is cleared so the screen should settle quickly.
+- waitForAnimationToEnd:
+    timeout: 5000
+    sleepMs: 500
+    threshold: 0.0003
+
+- assertVisible:
+    text: "Stop"

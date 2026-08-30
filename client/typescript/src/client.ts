@@ -191,8 +191,9 @@ export class MaestroClient {
     sleepMs?: number,
     threshold?: number,
     label?: string,
+    timeoutMs?: number,
   ): Promise<ExecutionResult> {
-    return this.exec(commands.waitForAnimationToEnd(sleepMs, threshold, label));
+    return this.exec(commands.waitForAnimationToEnd(sleepMs, threshold, label, timeoutMs));
   }
 
   // --- Scroll / Swipe ---
