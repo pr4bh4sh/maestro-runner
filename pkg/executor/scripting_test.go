@@ -565,10 +565,15 @@ func TestScriptEngine_ResolvePath(t *testing.T) {
 		t.Errorf("ResolvePath with abs path = %q, want %q", got, "/abs/path.js")
 	}
 
-	// With flow dir
-	se.SetFlowDir("/flows/login")
-	if got := se.ResolvePath("helper.js"); got != "/flows/login/helper.js" {
-		t.Errorf("ResolvePath with flowDir = %q, want %q", got, "/flows/login/helper.js")
+	// With flow dir. Built with filepath.Join rather than written literally:
+	// ResolvePath joins with the host separator, so a hard-coded "/" made this
+	// fail on Windows against the identical answer spelled with backslashes
+	// (#159).
+	flowDir := filepath.Join(string(filepath.Separator), "flows", "login")
+	se.SetFlowDir(flowDir)
+	want := filepath.Join(flowDir, "helper.js")
+	if got := se.ResolvePath("helper.js"); got != want {
+		t.Errorf("ResolvePath with flowDir = %q, want %q", got, want)
 	}
 }
 
@@ -1226,6 +1231,113 @@ func TestScriptEngine_ExpandStep_InputTextStep(t *testing.T) {
 	if step.Selector.ID != "input_john" {
 		t.Errorf("Selector.ID = %q, want %q", step.Selector.ID, "input_john")
 	}
+}
+
+func TestScriptEngine_ExpandStep_ScreenshotSteps(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	se.SetVariable("ROOT", "/tmp/screenshots")
+	se.SetVariable("NAME", "alignment")
+	se.SetVariable("ELEMENT_ID", "enriched-text")
+
+	take := &flow.TakeScreenshotStep{
+		Path:   "${ROOT}/${NAME}",
+		CropOn: &flow.Selector{ID: "${ELEMENT_ID}"},
+	}
+	assert := &flow.AssertScreenshotStep{
+		Path:   "${ROOT}/${NAME}",
+		CropOn: &flow.Selector{ID: "${ELEMENT_ID}"},
+	}
+
+	se.ExpandStep(take)
+	se.ExpandStep(assert)
+
+	for name, step := range map[string]struct {
+		path   string
+		cropOn *flow.Selector
+	}{
+		"takeScreenshot":   {path: take.Path, cropOn: take.CropOn},
+		"assertScreenshot": {path: assert.Path, cropOn: assert.CropOn},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if step.path != "/tmp/screenshots/alignment" {
+				t.Errorf("Path = %q, want %q", step.path, "/tmp/screenshots/alignment")
+			}
+			if step.cropOn == nil || step.cropOn.ID != "enriched-text" {
+				t.Errorf("CropOn = %#v, want id enriched-text", step.cropOn)
+			}
+		})
+	}
+}
+
+func TestScriptEngine_ExpandStep_LaunchAppPermissions(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	se.SetVariable("PERM", "location")
+	se.SetVariable("STATE", "allow")
+
+	s := &flow.LaunchAppStep{
+		AppID:       "com.example",
+		Permissions: map[string]string{"${PERM}": "${STATE}", "camera": "deny"},
+	}
+	se.ExpandStep(s)
+
+	if got := s.Permissions["location"]; got != "allow" {
+		t.Errorf("Permissions[location] = %q, want %q", got, "allow")
+	}
+	if got := s.Permissions["camera"]; got != "deny" {
+		t.Errorf("Permissions[camera] = %q, want %q", got, "deny")
+	}
+	if _, stale := s.Permissions["${PERM}"]; stale {
+		t.Errorf("unexpanded key ${PERM} still present: %#v", s.Permissions)
+	}
+}
+
+func TestScriptEngine_ExpandStep_SetPermissions(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	se.SetVariable("STATE", "deny")
+
+	s := &flow.SetPermissionsStep{
+		AppID:       "com.example",
+		Permissions: map[string]string{"camera": "${STATE}"},
+	}
+	se.ExpandStep(s)
+
+	if got := s.Permissions["camera"]; got != "deny" {
+		t.Errorf("Permissions[camera] = %q, want %q", got, "deny")
+	}
+}
+
+func TestScriptEngine_ExpandStep_AssertScreenshotThreshold(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	se.SetVariable("THRESH", "87.5")
+
+	t.Run("var resolves to float", func(t *testing.T) {
+		s := &flow.AssertScreenshotStep{Path: "b.png", ThresholdRaw: "${THRESH}"}
+		se.ExpandStep(s)
+		if s.ThresholdPercentage != 87.5 {
+			t.Errorf("ThresholdPercentage = %v, want 87.5", s.ThresholdPercentage)
+		}
+	})
+
+	t.Run("unresolvable var falls back to default", func(t *testing.T) {
+		s := &flow.AssertScreenshotStep{Path: "b.png", ThresholdRaw: "${MISSING}"}
+		se.ExpandStep(s)
+		if s.ThresholdPercentage != 95.0 {
+			t.Errorf("ThresholdPercentage = %v, want 95.0 (default)", s.ThresholdPercentage)
+		}
+	})
+
+	t.Run("numeric literal is untouched by expand", func(t *testing.T) {
+		s := &flow.AssertScreenshotStep{Path: "b.png", ThresholdPercentage: 92.0}
+		se.ExpandStep(s)
+		if s.ThresholdPercentage != 92.0 {
+			t.Errorf("ThresholdPercentage = %v, want 92.0", s.ThresholdPercentage)
+		}
+	})
 }
 
 func TestScriptEngine_ExpandStep_ScrollUntilVisibleDirection(t *testing.T) {
@@ -2399,5 +2511,36 @@ func TestExecuteRepeat_WhileInterpolation(t *testing.T) {
 		if queriedIDs[i] != id {
 			t.Errorf("query %d = %q, want %q (literal template leaked = re-expansion broken)", i, queriedIDs[i], id)
 		}
+	}
+}
+
+func TestScriptEngine_ExpandStep_DeviceControlFields(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+	se.SetVariable("ORIENT", "LANDSCAPE_LEFT")
+	se.SetVariable("LAT", "37.7")
+	se.SetVariable("LON", "-122.4")
+	se.SetVariable("DIR", "UP")
+	se.SetVariable("CLIP", "hello")
+
+	orient := &flow.SetOrientationStep{Orientation: "${ORIENT}"}
+	se.ExpandStep(orient)
+	if orient.Orientation != "LANDSCAPE_LEFT" {
+		t.Errorf("setOrientation not expanded: %q", orient.Orientation)
+	}
+	loc := &flow.SetLocationStep{Latitude: "${LAT}", Longitude: "${LON}"}
+	se.ExpandStep(loc)
+	if loc.Latitude != "37.7" || loc.Longitude != "-122.4" {
+		t.Errorf("setLocation not expanded: %q,%q", loc.Latitude, loc.Longitude)
+	}
+	sw := &flow.SwipeStep{Direction: "${DIR}"}
+	se.ExpandStep(sw)
+	if sw.Direction != "UP" {
+		t.Errorf("swipe direction not expanded: %q", sw.Direction)
+	}
+	clip := &flow.SetClipboardStep{Text: "${CLIP}"}
+	se.ExpandStep(clip)
+	if clip.Text != "hello" {
+		t.Errorf("setClipboard not expanded: %q", clip.Text)
 	}
 }

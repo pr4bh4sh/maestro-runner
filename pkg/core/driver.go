@@ -179,7 +179,11 @@ type PlatformInfo struct {
 	ScreenWidth  int    `json:"screenWidth,omitempty"`  // Screen width in pixels
 	ScreenHeight int    `json:"screenHeight,omitempty"` // Screen height in pixels
 	AppID        string `json:"appId,omitempty"`        // Bundle ID / Package name
-	AppVersion   string `json:"appVersion,omitempty"`   // App version
+	AppVersion   string `json:"appVersion,omitempty"`   // App version name, e.g. "1.16.0"
+	// AppBuild is the build number behind the version name — Android's
+	// versionCode, iOS's CFBundleVersion. One release version covers many CI
+	// builds, so the version alone does not identify which binary was tested.
+	AppBuild string `json:"appBuild,omitempty"`
 }
 
 // ExecutedBy indicates what component executed a step
@@ -236,6 +240,19 @@ type TypingFrequencyConfigurer interface {
 // have an active session. If launchApp runs later, it replaces the session.
 type SessionEnsurer interface {
 	EnsureSession(appID string) error
+}
+
+// ScreenRecorder is an optional interface drivers can implement to record the
+// device screen while a flow runs (--record). Recording is best-effort: the
+// executor logs a failure from either method and continues, so an error here
+// never fails a flow.
+type ScreenRecorder interface {
+	// StartScreenRecording begins recording. An error means recording is not
+	// possible right now (e.g. a physical device without a capture path).
+	StartScreenRecording() error
+	// StopScreenRecording finishes the recording and writes an MP4 to
+	// hostPath. Called only after a successful StartScreenRecording.
+	StopScreenRecording(hostPath string) error
 }
 
 // FlowAware is an optional interface drivers can implement to inspect the

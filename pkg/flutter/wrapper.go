@@ -92,6 +92,13 @@ func (d *FlutterDriver) Execute(step flow.Step) *core.CommandResult {
 		return d.inner.Execute(step)
 	}
 
+	// Count assertions → inner only. The Flutter VM resolves a single element,
+	// so the parallel race is meaningless for "exactly N matches" — and its 1s
+	// inner poll windows would clamp the count's own polling loop.
+	if av, ok := step.(*flow.AssertVisibleStep); ok && av.Count != "" {
+		return d.inner.Execute(step)
+	}
+
 	sel := extractSelector(step)
 	if sel == nil || sel.IsEmpty() || (sel.Text == "" && sel.ID == "") {
 		return d.inner.Execute(step)
@@ -198,6 +205,11 @@ func (d *FlutterDriver) Execute(step flow.Step) *core.CommandResult {
 	return result
 }
 
+// flutterPollInterval paces the Flutter search loop. Chosen to sit under the
+// inner driver's 1s poll so Flutter still answers first when it can, while
+// leaving the VM Service idle in between.
+const flutterPollInterval = 300 * time.Millisecond
+
 // flutterPollLoop continuously searches the Flutter VM Service trees until the
 // element is found, the context is cancelled, or the timeout expires.
 // Runs in a goroutine — always writes exactly one result to ch before returning.
@@ -214,6 +226,19 @@ func (d *FlutterDriver) flutterPollLoop(ctx context.Context, sel *flow.Selector,
 			ch <- fr
 			return
 		}
+
+		// Pace the loop. It used to spin with no delay, so a search that ran to
+		// timeout re-serialised the app's trees out of the VM Service as fast
+		// as the connection allowed — for the whole find window, contending
+		// with the app it was inspecting (#152). A tree that has not been
+		// repainted cannot start matching, so polling faster than the app can
+		// change buys nothing.
+		select {
+		case <-ctx.Done():
+			ch <- nil
+			return
+		case <-time.After(flutterPollInterval):
+		}
 	}
 }
 
@@ -228,7 +253,11 @@ type flutterSearchResult struct {
 
 // searchFlutterOnce does a single search attempt across semantics and widget trees.
 func (d *FlutterDriver) searchFlutterOnce(sel *flow.Selector) *flutterSearchResult {
-	semanticsDump, widgetDump, err := d.getFlutterTrees(true)
+	// Semantics only to begin with. The widget dump is megabytes on a real app
+	// — 2.9MB was reported — and it is consulted solely when the semantics
+	// search finds nothing, so fetching it up front paid that cost on every
+	// poll of every step, including the ones that matched immediately (#152).
+	semanticsDump, _, err := d.getFlutterTrees(false)
 	if err != nil {
 		logger.Debug("Flutter fallback: failed to get trees: %v", err)
 		return nil
@@ -250,8 +279,13 @@ func (d *FlutterDriver) searchFlutterOnce(sel *flow.Selector) *flutterSearchResu
 	nodes := searchSemanticsTree(root, sel)
 	isSuffix := false
 
-	// Step 2: If not found, try widget tree cross-reference
-	if len(nodes) == 0 && widgetDump != "" {
+	// Step 2: If not found, try widget tree cross-reference. Fetched here, not
+	// above, so a search the semantics tree can answer never pays for it.
+	if len(nodes) == 0 {
+		_, widgetDump, werr := d.getFlutterTrees(true)
+		if werr != nil || widgetDump == "" {
+			return nil
+		}
 		logger.Debug("Flutter fallback: searching widget tree (%d bytes)", len(widgetDump))
 		var match *WidgetTreeMatch
 		if sel.Text != "" {

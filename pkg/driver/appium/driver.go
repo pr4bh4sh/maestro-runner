@@ -28,6 +28,8 @@ type Driver struct {
 	waitForIdleTimeoutSet     bool                   // whether waitForIdleTimeout has been set
 	lastTappedElementID       string                 // iOS: last element clicked via ClickElement, used by inputText
 	warnedFields              map[string]bool
+	appVersion                string // version name, supplied by the caller
+	appBuild                  string // build number, supplied by the caller
 }
 
 // NewDriver creates a new Appium driver.
@@ -82,6 +84,13 @@ func (d *Driver) SessionID() string {
 // SessionCaps returns the merged capabilities from the session creation response.
 func (d *Driver) SessionCaps() map[string]interface{} {
 	return d.client.SessionCaps()
+}
+
+// Keepalive sends a lightweight session-scoped command to reset the server's
+// newCommandTimeout idle timer. Used while --parallel pre-creates all sessions
+// so an early session isn't reaped by a cloud farm before its flow runs (#124).
+func (d *Driver) Keepalive() error {
+	return d.client.Keepalive()
 }
 
 // RestartSession closes the existing Appium session and creates a fresh one.
@@ -143,6 +152,8 @@ func (d *Driver) executeStep(step flow.Step) *core.CommandResult {
 		return d.longPressOn(s)
 	case *flow.TapOnPointStep:
 		return d.tapOnPoint(s)
+	case *flow.DragAndDropStep:
+		return d.dragAndDrop(s)
 	case *flow.SwipeStep:
 		return d.swipe(s)
 	case *flow.ScrollStep:
@@ -165,6 +176,8 @@ func (d *Driver) executeStep(step flow.Step) *core.CommandResult {
 		return d.stopApp(s)
 	case *flow.ClearStateStep:
 		return d.clearState(s)
+	case *flow.SetPermissionsStep:
+		return d.setPermissions(s)
 	case *flow.SetLocationStep:
 		return d.setLocation(s)
 	case *flow.SetOrientationStep:
@@ -191,6 +204,8 @@ func (d *Driver) executeStep(step flow.Step) *core.CommandResult {
 		return d.inputRandom(s)
 	case *flow.TakeScreenshotStep:
 		return d.takeScreenshot(s)
+	case *flow.AssertScreenshotStep:
+		return d.takeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
 	default:
 		return errorResult(fmt.Errorf("unsupported step type: %T", step), "")
 	}
@@ -233,7 +248,20 @@ func (d *Driver) GetPlatformInfo() *core.PlatformInfo {
 		ScreenWidth:  w,
 		ScreenHeight: h,
 		AppID:        d.appID,
+		AppVersion:   d.appVersion,
+		AppBuild:     d.appBuild,
 	}
+}
+
+// SetAppInfo records the app's version name and build number for reports.
+//
+// Appium session capabilities do not carry either one, and this driver has no
+// device access of its own to look them up — on a cloud device farm there is no
+// local app bundle and no adb/simctl to ask. So the caller resolves them when it
+// can and supplies them here, leaving them empty when it cannot.
+func (d *Driver) SetAppInfo(version, build string) {
+	d.appVersion = version
+	d.appBuild = build
 }
 
 // SetContext sets the parent context for element-finding operations.
@@ -347,6 +375,18 @@ func (d *Driver) findElementDirect(sel flow.Selector) (*core.ElementInfo, error)
 		return d.findElementByPageSource(sel)
 	}
 
+	// Both an id and a text mean "the element with both", and none of the
+	// queries below can express that: each returns on the first match for the
+	// one attribute it knows about, so the id path answered and the text was
+	// never read. An assertVisible with the right id and a wrong text passed
+	// green, which is the dangerous direction (#157).
+	//
+	// Page source is where a selector's fields are all checked together — the
+	// same route state filters take above, and for the same reason.
+	if sel.ID != "" && sel.Text != "" {
+		return d.findElementByPageSource(sel)
+	}
+
 	// Try ID first
 	if sel.ID != "" {
 		if d.platform == "ios" {
@@ -405,33 +445,51 @@ func (d *Driver) findElementDirect(sel flow.Selector) (*core.ElementInfo, error)
 					return d.getElementInfo(elemID)
 				}
 			} else {
-				// Try case-sensitive first (preserves existing behavior)
-				uiSelector := fmt.Sprintf(`new UiSelector().text("%s")`, escaped)
-				if elemID, err := d.client.FindElement("-android uiautomator", uiSelector); err == nil && elemID != "" {
-					return d.getElementInfo(elemID)
+				// Six strategies used to run in order, and every one of them
+				// cost a round trip. While polling for an element that has not
+				// appeared yet — the common case — all six missed, repeatedly:
+				// measured on a Pixel 4a, 22 of 30 finds in a single flow were
+				// misses burning 2.8s, more than the successful finds cost.
+				//
+				// The case-insensitive regex forms are supersets of the exact
+				// and contains forms (verified on device), so if both of them
+				// miss, none of the other four can hit. Probe with those two
+				// first and give up immediately when they find nothing.
+				ciPattern := fmt.Sprintf(`(?is).*\Q%s\E.*`, escaped)
+				textProbe := fmt.Sprintf(`new UiSelector().textMatches("%s")`, ciPattern)
+				descProbe := fmt.Sprintf(`new UiSelector().descriptionMatches("%s")`, ciPattern)
+
+				textHit, textErr := d.client.FindElement("-android uiautomator", textProbe)
+				descHit, descErr := "", error(nil)
+				if textErr != nil || textHit == "" {
+					descHit, descErr = d.client.FindElement("-android uiautomator", descProbe)
 				}
-				uiSelector = fmt.Sprintf(`new UiSelector().textContains("%s")`, escaped)
-				if elemID, err := d.client.FindElement("-android uiautomator", uiSelector); err == nil && elemID != "" {
-					return d.getElementInfo(elemID)
-				}
-				uiSelector = fmt.Sprintf(`new UiSelector().description("%s")`, escaped)
-				if elemID, err := d.client.FindElement("-android uiautomator", uiSelector); err == nil && elemID != "" {
-					return d.getElementInfo(elemID)
-				}
-				uiSelector = fmt.Sprintf(`new UiSelector().descriptionContains("%s")`, escaped)
-				if elemID, err := d.client.FindElement("-android uiautomator", uiSelector); err == nil && elemID != "" {
-					return d.getElementInfo(elemID)
+				if (textErr != nil || textHit == "") && (descErr != nil || descHit == "") {
+					// Nothing on screen matches by text or description.
+					return d.findElementByPageSource(sel)
 				}
 
-				// Case-insensitive fallback
-				ciPattern := fmt.Sprintf(`(?is).*\Q%s\E.*`, escaped)
-				uiSelector = fmt.Sprintf(`new UiSelector().textMatches("%s")`, ciPattern)
-				if elemID, err := d.client.FindElement("-android uiautomator", uiSelector); err == nil && elemID != "" {
-					return d.getElementInfo(elemID)
+				// Something matches. Now prefer the most specific form, since
+				// several elements can qualify and exact should win over
+				// substring, and text over description.
+				for _, uiSelector := range []string{
+					fmt.Sprintf(`new UiSelector().text("%s")`, escaped),
+					fmt.Sprintf(`new UiSelector().textContains("%s")`, escaped),
+					fmt.Sprintf(`new UiSelector().description("%s")`, escaped),
+					fmt.Sprintf(`new UiSelector().descriptionContains("%s")`, escaped),
+				} {
+					if elemID, err := d.client.FindElement("-android uiautomator", uiSelector); err == nil && elemID != "" {
+						return d.getElementInfo(elemID)
+					}
 				}
-				uiSelector = fmt.Sprintf(`new UiSelector().descriptionMatches("%s")`, ciPattern)
-				if elemID, err := d.client.FindElement("-android uiautomator", uiSelector); err == nil && elemID != "" {
-					return d.getElementInfo(elemID)
+
+				// Only the case-insensitive form matched — use the probe's hit
+				// rather than paying for the same lookup again.
+				if textHit != "" {
+					return d.getElementInfo(textHit)
+				}
+				if descHit != "" {
+					return d.getElementInfo(descHit)
 				}
 			}
 		}
@@ -783,7 +841,14 @@ func (d *Driver) findElementRelativeWithElements(sel flow.Selector, allElements 
 		return nil, fmt.Errorf("no candidates after sorting")
 	}
 
-	selected := SelectByIndex(candidates, sel.Index)
+	var selected *ParsedElement
+	if sel.Index == "" && (filterType == filterBelow || filterType == filterAbove || filterType == filterLeftOf || filterType == filterRightOf) {
+		// Directional filters sort candidates by distance. Pick the closest
+		// (first) element to match Maestro's .firstOrNull() behavior.
+		selected = candidates[0]
+	} else {
+		selected = SelectByIndex(candidates, sel.Index)
+	}
 
 	// If element isn't clickable, try to find a clickable parent
 	// This handles React Native pattern where text nodes aren't clickable but containers are
@@ -852,6 +917,24 @@ func applyRelativeFilter(candidates []*ParsedElement, anchor *ParsedElement, ft 
 	}
 }
 
+// getElementInfo describes a found element.
+//
+// Every request here is a round trip, and on a real device each one costs about
+// the same regardless of what it asks for — measured at ~25ms apiece on a Pixel
+// 4a — so the call count is the whole cost, not the work per call. Against a
+// cloud grid it is worse again. So this asks only for what something downstream
+// actually reads:
+//
+//   - rect is needed by every gesture to derive coordinates, and reaches the report
+//   - text is read by copyTextFrom and assertions, and reaches the report
+//   - displayed is the visibility answer itself
+//
+// Enabled used to be fetched here and nothing ever read it: selectors that
+// filter on element state are routed to the page-source path, which builds that
+// field from XML, and the report keeps only id, text, class and bounds.
+//
+// The accessibility description is fetched by the one command that wants it
+// (see accessibilityLabelOf) rather than on every lookup.
 func (d *Driver) getElementInfo(elementID string) (*core.ElementInfo, error) {
 	x, y, w, h, err := d.client.GetElementRect(elementID)
 	if err != nil {
@@ -860,25 +943,33 @@ func (d *Driver) getElementInfo(elementID string) (*core.ElementInfo, error) {
 
 	text, _ := d.client.GetElementText(elementID)
 	displayed, _ := d.client.IsElementDisplayed(elementID)
-	enabled, _ := d.client.IsElementEnabled(elementID)
-
-	// Get accessibility description - important for elements found via descriptionMatches
-	// iOS uses "label" (accessibilityLabel), Android uses "content-desc"
-	var accessibilityDesc string
-	if d.platform == "ios" {
-		accessibilityDesc, _ = d.client.GetElementAttribute(elementID, "label")
-	} else {
-		accessibilityDesc, _ = d.client.GetElementAttribute(elementID, "content-desc")
-	}
 
 	return &core.ElementInfo{
-		ID:                 elementID,
-		Text:               text,
-		AccessibilityLabel: accessibilityDesc,
-		Bounds:             core.Bounds{X: x, Y: y, Width: w, Height: h},
-		Visible:            displayed,
-		Enabled:            enabled,
+		ID:      elementID,
+		Text:    text,
+		Bounds:  core.Bounds{X: x, Y: y, Width: w, Height: h},
+		Visible: displayed,
 	}, nil
+}
+
+// accessibilityLabelOf reads an element's accessibility description, which iOS
+// exposes as "label" and Android as "content-desc". Only copyTextFrom needs it,
+// as a fallback when an element carries no text, so it is fetched on demand
+// instead of on every element lookup.
+func (d *Driver) accessibilityLabelOf(elementID string) string {
+	// Elements resolved from page source carry a resource id here rather than
+	// an Appium element handle, and the server cannot look one up. Those
+	// already fold the description into Text during parsing, so there is
+	// nothing to fetch — skip rather than spend a round trip that can only fail.
+	if elementID == "" || strings.Contains(elementID, ":id/") {
+		return ""
+	}
+	attr := "content-desc"
+	if d.platform == "ios" {
+		attr = "label"
+	}
+	label, _ := d.client.GetElementAttribute(elementID, attr)
+	return label
 }
 
 func elementToInfo(elem *ParsedElement, platform string) *core.ElementInfo {

@@ -165,12 +165,14 @@ All gestures accept `appBundleId` so the runner can target the right `XCUIApplic
 | `longPress` | `x, y, durationMs` | gesture timings |
 | `swipe` | EITHER `x, y, x2, y2, durationMs` OR `direction, percent` | gesture timings + `path: [{x,y},...]` |
 | `scroll` | EITHER coordinate path OR `direction, percent` (same as swipe but with slower default duration) | gesture timings |
-| `drag` | `x, y, x2, y2, durationMs, holdMs?` | gesture timings + path |
+| `drag` | `x, y, x2, y2, durationMs` (press-before-move hold), `moveDurationMs?` (movement time — local addition; when set, drags via `press(forDuration:thenDragTo:withVelocity:thenHoldForDuration:)` with a 250ms settle before release, for dragAndDrop reorder semantics) | gesture timings + path |
 | `pinch` | `x, y, scale, durationMs` | gesture timings |
 | `pressButton` | `button: "home"|"lock"|"volumeUp"|"volumeDown"|"appSwitcher"` | `{ pressed: true }` |
 | `rotate` | `orientation: "portrait"|"landscapeLeft"|"landscapeRight"|"portraitUpsideDown"` | `{ orientation }` |
+| `appearance` | — | `{ appearance: "dark"|"light" }` |
+| `setAppearance` | `appearance: "dark"|"light"` | `{ appearance }` — the appearance that took effect, re-read after setting, not the request echoed back |
 
-**Delta from agent-device:** swipe + scroll accept coordinate paths AND direction. drag, pinch, pressButton, rotate kept; tapSeries / dragSeries / interactionFrame dropped (LLM-shaped, not needed for flows).
+**Delta from agent-device:** swipe + scroll accept coordinate paths AND direction. drag, pinch, pressButton, rotate kept; tapSeries / dragSeries / interactionFrame dropped (LLM-shaped, not needed for flows). `appearance` / `setAppearance` are local additions wrapping `XCUIDevice.appearance` (iOS 15+); they exist because `simctl ui appearance` covers only simulators, so this is what makes dark mode work on physical devices. `unspecified` is reported as `light` — nothing is being forced, and that is how it renders.
 
 ### Text
 

@@ -14,10 +14,16 @@ import (
 
 // mockDeviceLabClient is a minimal mock for scrollUntilVisible tests.
 type mockDeviceLabClient struct {
-	sourceFunc     func() (string, error)
-	scrollCalls    int
-	scrollErr      error
-	findClickCalls int
+	findClickGuardW, findClickGuardH int
+	findClickHitTest                 bool
+	findClickBlockedBy               string
+	findClickSkip                    bool
+	swipeCoordsCalls                 [][5]int
+	swipeCoordsErr                   error
+	sourceFunc                       func() (string, error)
+	scrollCalls                      int
+	scrollErr                        error
+	findClickCalls                   int
 }
 
 func (m *mockDeviceLabClient) FindElement(strategy, selector string) (*uiautomator2.Element, error) {
@@ -26,6 +32,23 @@ func (m *mockDeviceLabClient) FindElement(strategy, selector string) (*uiautomat
 func (m *mockDeviceLabClient) FindAndClick(strategy, selector string) (*uiautomator2.Element, error) {
 	m.findClickCalls++
 	return nil, nil
+}
+
+// findClickGuardW/H record the screen size the driver passed, and
+// findClickClicked is what the fake agent reports back (#162).
+func (m *mockDeviceLabClient) FindAndClickChecked(strategy, selector string, screenW, screenH int, hitTest bool) (*uiautomator2.Element, bool, string, error) {
+	elem, clicked, err := m.FindAndClickGuarded(strategy, selector, screenW, screenH)
+	m.findClickHitTest = hitTest
+	return elem, clicked, m.findClickBlockedBy, err
+}
+func (m *mockDeviceLabClient) FindAndClickGuarded(strategy, selector string, screenW, screenH int) (*uiautomator2.Element, bool, error) {
+	m.findClickCalls++
+	m.findClickGuardW, m.findClickGuardH = screenW, screenH
+	elem, err := (*uiautomator2.Element)(nil), error(nil)
+	if m.findClickSkip {
+		return elem, false, err
+	}
+	return elem, true, err
 }
 func (m *mockDeviceLabClient) ActiveElement() (*uiautomator2.Element, error) { return nil, nil }
 func (m *mockDeviceLabClient) SetImplicitWait(timeout time.Duration) error   { return nil }
@@ -43,16 +66,21 @@ func (m *mockDeviceLabClient) ScrollInArea(area uiautomator2.RectModel, directio
 func (m *mockDeviceLabClient) SwipeInArea(area uiautomator2.RectModel, direction string, percent float64, speed int) error {
 	return nil
 }
-func (m *mockDeviceLabClient) Back() error                       { return nil }
-func (m *mockDeviceLabClient) HideKeyboard() error               { return nil }
-func (m *mockDeviceLabClient) PressKeyCode(keyCode int) error    { return nil }
-func (m *mockDeviceLabClient) SendKeyActions(text string) error  { return nil }
-func (m *mockDeviceLabClient) Screenshot() ([]byte, error)       { return nil, nil }
-func (m *mockDeviceLabClient) Source() (string, error)           { return m.sourceFunc() }
-func (m *mockDeviceLabClient) GetOrientation() (string, error)   { return "PORTRAIT", nil }
-func (m *mockDeviceLabClient) SetOrientation(string) error       { return nil }
-func (m *mockDeviceLabClient) GetClipboard() (string, error)     { return "", nil }
-func (m *mockDeviceLabClient) SetClipboard(string) error         { return nil }
+func (m *mockDeviceLabClient) SwipeCoords(startX, startY, endX, endY, durationMs int) error {
+	m.swipeCoordsCalls = append(m.swipeCoordsCalls, [5]int{startX, startY, endX, endY, durationMs})
+	return m.swipeCoordsErr
+}
+func (m *mockDeviceLabClient) Back() error                                   { return nil }
+func (m *mockDeviceLabClient) HideKeyboard() error                           { return nil }
+func (m *mockDeviceLabClient) PressKeyCode(keyCode int) error                { return nil }
+func (m *mockDeviceLabClient) SendKeyActions(text string) error              { return nil }
+func (m *mockDeviceLabClient) AddMedia(name, mime string, data []byte) error { return nil }
+func (m *mockDeviceLabClient) Screenshot() ([]byte, error)                   { return nil, nil }
+func (m *mockDeviceLabClient) Source() (string, error)                       { return m.sourceFunc() }
+func (m *mockDeviceLabClient) GetOrientation() (string, error)               { return "PORTRAIT", nil }
+func (m *mockDeviceLabClient) SetOrientation(string) error                   { return nil }
+func (m *mockDeviceLabClient) GetClipboard() (string, error)                 { return "", nil }
+func (m *mockDeviceLabClient) SetClipboard(string) error                     { return nil }
 func (m *mockDeviceLabClient) GetDeviceInfo() (*uiautomator2.DeviceInfo, error) {
 	return &uiautomator2.DeviceInfo{RealDisplaySize: "1080x2400"}, nil
 }
@@ -61,8 +89,8 @@ func (m *mockDeviceLabClient) ForceStop(string) error                         { 
 func (m *mockDeviceLabClient) ClearAppData(string) error                      { return nil }
 func (m *mockDeviceLabClient) GrantPermissions(string, []string) error        { return nil }
 func (m *mockDeviceLabClient) SetAppiumSettings(map[string]interface{}) error { return nil }
-func (m *mockDeviceLabClient) WaitForSettle(int, int) (bool, error)          { return true, nil }
-func (m *mockDeviceLabClient) TreeHash() (uint64, error)                     { return 0, nil }
+func (m *mockDeviceLabClient) WaitForSettle(int, int) (bool, error)           { return true, nil }
+func (m *mockDeviceLabClient) TreeHash() (uint64, error)                      { return 0, nil }
 func (m *mockDeviceLabClient) FindFirstOf([]string) (*uiautomator2.Element, error) {
 	return nil, fmt.Errorf("not implemented in mock")
 }
@@ -167,36 +195,40 @@ func TestScrollUntilVisibleDefaultMaxScrolls(t *testing.T) {
 	}
 }
 
-// TestIsElementOnScreen covers the viewport-overlap guard used by
-// scrollUntilVisible to reject hierarchy-only matches.
-func TestIsElementOnScreen(t *testing.T) {
+// TestScrollStopCriterion covers scrollUntilVisible's stop check, which now
+// requires the flow's visibility percentage (default: fully inside the
+// viewport) rather than any 1px overlap — a match half-hidden at the screen
+// edge must keep scrolling.
+func TestScrollStopCriterion(t *testing.T) {
 	tests := []struct {
-		name   string
-		bounds core.Bounds
-		want   bool
+		name       string
+		bounds     core.Bounds
+		percentage int // 0 = flow didn't set one → fully visible required
+		want       bool
 	}{
-		{"fully on screen", core.Bounds{X: 100, Y: 100, Width: 200, Height: 200}, true},
-		{"partial overlap at bottom", core.Bounds{X: 100, Y: 2300, Width: 200, Height: 200}, true},
-		{"flush against right edge", core.Bounds{X: 1079, Y: 100, Width: 200, Height: 200}, true},
-		{"entirely below screen", core.Bounds{X: 100, Y: 2400, Width: 200, Height: 200}, false},
-		{"entirely above screen", core.Bounds{X: 100, Y: -300, Width: 200, Height: 200}, false},
-		{"entirely right of screen", core.Bounds{X: 1080, Y: 100, Width: 200, Height: 200}, false},
-		{"zero width", core.Bounds{X: 100, Y: 100, Width: 0, Height: 200}, false},
-		{"zero height", core.Bounds{X: 100, Y: 100, Width: 200, Height: 0}, false},
-		{"negative width", core.Bounds{X: 100, Y: 100, Width: -50, Height: 200}, false},
+		{"fully on screen", core.Bounds{X: 100, Y: 100, Width: 200, Height: 200}, 0, true},
+		// The old any-overlap check accepted these two — the #2411-class bug.
+		{"partial overlap at bottom", core.Bounds{X: 100, Y: 2300, Width: 200, Height: 200}, 0, false},
+		{"flush against right edge", core.Bounds{X: 1079, Y: 100, Width: 200, Height: 200}, 0, false},
+		{"partial overlap accepted at 50%", core.Bounds{X: 100, Y: 2300, Width: 200, Height: 200}, 50, true},
+		{"entirely below screen", core.Bounds{X: 100, Y: 2400, Width: 200, Height: 200}, 0, false},
+		{"entirely above screen", core.Bounds{X: 100, Y: -300, Width: 200, Height: 200}, 0, false},
+		{"entirely right of screen", core.Bounds{X: 1080, Y: 100, Width: 200, Height: 200}, 0, false},
+		{"zero width", core.Bounds{X: 100, Y: 100, Width: 0, Height: 200}, 0, false},
+		{"zero height", core.Bounds{X: 100, Y: 100, Width: 200, Height: 0}, 0, false},
+		{"negative width", core.Bounds{X: 100, Y: 100, Width: -50, Height: 200}, 0, false},
 		// Repro from the field: a clipped below-the-fold ScrollView button the
 		// agent reports with top>bottom (raw [270,2300][1080,2274] → h=-26,
 		// centre (675,2287)). Overlaps the viewport numerically, but is a
 		// degenerate rect tapOn refuses (boundsTappable's #94 guard); the scroll
 		// success predicate must reject it too so the loop keeps scrolling.
-		{"negative height (clipped below-fold)", core.Bounds{X: 270, Y: 2300, Width: 810, Height: -26}, false},
+		{"negative height (clipped below-fold)", core.Bounds{X: 270, Y: 2300, Width: 810, Height: -26}, 0, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info := &core.ElementInfo{Bounds: tt.bounds}
-			if got := isElementOnScreen(info, 1080, 2400); got != tt.want {
-				t.Errorf("isElementOnScreen(%v) = %v, want %v", tt.bounds, got, tt.want)
+			if got := core.MeetsVisibility(tt.bounds, 1080, 2400, tt.percentage); got != tt.want {
+				t.Errorf("MeetsVisibility(%v, pct=%d) = %v, want %v", tt.bounds, tt.percentage, got, tt.want)
 			}
 		})
 	}
@@ -264,4 +296,3 @@ func TestScrollUntilVisibleSkipsOffScreenMatches(t *testing.T) {
 		t.Errorf("Expected full %d scroll attempts (no short-circuit on off-screen match), got %d", 4, client.scrollCalls)
 	}
 }
-

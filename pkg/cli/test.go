@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -107,6 +108,10 @@ Examples:
 			Name:  "flatten",
 			Usage: "Don't create timestamp subfolder (requires --output)",
 		},
+		&cli.BoolFlag{
+			Name:  "retry-failed",
+			Usage: "Run only the flows that failed in the previous run (looks for the last report under the same --output directory)",
+		},
 
 		// Parallelization
 		&cli.IntFlag{
@@ -136,6 +141,11 @@ Examples:
 			Usage:   "Chrome user-data-dir for a persistent profile across runs (web only). Cookies / localStorage / extensions are reused.",
 			EnvVars: []string{"MAESTRO_USER_DATA_DIR"},
 		},
+		&cli.StringFlag{
+			Name:    "window-size",
+			Usage:   "Browser viewport as WxH, e.g. 390x844 (web only, default 1280x800). Lets one suite run against phone, tablet and desktop breakpoints.",
+			EnvVars: []string{"MAESTRO_WINDOW_SIZE"},
+		},
 
 		// Driver settings
 		&cli.IntFlag{
@@ -143,6 +153,11 @@ Examples:
 			Usage:   "Wait for device idle in ms (0 = disabled, default 200)",
 			Value:   200,
 			EnvVars: []string{"MAESTRO_WAIT_FOR_IDLE_TIMEOUT"},
+		},
+		&cli.IntFlag{
+			Name:    "step-delay",
+			Usage:   "Pause between steps in ms (default 0 — no delay). For pacing demos or apps whose animations outrun assertions. Flows can override with stepDelay in their config.",
+			EnvVars: []string{"MAESTRO_STEP_DELAY"},
 		},
 		&cli.IntFlag{
 			Name:    "condition-timeout",
@@ -168,6 +183,21 @@ Examples:
 			Name:  "artifacts",
 			Usage: "When to capture screenshots/hierarchy: on-failure (default), always, never",
 			Value: "on-failure",
+		},
+		&cli.BoolFlag{
+			Name:    "update-screenshots",
+			Usage:   "Overwrite existing assertScreenshot baselines with the current screen (missing baselines are always seeded on first run)",
+			EnvVars: []string{"MAESTRO_UPDATE_SCREENSHOTS"},
+		},
+		&cli.BoolFlag{
+			Name:  "record",
+			Usage: "Record the screen during every flow and save recording.mp4 into the flow's report assets (Android devices/emulators and iOS simulators). Shorthand for --video always",
+		},
+		&cli.StringFlag{
+			Name:    "video",
+			Usage:   "When to keep screen recordings: never (default), always, on-failure. A recording can only be made while the flow runs, so on-failure records every flow and keeps only the ones that failed",
+			Value:   "",
+			EnvVars: []string{"MAESTRO_VIDEO"},
 		},
 
 		// Emulator management flags (start-emulator, auto-start-emulator,
@@ -223,6 +253,7 @@ func buildAppReport(driver core.Driver) report.App {
 	return report.App{
 		ID:      pi.AppID,
 		Version: pi.AppVersion,
+		Build:   pi.AppBuild,
 	}
 }
 
@@ -231,7 +262,9 @@ func resolveDriverName(cfg *RunConfig, platform string) string {
 	driverName := strings.ToLower(cfg.Driver)
 	switch strings.ToLower(platform) {
 	case "web":
-		if driverName == "" {
+		// "uiautomator2" here is just the --driver flag's default leaking
+		// through, same as the ios case below — not a user choice.
+		if driverName == "" || driverName == "uiautomator2" {
 			driverName = "cdp"
 		}
 	case "ios":
@@ -474,14 +507,20 @@ type RunConfig struct {
 
 	// Output
 	OutputDir string // Final resolved output directory
+	// ReportBaseDir is the root the runner writes runs under (--output, or
+	// ./reports) — where --retry-failed looks for the previous run's report.
+	ReportBaseDir string
+	RetryFailed   bool // Narrow the selection to flows that failed in the previous run
 
 	// Parallelization
 	Parallel int // Number of devices to use (0 = single device mode)
 
 	// Execution
-	Continuous bool
-	Headed     bool   // Show browser window (web only, default is headless)
-	Browser    string // chrome, chromium, or path to binary (web only)UserDataDir string // Persistent Chrome profile directory (web only)
+	Continuous  bool
+	Headed      bool   // Show browser window (web only, default is headless)
+	Browser     string // chrome, chromium, or path to binary (web only)
+	UserDataDir string // Persistent Chrome profile directory (web only)
+	WindowSize  string // Browser viewport as WxH (web only, empty = 1280x800)
 
 	// Device
 	Platform string
@@ -500,10 +539,16 @@ type RunConfig struct {
 	AppiumSessionFile string
 	CapsFile          string                 // Appium capabilities JSON file path
 	Capabilities      map[string]interface{} // Parsed Appium capabilities
+	// NewCommandTimeout, when > 0, sets appium:newCommandTimeout (seconds) for the
+	// Appium session unless the --caps file already specifies it (an explicit caps
+	// value is authoritative). Sourced from --new-command-timeout /
+	// MAESTRO_NEW_COMMAND_TIMEOUT. See issue #124.
+	NewCommandTimeout int
 
 	// Driver settings
 	WaitForIdleTimeout int    // Wait for device idle in ms (0 = disabled, default 200)
 	ConditionTimeout   int    // Default timeout (ms) for when:/while: condition checks (default 1000)
+	StepDelay          int    // Pause between top-level steps in ms (0 = none)
 	TypingFrequency    int    // WDA typing frequency in keys/sec (0 = use WDA default of 60)
 	TeamID             string // Apple Development Team ID for WDA code signing
 	WDABundleID        string // Custom WDA bundle identifier
@@ -535,6 +580,15 @@ type RunConfig struct {
 
 	// Artifacts
 	Artifacts executor.ArtifactMode // When to capture screenshots/hierarchy
+
+	// UpdateScreenshots overwrites existing assertScreenshot baselines.
+	UpdateScreenshots bool
+
+	// Record captures a screen recording of every flow (--record / --video).
+	Record bool
+	// RecordMode is the retention decision for those recordings:
+	// "always" or "on-failure". Empty means no recording at all.
+	RecordMode string
 
 	// Cloud provider (detected from AppiumURL, nil if not a cloud provider)
 	CloudProvider cloud.Provider
@@ -626,6 +680,14 @@ func runTest(c *cli.Context) error {
 		return err
 	}
 
+	// The base directory (before any timestamp subfolder) is where
+	// --retry-failed looks for the previous run's report.
+	reportBaseDir := getString("output")
+	if reportBaseDir == "" {
+		reportBaseDir = "./reports"
+	}
+	reportBaseDir = filepath.Clean(reportBaseDir)
+
 	// Load Appium capabilities if provided
 	capsFile := getString("caps")
 	var caps map[string]interface{}
@@ -674,6 +736,10 @@ func runTest(c *cli.Context) error {
 		mergedEnv[k] = v // -e CLI overrides --env-file and workspace config
 	}
 
+	// Resolved once: resolveVideoMode warns about an unrecognised value, and a
+	// flag typo should be reported once, not once per field.
+	videoMode := resolveVideoMode(getString("video"), getBool("record"))
+
 	// Get appId from workspace config or will be extracted from flows later
 	appID := ""
 	if workspaceConfig != nil && workspaceConfig.AppID != "" {
@@ -688,11 +754,14 @@ func runTest(c *cli.Context) error {
 		IncludeTags:        getStringSlice("include-tags"),
 		ExcludeTags:        getStringSlice("exclude-tags"),
 		OutputDir:          outputDir,
+		ReportBaseDir:      reportBaseDir,
+		RetryFailed:        getBool("retry-failed"),
 		Parallel:           getInt("parallel"),
 		Continuous:         getBool("continuous"),
 		Headed:             getBool("headed"),
 		Browser:            getString("browser"),
 		UserDataDir:        getString("user-data-dir"),
+		WindowSize:         getString("window-size"),
 		Platform:           getString("platform"),
 		Devices:            parseDevices(getString("device")),
 		Verbose:            getBool("verbose"),
@@ -703,8 +772,10 @@ func runTest(c *cli.Context) error {
 		AppiumSessionFile:  getString("appium-session-file"),
 		CapsFile:           capsFile,
 		Capabilities:       caps,
+		NewCommandTimeout:  getInt("new-command-timeout"),
 		WaitForIdleTimeout: getInt("wait-for-idle-timeout"),
 		ConditionTimeout:   getInt("condition-timeout"),
+		StepDelay:          getInt("step-delay"),
 		TypingFrequency:    getInt("typing-frequency"),
 		TeamID:             getString("team-id"),
 		WDABundleID:        getString("wda-bundle-id"),
@@ -719,6 +790,9 @@ func runTest(c *cli.Context) error {
 		NoFlutterFallback:  getBool("no-flutter-fallback"),
 		AndroidTCPForward:  getBool("android-tcp-forward"),
 		Artifacts:          parseArtifactMode(getString("artifacts")),
+		UpdateScreenshots:  getBool("update-screenshots"),
+		Record:             videoMode != videoNever,
+		RecordMode:         videoMode,
 	}
 
 	// Apply waitForIdleTimeout with priority:
@@ -837,6 +911,24 @@ func executeTest(cfg *RunConfig) error {
 	}
 	logger.Info("Validated %d flow(s)", len(flows))
 
+	// 3.1. --retry-failed: narrow the selection to the previous run's failures.
+	// An empty result means the previous run was clean — that is the success the
+	// flag exists to confirm, so exit 0 without touching a device.
+	if cfg.RetryFailed {
+		flows, err = narrowToPreviousFailures(cfg.ReportBaseDir, flows)
+		if err != nil {
+			logger.Error("--retry-failed: %v", err)
+			return err
+		}
+		if len(flows) == 0 {
+			logger.Info("Previous run had no failures — nothing to retry")
+			printSetupSuccess("Previous run had no failures — nothing to retry")
+			return nil
+		}
+		logger.Info("Retrying %d previously failed flow(s)", len(flows))
+		printSetupSuccess(fmt.Sprintf("Retrying %d previously failed flow(s)", len(flows)))
+	}
+
 	// Warn about unsupported selector fields for the target platform
 	if cfg.Platform != "" {
 		warnUnsupportedSelectors(flows, cfg.Platform)
@@ -847,10 +939,18 @@ func executeTest(cfg *RunConfig) error {
 	if strings.EqualFold(cfg.Platform, "ios") && cfg.Driver != "appium" {
 		// team-id is only required for real devices, not simulators.
 		isSimTarget := iosTargetsSimulator(cfg)
+		// With nothing booted and no device named, iosTargetsSimulator answers
+		// "not a simulator" — which used to fall straight into the team-id
+		// error below and blame code signing for what is really an empty
+		// device list. Say what is actually wrong first.
+		if !isSimTarget && !anyIOSTargetAvailable(cfg) {
+			return errors.New(noIOSTargetMessage())
+		}
 		if cfg.TeamID == "" && !isSimTarget {
-			return fmt.Errorf("iOS with WDA driver requires --team-id for code signing (real devices only)\n" +
+			return fmt.Errorf("iOS on a real device requires --team-id to code-sign the runner\n" +
 				"Usage: maestro-runner --platform ios --team-id <APPLE_TEAM_ID> test <flow-files>\n" +
-				"Note: --team-id is not required for simulators")
+				"Note: --team-id is not required for simulators.\n" +
+				"      `maestro-runner --team-id <ID> doctor` checks it against the accounts Xcode has")
 		}
 		// clearState on iOS uninstalls + reinstalls. On real devices the host
 		// can't reach the installed .app bundle, so --app-file is mandatory.
@@ -873,6 +973,23 @@ func executeTest(cfg *RunConfig) error {
 	if cfg.AppID == "" && len(flows) > 0 {
 		cfg.AppID = flows[0].Config.EffectiveAppID()
 	}
+
+	// Expand the resolved appId/url once, here, so every platform sees a
+	// concrete value. This runs before any flow does, so nothing downstream
+	// would otherwise expand it: web handed the literal `${BASE_URL}` to
+	// Chromium, and the Android/iOS version lookups queried a package that
+	// cannot exist and silently reported no app version.
+	//
+	// An unset variable expands to nothing, which would surface much later as
+	// a bare "no URL specified" — so name it here instead.
+	if missing := unresolvedVars(cfg.AppID, cfg.Env); len(missing) > 0 {
+		return fmt.Errorf(
+			"flow header references %s, which %s not set — supply %s with -e, --env-file, or the workspace config",
+			"${"+strings.Join(missing, "}, ${")+"}",
+			map[bool]string{true: "is", false: "are"}[len(missing) == 1],
+			map[bool]string{true: "it", false: "them"}[len(missing) == 1])
+	}
+	cfg.AppID = expandRunnerVars(cfg.AppID, cfg.Env)
 
 	// 3.5. Handle device startup (emulator or simulator, if requested)
 	if err := handleDeviceStartup(cfg, emulatorMgr, simulatorMgr); err != nil {
@@ -1362,10 +1479,19 @@ func executeSingleDevice(cfg *RunConfig, flows []flow.Flow) (*executor.RunResult
 	driverName := resolveDriverName(cfg, cfg.Platform)
 	deviceInfo := buildDeviceReport(driver)
 
+	if cfg.Record {
+		if _, ok := core.Unwrap(driver).(core.ScreenRecorder); !ok {
+			printSetupWarning(fmt.Sprintf("--record: the %s driver does not support screen recording — running without it", driverName))
+		}
+	}
+
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
 		Artifacts:          cfg.Artifacts,
+		UpdateScreenshots:  cfg.UpdateScreenshots,
+		Record:             cfg.Record,
+		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
@@ -1373,6 +1499,7 @@ func executeSingleDevice(cfg *RunConfig, flows []flow.Flow) (*executor.RunResult
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
 		ConditionTimeout:   cfg.ConditionTimeout,
+		StepDelay:          cfg.StepDelay,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
 		OnFlowStart:        onFlowStartWithCloud(cfg),
@@ -1404,10 +1531,19 @@ func ExecuteFlowWithDriver(driver core.Driver, cfg *RunConfig, f flow.Flow) (*ex
 	driverName := resolveDriverName(cfg, cfg.Platform)
 	deviceInfo := buildDeviceReport(driver)
 
+	if cfg.Record {
+		if _, ok := core.Unwrap(driver).(core.ScreenRecorder); !ok {
+			printSetupWarning(fmt.Sprintf("--record: the %s driver does not support screen recording — running without it", driverName))
+		}
+	}
+
 	runner := executor.New(driver, executor.RunnerConfig{
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
 		Artifacts:          cfg.Artifacts,
+		UpdateScreenshots:  cfg.UpdateScreenshots,
+		Record:             cfg.Record,
+		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
@@ -1415,6 +1551,7 @@ func ExecuteFlowWithDriver(driver core.Driver, cfg *RunConfig, f flow.Flow) (*ex
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
 		ConditionTimeout:   cfg.ConditionTimeout,
+		StepDelay:          cfg.StepDelay,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
 		OnFlowStart:        onFlowStartWithCloud(cfg),
@@ -1442,6 +1579,12 @@ const (
 
 // Slow step threshold in milliseconds (5 seconds)
 const slowThresholdMs = 5000
+
+// appiumKeepaliveInterval is how often pre-created --parallel Appium sessions
+// are pinged to reset the server's newCommandTimeout while later sessions are
+// still being created (#124). 20s comfortably beats Appium's 60s default and
+// SauceLabs RDC's 90s ceiling with margin for slower farms.
+const appiumKeepaliveInterval = 20 * time.Second
 
 // colorsEnabled determines if ANSI colors should be used
 var colorsEnabled = true
@@ -1727,6 +1870,9 @@ func executeAppiumSingleSession(cfg *RunConfig, flows []flow.Flow) (*executor.Ru
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
 		Artifacts:          cfg.Artifacts,
+		UpdateScreenshots:  cfg.UpdateScreenshots,
+		Record:             cfg.Record,
+		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(driver),
 		RunnerVersion:      Version,
@@ -1734,6 +1880,7 @@ func executeAppiumSingleSession(cfg *RunConfig, flows []flow.Flow) (*executor.Ru
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
 		ConditionTimeout:   cfg.ConditionTimeout,
+		StepDelay:          cfg.StepDelay,
 		TypingFrequency:    cfg.TypingFrequency,
 		DeviceInfo:         &deviceInfo,
 		OnFlowStart:        onFlowStartWithCloud(cfg),
@@ -1870,6 +2017,12 @@ func printSetupSuccess(msg string) {
 	fmt.Printf("  %s✓%s %s\n", color(colorGreen), color(colorReset), msg)
 }
 
+// printSetupWarning prints a setup note that is worth seeing but is not a
+// failure — something the run continued past, with a smaller scope than asked.
+func printSetupWarning(msg string) {
+	fmt.Printf("  %s⚠%s %s\n", color(colorYellow), color(colorReset), msg)
+}
+
 // createAppiumDriver creates a driver that connects to an external Appium server.
 // Uses capabilities from --caps file, with CLI flags taking precedence.
 func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
@@ -1906,6 +2059,19 @@ func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	if caps["appium:autoGrantPermissions"] == nil {
 		caps["appium:autoGrantPermissions"] = true
 	}
+	// Honor a user-supplied appium:newCommandTimeout. An explicit value in the
+	// --caps file is authoritative and is never overridden. When it is absent and
+	// --new-command-timeout / MAESTRO_NEW_COMMAND_TIMEOUT is set, inject it so the
+	// session command timeout can be raised without editing the caps file — e.g.
+	// cloud --parallel runs where the earliest-created sessions idle during the
+	// serial pre-creation phase and would otherwise be reaped. See issue #124.
+	if cfg.NewCommandTimeout > 0 {
+		_, hasPrefixed := caps["appium:newCommandTimeout"]
+		_, hasBare := caps["newCommandTimeout"]
+		if !hasPrefixed && !hasBare {
+			caps["appium:newCommandTimeout"] = cfg.NewCommandTimeout
+		}
+	}
 
 	// Add waitForIdleTimeout to capabilities for session creation
 	// Priority: Flow config > CLI flag > Workspace config > Cap file > Default (5000ms)
@@ -1927,6 +2093,7 @@ func createAppiumDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	}
 	info := driver.GetPlatformInfo()
 	logger.Info("Appium session created successfully: %s", info.DeviceID)
+	driver.SetAppInfo(resolveAppiumAppVersion(cfg, info))
 
 	// Build the provider chain: detected cloud provider (if any) + the session
 	// exporter (if --appium-session-file is set). Composite runs them all, so a
@@ -2087,8 +2254,14 @@ func enhanceNoDevicesError(noDevErr *device.NoDevicesError, cfg *RunConfig) {
 }
 
 // buildParallelDeviceError creates a helpful error when --parallel needs more devices.
+// The remediation hints are platform-specific: iOS runs get simulator guidance,
+// everything else gets the Android AVD/emulator guidance (#121).
 func buildParallelDeviceError(cfg *RunConfig, found int) error {
 	msg := fmt.Sprintf("--parallel %d requires %d devices but only found %d\n", cfg.Parallel, cfg.Parallel, found)
+
+	if cfg.Platform == "ios" {
+		return buildParallelIOSDeviceError(cfg, found, msg)
+	}
 
 	// Try to list available AVDs
 	avds, _ := emulator.ListAVDs()
@@ -2111,20 +2284,7 @@ func buildParallelDeviceError(cfg *RunConfig, found int) error {
 	}
 
 	if len(avds) > 0 {
-		// Build the actual command the user would run
-		args := os.Args
-		globalPart := args[0]
-		testPart := ""
-		for i := 1; i < len(args); i++ {
-			if args[i] == "test" {
-				globalPart = strings.Join(args[:i], " ")
-				testPart = " " + strings.Join(args[i:], " ")
-				break
-			}
-		}
-		if testPart == "" {
-			globalPart = strings.Join(args, " ")
-		}
+		globalPart, testPart := currentCommandParts()
 
 		msg += fmt.Sprintf("  %d. Auto-start emulators: %s --auto-start-emulator%s\n", optNum, globalPart, testPart)
 		optNum++
@@ -2145,6 +2305,62 @@ func buildParallelDeviceError(cfg *RunConfig, found int) error {
 	}
 
 	return fmt.Errorf("%s", msg)
+}
+
+// buildParallelIOSDeviceError builds the iOS-flavoured remediation for a
+// --parallel device shortage: boot more simulators (or let
+// --auto-start-emulator do it — supported for iOS since v1.1.19), never
+// Android AVD guidance (#121).
+func buildParallelIOSDeviceError(cfg *RunConfig, found int, msg string) error {
+	needed := cfg.Parallel - found
+
+	shutdownSims, _ := simulator.ListShutdownIOSSimulators()
+	if len(shutdownSims) > 0 {
+		msg += "\nAvailable iOS simulators (shut down):\n"
+		for _, sim := range shutdownSims {
+			msg += fmt.Sprintf("  - %s (%s)\n", sim.Name, sim.UDID)
+		}
+	}
+
+	msg += "\nOptions:\n"
+	optNum := 1
+
+	globalPart, testPart := currentCommandParts()
+	msg += fmt.Sprintf("  %d. Auto-start simulators: %s --auto-start-emulator%s\n", optNum, globalPart, testPart)
+	optNum++
+
+	if len(shutdownSims) > 0 {
+		msg += fmt.Sprintf("  %d. Boot simulators manually:\n", optNum)
+		limit := needed
+		if limit > len(shutdownSims) {
+			limit = len(shutdownSims)
+		}
+		for i := 0; i < limit; i++ {
+			msg += fmt.Sprintf("     xcrun simctl boot %s   # %s\n", shutdownSims[i].UDID, shutdownSims[i].Name)
+		}
+		optNum++
+	} else {
+		msg += fmt.Sprintf("  %d. Create simulators: xcrun simctl create <name> <device-type>\n", optNum)
+		optNum++
+	}
+
+	msg += fmt.Sprintf("  %d. Connect %d more iOS device(s) via USB\n", optNum, needed)
+
+	return fmt.Errorf("%s", msg)
+}
+
+// currentCommandParts splits os.Args around the `test` subcommand so hints
+// can splice extra flags into the command the user actually ran.
+func currentCommandParts() (globalPart, testPart string) {
+	args := os.Args
+	for i := 1; i < len(args); i++ {
+		if args[i] == "test" {
+			globalPart = strings.Join(args[:i], " ")
+			testPart = " " + strings.Join(args[i:], " ")
+			return globalPart, testPart
+		}
+	}
+	return strings.Join(args, " "), ""
 }
 
 // buildNotEnoughAVDsError creates a helpful error when --parallel N requires more
@@ -2411,6 +2627,42 @@ func createAppiumWorkers(cfg *RunConfig, count int) ([]executor.DeviceWorker, []
 		}
 	}
 
+	// Sessions are created serially, but no flow runs until all N exist — so an
+	// early session idles for ~(N-1)×creation_time before its first command. On
+	// cloud farms that idle can exceed the server's newCommandTimeout and the
+	// session is reaped, failing the first flow with "invalid session id" (#124).
+	// Keep every already-created session warm with a lightweight ping on a
+	// ticker; stop once creation finishes and execution is about to begin.
+	var kaMu sync.Mutex
+	var kaDrivers []*appiumdriver.Driver
+	kaStop := make(chan struct{})
+	var kaDone sync.WaitGroup
+	kaDone.Add(1)
+	go func() {
+		defer kaDone.Done()
+		ticker := time.NewTicker(appiumKeepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-kaStop:
+				return
+			case <-ticker.C:
+				kaMu.Lock()
+				snapshot := append([]*appiumdriver.Driver(nil), kaDrivers...)
+				kaMu.Unlock()
+				for _, d := range snapshot {
+					if err := d.Keepalive(); err != nil {
+						logger.Debug("Appium keepalive ping failed for session %s: %v", d.SessionID(), err)
+					}
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(kaStop)
+		kaDone.Wait()
+	}()
+
 	// Preserve the caller's Devices so we can swap in per-worker UDIDs and
 	// restore them at the end. When the user supplies len(Devices) >= count,
 	// we round-robin so each Appium session targets a distinct device. When
@@ -2436,10 +2688,14 @@ func createAppiumWorkers(cfg *RunConfig, count int) ([]executor.DeviceWorker, []
 			return nil, nil, fmt.Errorf("failed to create %s: %w", workerID, err)
 		}
 
-		// Extract session ID for parallel output
+		// Extract session ID for parallel output, and register the session for
+		// keepalive pings while the remaining sessions are still being created.
 		var sessionID string
 		if appDrv, ok := driver.(*appiumdriver.Driver); ok {
 			sessionID = appDrv.SessionID()
+			kaMu.Lock()
+			kaDrivers = append(kaDrivers, appDrv)
+			kaMu.Unlock()
 		}
 
 		// Capture per-worker cloud metadata (each session = separate cloud job).
@@ -2505,6 +2761,9 @@ func createParallelRunner(cfg *RunConfig, workers []executor.DeviceWorker, platf
 		OutputDir:          cfg.OutputDir,
 		Parallelism:        0,
 		Artifacts:          cfg.Artifacts,
+		UpdateScreenshots:  cfg.UpdateScreenshots,
+		Record:             cfg.Record,
+		RecordMode:         cfg.RecordMode,
 		Device:             deviceInfo,
 		App:                buildAppReport(firstDriver),
 		RunnerVersion:      Version,
@@ -2512,9 +2771,133 @@ func createParallelRunner(cfg *RunConfig, workers []executor.DeviceWorker, platf
 		Env:                cfg.Env,
 		WaitForIdleTimeout: cfg.WaitForIdleTimeout,
 		ConditionTimeout:   cfg.ConditionTimeout,
+		StepDelay:          cfg.StepDelay,
 		TypingFrequency:    cfg.TypingFrequency,
 		// Callbacks will be set per-worker in parallel.go with device info
 	}
 
 	return executor.NewParallelRunner(workers, runnerConfig)
+}
+
+// resolveAppiumAppVersion looks up the app's version name and build number for
+// an Appium run.
+//
+// Appium session capabilities carry neither, so they have to come from the
+// device or the app bundle. That is reachable only when the Appium server is
+// local: a cloud device farm exposes no adb or simctl, and the app there is a
+// provider-side upload rather than a path on this machine. Cloud runs therefore
+// report no version, which is honest — better than a number guessed from
+// whatever happens to be installed on the machine running the tests.
+//
+// Everything here is best-effort; a lookup that fails leaves the field empty
+// rather than failing the run.
+func resolveAppiumAppVersion(cfg *RunConfig, info *core.PlatformInfo) (version, build string) {
+	// The test is whether the Appium server is local, not whether a cloud
+	// provider was detected: provider detection answers "who should be told
+	// the result", which is a different question and is true for the local
+	// debug provider too. A local server means adb and simctl on this machine
+	// talk to the same device. It is not a perfect proxy — a local server can
+	// drive a remote device — but in that case the lookup simply finds nothing.
+	if !isLocalAppiumURL(cfg.AppiumURL) {
+		return "", ""
+	}
+
+	appID := cfg.AppID
+	if appID == "" {
+		appID = info.AppID
+	}
+
+	switch strings.ToLower(info.Platform) {
+	case "android":
+		if appID != "" {
+			if dev, err := device.New(info.DeviceID); err == nil {
+				version, build = dev.GetAppVersionAndBuild(appID)
+			}
+		}
+	case "ios":
+		if appID != "" && info.DeviceID != "" {
+			version, build = getIOSAppVersionAndBuild(info.DeviceID, appID)
+		}
+		// A physical device, or a simulator where the app is not installed
+		// yet, leaves nothing to read — fall back to the bundle under test.
+		// iOS only: the equivalent for an APK would need the Android SDK's
+		// aapt, which is not a dependency here.
+		if version == "" && build == "" && cfg.AppFile != "" {
+			version, build = readBundleVersionAndBuild(cfg.AppFile)
+		}
+	}
+	return version, build
+}
+
+// isLocalAppiumURL reports whether an Appium server address is on this machine.
+// An empty URL counts as local, since that is the default localhost server.
+func isLocalAppiumURL(appiumURL string) bool {
+	trimmed := strings.TrimSpace(appiumURL)
+	if trimmed == "" {
+		return true
+	}
+	host := strings.ToLower(trimmed)
+	if u, err := url.Parse(trimmed); err == nil && u.Hostname() != "" {
+		host = strings.ToLower(u.Hostname())
+	}
+	switch host {
+	case "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
+		return true
+	}
+	return false
+}
+
+// Video retention modes. The vocabulary matches --artifacts (never / always /
+// on-failure) rather than inventing a second spelling for the same idea.
+const (
+	videoNever     = "never"
+	videoAlways    = "always"
+	videoOnFailure = "on-failure"
+)
+
+// resolveVideoMode reconciles --video with the older --record boolean.
+// --video wins when both are given; --record alone keeps meaning "always", so
+// existing invocations and CI jobs behave exactly as before.
+func resolveVideoMode(video string, record bool) string {
+	normalized := strings.ToLower(strings.TrimSpace(video))
+	switch normalized {
+	case videoAlways:
+		return videoAlways
+	case videoOnFailure:
+		return videoOnFailure
+	case videoNever:
+		return videoNever
+	case "":
+		// not given — fall through to --record below
+	default:
+		// Silently treating a typo as "never" would hand back a green run with
+		// no video and no explanation for it.
+		logger.Warn("--video %q is not one of never/always/on-failure — ignoring it", video)
+	}
+	if record {
+		return videoAlways
+	}
+	return videoNever
+}
+
+// anyIOSTargetAvailable reports whether there is any iOS device to run on: one
+// named explicitly, a booted simulator, or a connected phone.
+func anyIOSTargetAvailable(cfg *RunConfig) bool {
+	if len(cfg.Devices) > 0 || cfg.StartSimulator != "" || cfg.AutoStartEmulator {
+		return true
+	}
+	if hasBootedSimulator() {
+		return true
+	}
+	udids, err := listPhysicalIOSUDIDs()
+	return err == nil && len(udids) > 0
+}
+
+// noIOSTargetMessage explains an empty iOS device list. Kept separate from the
+// signing error because the two have nothing to do with each other, and
+// conflating them sent people hunting for a team ID they did not need.
+func noIOSTargetMessage() string {
+	return "no iOS device found: nothing is booted and no device is connected\n" +
+		"Hint: boot a simulator (`xcrun simctl boot <udid>`), connect an iPhone, or pass --start-simulator <name>.\n" +
+		"      `maestro-runner devices` lists what this machine can see"
 }

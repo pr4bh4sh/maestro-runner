@@ -1,7 +1,6 @@
 package wda
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -108,6 +107,63 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	return successResult("Tapped element", info)
 }
 
+// dragAndDrop long-presses the from-target, then drags it onto the to-target.
+// The hold is what makes reorder UIs lift the item; XCUITest paces the move
+// itself, so the step's Duration (move time) has no effect on this driver.
+func (d *Driver) dragAndDrop(step *flow.DragAndDropStep) *core.CommandResult {
+	fromX, fromY, fromInfo, err := d.resolveDragPoint(step.From, step.IsOptional(), step.TimeoutMs)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("dragAndDrop: from target not resolved: %v", err))
+	}
+	toX, toY, _, err := d.resolveDragPoint(step.To, step.IsOptional(), step.TimeoutMs)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("dragAndDrop: to target not resolved: %v", err))
+	}
+
+	holdSec := float64(step.HoldDuration) / 1000.0
+	if holdSec <= 0 {
+		holdSec = 1.0
+	}
+	if err := d.client.DragFromTo(fromX, fromY, toX, toY, holdSec); err != nil {
+		return errorResult(err, "Drag failed")
+	}
+	return successResult(fmt.Sprintf("Dragged (%.0f, %.0f) → (%.0f, %.0f)", fromX, fromY, toX, toY), fromInfo)
+}
+
+// resolveDragPoint turns a drag endpoint into screen coordinates: a bare
+// point resolves against the screen, a selector resolves to its center, and
+// a selector with a point resolves the point within the element's bounds —
+// the same rules tapOn applies.
+func (d *Driver) resolveDragPoint(sel flow.Selector, optional bool, timeoutMs int) (float64, float64, *core.ElementInfo, error) {
+	if sel.IsEmpty() {
+		if sel.Point == "" {
+			return 0, 0, nil, fmt.Errorf("a selector or point is required")
+		}
+		w, h, err := d.screenSize()
+		if err != nil {
+			return 0, 0, nil, fmt.Errorf("screen size unavailable for point %q: %w", sel.Point, err)
+		}
+		x, y, err := core.ParsePointCoords(sel.Point, w, h)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		return float64(x), float64(y), nil, nil
+	}
+
+	info, err := d.findElementForTap(sel, optional, timeoutMs)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if sel.Point != "" && info.Bounds.Width > 0 {
+		px, py, perr := core.ParsePointCoords(sel.Point, info.Bounds.Width, info.Bounds.Height)
+		if perr != nil {
+			return 0, 0, nil, perr
+		}
+		return float64(info.Bounds.X + px), float64(info.Bounds.Y + py), info, nil
+	}
+	return float64(info.Bounds.X + info.Bounds.Width/2), float64(info.Bounds.Y + info.Bounds.Height/2), info, nil
+}
+
 // tapOnPointWithCoords handles point-based tap with either percentage ("85%, 50%") or absolute ("123, 456") coordinates.
 func (d *Driver) tapOnPointWithCoords(point string) *core.CommandResult {
 	width, height, err := d.screenSize()
@@ -133,8 +189,11 @@ func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %s", selectorDesc(step.Selector)))
 	}
 
-	x := float64(info.Bounds.X + info.Bounds.Width/2)
-	y := float64(info.Bounds.Y + info.Bounds.Height/2)
+	px, py, perr := core.PointInBounds(step.Selector.Point, info.Bounds)
+	if perr != nil {
+		return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+	}
+	x, y := float64(px), float64(py)
 
 	if err := d.client.DoubleTap(x, y); err != nil {
 		return errorResult(err, "Double tap failed")
@@ -149,8 +208,11 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %s", selectorDesc(step.Selector)))
 	}
 
-	x := float64(info.Bounds.X + info.Bounds.Width/2)
-	y := float64(info.Bounds.Y + info.Bounds.Height/2)
+	px, py, perr := core.PointInBounds(step.Selector.Point, info.Bounds)
+	if perr != nil {
+		return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+	}
+	x, y := float64(px), float64(py)
 
 	duration := float64(step.DurationMs) / 1000.0
 	if duration <= 0 {
@@ -205,6 +267,12 @@ func (d *Driver) tapOnPoint(step *flow.TapOnPointStep) *core.CommandResult {
 // Assert commands
 
 func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult {
+	if want, has, err := step.ExpectedCount(); err != nil {
+		return errorResult(err, err.Error())
+	} else if has {
+		return d.assertVisibleCount(step, want)
+	}
+
 	info, err := d.findElement(step.Selector, step.IsOptional(), step.TimeoutMs)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Element not visible: %s", selectorDesc(step.Selector)))
@@ -215,6 +283,72 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		msg = "Element is visible (" + info.MatchNote + ")"
 	}
 	return successResult(msg, info)
+}
+
+// assertVisibleCount asserts that the selector matches exactly `want` visible
+// elements. Counting needs the full page source (WDA's native find returns a
+// single match), so this polls one snapshot per tick — the way assertNotVisible
+// polls — until the expected count is observed or the deadline passes.
+func (d *Driver) assertVisibleCount(step *flow.AssertVisibleStep, want int) *core.CommandResult {
+	if step.Selector.HasRelativeSelector() {
+		err := fmt.Errorf("count cannot be combined with relative selectors (below/above/childOf/…)")
+		return errorResult(err, err.Error())
+	}
+
+	timeout := d.calculateTimeout(step.IsOptional(), step.TimeoutMs)
+	ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
+	defer cancel()
+
+	// lastSeen distinguishes "counted the wrong number" from "never managed to
+	// read the screen" — the two need different failure messages.
+	lastSeen := -1
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			if lastSeen < 0 {
+				if lastErr == nil {
+					lastErr = ctx.Err()
+				}
+				return errorResult(lastErr, fmt.Sprintf(
+					"Expected %d visible matches of %s, but could not read the screen: %v",
+					want, selectorDesc(step.Selector), lastErr))
+			}
+			return errorResult(
+				fmt.Errorf("expected %d matches, found %d", want, lastSeen),
+				fmt.Sprintf("Expected %d visible matches of %s, found %d",
+					want, selectorDesc(step.Selector), lastSeen))
+		default:
+			n, err := d.countVisibleMatchesOnce(step.Selector)
+			if err != nil {
+				lastErr = err
+			} else {
+				lastSeen = n
+				if n == want {
+					return successResult(fmt.Sprintf("%d elements visible", n), nil)
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+// countVisibleMatchesOnce takes one page-source snapshot and counts the
+// selector's visible matches.
+func (d *Driver) countVisibleMatchesOnce(sel flow.Selector) (int, error) {
+	pageSource, err := d.client.Source()
+	if err != nil {
+		return 0, err
+	}
+	allElements, err := ParsePageSource(pageSource)
+	if err != nil {
+		return 0, err
+	}
+	w, h := 0, 0
+	if sw, sh, sizeErr := d.screenSize(); sizeErr == nil {
+		w, h = sw, sh
+	}
+	return CountVisibleMatches(allElements, sel, w, h), nil
 }
 
 func (d *Driver) assertNotVisible(step *flow.AssertNotVisibleStep) *core.CommandResult {
@@ -263,12 +397,17 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 		if err != nil {
 			return errorResult(err, fmt.Sprintf("Element not found: %s", selectorDesc(step.Selector)))
 		}
-		// If we have element ID, send keys directly to the element
+		// If we have element ID, send keys directly to the element.
+		//
+		// A failure here is not fatal: the resolved element may not accept keys
+		// directly — an accessibility-collapsed container publishes as Other,
+		// and WDA rejects send-keys on a non-text element — while the field
+		// inside it types perfectly well once focused. So fall through to the
+		// tap-and-type path rather than failing the step outright (#143).
 		if info.ID != "" {
-			if err := d.client.ElementSendKeys(info.ID, text, d.typingFrequency); err != nil {
-				return errorResult(err, "Input text to element failed")
+			if err := d.client.ElementSendKeys(info.ID, text, d.typingFrequency); err == nil {
+				return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), info)
 			}
-			return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), info)
 		}
 		// Fallback: tap to focus first
 		x := float64(info.Bounds.X + info.Bounds.Width/2)
@@ -279,14 +418,17 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 		time.Sleep(100 * time.Millisecond) // Wait for focus
 	}
 
-	// Wait for keyboard to be ready by confirming a text field is focused.
-	// Poll GetActiveElement up to 1s (5 attempts, 200ms apart) similar to
-	// original Maestro's InputTextRouteHandler.swift keyboard wait.
-	for i := 0; i < 5; i++ {
-		if elemID, err := d.client.GetActiveElement(); err == nil && elemID != "" {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
+	// Wait for the keyboard to be ready, mirroring the wait in original
+	// Maestro's InputTextRouteHandler.swift.
+	//
+	// Nothing to type into means these keys have nowhere to land, and typing
+	// anyway is how text ends up somewhere other than the field the flow named
+	// while the step still reports success — the failure #139 chased on
+	// Android. Fail here instead, where the cause is still legible.
+	if ok, observed := d.waitForTypingTarget(); !ok {
+		err := fmt.Errorf("no keyboard appeared and no element took keyboard focus within 1s (%s)", observed)
+		return errorResult(err, "inputText: "+err.Error()+
+			" — the text would have been typed with nothing focused; check that the preceding tap focused a text field")
 	}
 
 	if err := d.client.SendKeys(text, d.typingFrequency); err != nil {
@@ -294,6 +436,72 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 	}
 
 	return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), nil)
+}
+
+// waitForTypingTarget polls up to about a second for evidence that typed keys
+// have somewhere to land, and reports whether it found any.
+//
+// Two signals count, and either alone is sufficient:
+//
+//   - an element reporting keyboard focus, via /element/active
+//   - the software keyboard being on screen — iOS does not raise it unless
+//     something holds first responder
+//
+// The keyboard signal is what makes this work on accessibility-collapsed
+// hierarchies. When a container is itself marked as an accessibility element —
+// a React Native View carrying `accessible` or an accessibilityLabel wrapped
+// around a TextInput — iOS publishes only the parent, typed Other with the
+// merged label, and no descendant reports hasKeyboardFocus. /element/active
+// resolves through that property, so it finds nothing even though the field is
+// genuinely focused and SendKeys reaches it. Requiring an active element
+// therefore rejected flows that had always worked (#143); requiring only that
+// *something* can receive the keys keeps the #139 protection without depending
+// on the field being individually addressable.
+// It also returns a short description of what it last observed when it finds
+// nothing. Both signals failing is ambiguous from the outside — a query that
+// errored looks exactly like one that legitimately reported nothing focused —
+// and that ambiguity is what made the original report of #143 hard to act on.
+// Saying which happened, and why, turns the next such report into a diagnosis.
+func (d *Driver) waitForTypingTarget() (bool, string) {
+	var observed string
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// GetActiveElement reports "nothing is focused" as an error rather than
+		// an empty id, and another caller depends on that, so the reason is
+		// carried through as-is instead of being reinterpreted here.
+		elemID, err := d.client.GetActiveElement()
+		switch {
+		case err == nil && elemID != "":
+			return true, ""
+		case err != nil:
+			observed = fmt.Sprintf("active element unavailable (%v)", err)
+		default:
+			observed = "active element unavailable (empty reference)"
+		}
+
+		visible, kbErr := d.keyboardVisible()
+		if visible {
+			return true, ""
+		}
+		if kbErr != nil {
+			observed += fmt.Sprintf("; keyboard query failed (%v)", kbErr)
+		} else {
+			observed += "; keyboard not on screen"
+		}
+	}
+	return false, observed
+}
+
+// keyboardVisible reports whether the software keyboard is on screen.
+func (d *Driver) keyboardVisible() (bool, error) {
+	ids, err := d.client.FindElements("class chain", "**/XCUIElementTypeKeyboard")
+	if err != nil {
+		return false, err
+	}
+	return len(ids) > 0, nil
 }
 
 func (d *Driver) eraseText(step *flow.EraseTextStep) *core.CommandResult {
@@ -477,6 +685,13 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 }
 
 func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.CommandResult {
+	// `from:` confines the scroll to a container. Only the UIAutomator2 driver
+	// implements it so far; refusing here is better than silently scrolling the
+	// whole screen and leaving the flow author to wonder why.
+	if !step.From.IsEmpty() {
+		return errorResult(fmt.Errorf("unsupported option"), "scrollUntilVisible `from:` is not supported on this driver yet — it currently works on the uiautomator2 driver")
+	}
+
 	direction := strings.ToLower(step.Direction)
 	if direction == "" {
 		direction = "down"
@@ -495,7 +710,14 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		info, err := d.findElement(step.Element, true, 1000)
 		if err == nil && info != nil {
-			return successResult("Element found after scrolling", info)
+			// Found in the tree is not enough: an element half-hidden behind
+			// the fold satisfies a bare find, and the tap that follows lands
+			// wrong. Keep scrolling until enough of it is actually on screen.
+			// With no screen size to compare against, accept the find as before.
+			w, h, sizeErr := d.screenSize()
+			if sizeErr != nil || core.MeetsVisibility(info.Bounds, w, h, step.VisibilityPercentage) {
+				return successResult("Element found after scrolling", info)
+			}
 		}
 
 		// Scroll
@@ -566,29 +788,54 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		// UP:    centered horizontally, 90%→10% of height
 		// DOWN:  centered horizontally, 20%→90% of height
 		dir := strings.ToLower(step.Direction)
-		switch dir {
-		case "up":
-			fromX = areaX + areaW*0.5
-			fromY = areaY + areaH*0.9
-			toX = areaX + areaW*0.5
-			toY = areaY + areaH*0.1
-		case "down":
-			fromX = areaX + areaW*0.5
-			fromY = areaY + areaH*0.2
-			toX = areaX + areaW*0.5
-			toY = areaY + areaH*0.9
-		case "left":
-			fromX = areaX + areaW*0.9
-			fromY = areaY + areaH*0.5
-			toX = areaX + areaW*0.1
-			toY = areaY + areaH*0.5
-		case "right":
-			fromX = areaX + areaW*0.1
-			fromY = areaY + areaH*0.5
-			toX = areaX + areaW*0.9
-			toY = areaY + areaH*0.5
-		default:
-			return errorResult(fmt.Errorf("invalid direction: %s", step.Direction), "Invalid swipe direction")
+		if step.Distance > 0 {
+			// Explicit distance: centered swipe covering that fraction of the
+			// area (screen or the anchored element's bounds).
+			frac := step.Distance
+			if frac > 1 {
+				frac = 1
+			}
+			cx := areaX + areaW*0.5
+			cy := areaY + areaH*0.5
+			dxp := areaW * frac / 2
+			dyp := areaH * frac / 2
+			switch dir {
+			case "up":
+				fromX, fromY, toX, toY = cx, cy+dyp, cx, cy-dyp
+			case "down":
+				fromX, fromY, toX, toY = cx, cy-dyp, cx, cy+dyp
+			case "left":
+				fromX, fromY, toX, toY = cx+dxp, cy, cx-dxp, cy
+			case "right":
+				fromX, fromY, toX, toY = cx-dxp, cy, cx+dxp, cy
+			default:
+				return errorResult(fmt.Errorf("invalid direction: %s", step.Direction), "Invalid swipe direction")
+			}
+		} else {
+			switch dir {
+			case "up":
+				fromX = areaX + areaW*0.5
+				fromY = areaY + areaH*0.9
+				toX = areaX + areaW*0.5
+				toY = areaY + areaH*0.1
+			case "down":
+				fromX = areaX + areaW*0.5
+				fromY = areaY + areaH*0.2
+				toX = areaX + areaW*0.5
+				toY = areaY + areaH*0.9
+			case "left":
+				fromX = areaX + areaW*0.9
+				fromY = areaY + areaH*0.5
+				toX = areaX + areaW*0.1
+				toY = areaY + areaH*0.5
+			case "right":
+				fromX = areaX + areaW*0.1
+				fromY = areaY + areaH*0.5
+				toX = areaX + areaW*0.9
+				toY = areaY + areaH*0.5
+			default:
+				return errorResult(fmt.Errorf("invalid direction: %s", step.Direction), "Invalid swipe direction")
+			}
 		}
 	}
 
@@ -705,7 +952,11 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 			var applyList []struct{ perm, action string }
 			for name, value := range permissions {
 				lower := strings.ToLower(value)
-				if lower != "allow" && lower != "deny" {
+				if lower == "unset" {
+					continue // already reset above; leave it "not determined"
+				}
+				if !iosPermissionValueSupported(name, lower) {
+					logger.Warn("launchApp: ignoring unsupported value %q for permission %q", value, name)
 					continue
 				}
 				if strings.ToLower(name) == "all" {
@@ -746,7 +997,11 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 		var applyList []struct{ perm, action string }
 		for name, value := range permissions {
 			lower := strings.ToLower(value)
-			if lower != "allow" && lower != "deny" {
+			if lower == "unset" {
+				continue // already reset above; leave it "not determined"
+			}
+			if !iosPermissionValueSupported(name, lower) {
+				logger.Warn("launchApp: ignoring unsupported value %q for permission %q", value, name)
 				continue
 			}
 			if strings.ToLower(name) == "all" {
@@ -1534,7 +1789,11 @@ func (d *Driver) setPermissions(step *flow.SetPermissionsStep) *core.CommandResu
 	var applied, errors []string
 	for name, value := range step.Permissions {
 		lower := strings.ToLower(value)
-		if lower != "allow" && lower != "deny" {
+		if lower == "unset" {
+			continue // already reset above; leave it "not determined"
+		}
+		if !iosPermissionValueSupported(name, lower) {
+			logger.Warn("setPermissions: ignoring unsupported value %q for permission %q", value, name)
 			continue
 		}
 		if strings.ToLower(name) == "all" {
@@ -1567,22 +1826,37 @@ func (d *Driver) setPermissions(step *flow.SetPermissionsStep) *core.CommandResu
 	}
 }
 
+// iosPermissionAction resolves a permission value to a simctl action. The
+// table is shared with the DeviceLab iOS driver in pkg/core.
+func iosPermissionAction(service, value string) (string, string, bool) {
+	return core.IOSPrivacyAction(service, value)
+}
+
+// iosPermissionValueSupported reports whether value means anything for the
+// permission named in the flow. Checked against the first service the shortcut
+// resolves to, since a shortcut never mixes location with anything else.
+func iosPermissionValueSupported(name, value string) bool {
+	if strings.ToLower(name) == "all" {
+		_, _, ok := iosPermissionAction("camera", value)
+		return ok
+	}
+	services := resolveIOSPermissionShortcut(name)
+	if len(services) == 0 {
+		return false
+	}
+	_, _, ok := iosPermissionAction(services[0], value)
+	return ok
+}
+
 // applyIOSPermission grants or revokes a single permission using xcrun simctl privacy.
 func (d *Driver) applyIOSPermission(appID, permission, value string) error {
-	var action string
-	switch strings.ToLower(value) {
-	case "allow":
-		action = "grant"
-	case "deny":
-		action = "revoke"
-	case "unset":
-		action = "reset"
-	default:
-		return fmt.Errorf("invalid permission value: %s (use allow/deny/unset)", value)
+	action, service, ok := iosPermissionAction(permission, value)
+	if !ok {
+		return fmt.Errorf("invalid value %q for permission %q", value, permission)
 	}
 
 	// xcrun simctl privacy <device> <action> <service> <bundle-id>
-	cmd := exec.Command("xcrun", "simctl", "privacy", d.udid, action, permission, appID)
+	cmd := exec.Command("xcrun", "simctl", "privacy", d.udid, action, service, appID)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %s", err, string(output))
@@ -1590,48 +1864,12 @@ func (d *Driver) applyIOSPermission(appID, permission, value string) error {
 	return nil
 }
 
-// resolveIOSPermissionShortcut maps shortcut names to iOS privacy service names.
+// resolveIOSPermissionShortcut maps a flow permission name to iOS privacy
+// service names. Shared with the DeviceLab iOS driver via pkg/core.
 func resolveIOSPermissionShortcut(shortcut string) []string {
-	switch strings.ToLower(shortcut) {
-	case "location", "location-always":
-		return []string{"location-always"}
-	case "camera":
-		return []string{"camera"}
-	case "contacts":
-		return []string{"contacts"}
-	case "phone":
-		return []string{"contacts"} // iOS doesn't have separate phone permission
-	case "microphone":
-		return []string{"microphone"}
-	case "photos", "medialibrary":
-		return []string{"photos"}
-	case "calendar":
-		return []string{"calendar"}
-	case "reminders":
-		return []string{"reminders"}
-	case "notifications":
-		return []string{"notifications"}
-	case "bluetooth":
-		return []string{"bluetooth-peripheral"}
-	case "health":
-		return []string{"health"}
-	case "homekit":
-		return []string{"homekit"}
-	case "motion":
-		return []string{"motion"}
-	case "speech":
-		return []string{"speech-recognition"}
-	case "siri":
-		return []string{"siri"}
-	case "faceid":
-		return []string{"faceid"}
-	default:
-		// Assume it's already a valid service name
-		return []string{shortcut}
-	}
+	return core.IOSPrivacyServices(shortcut)
 }
 
-// hasAllValue checks if all permission values match the given value.
 func hasAllValue(permissions map[string]string, value string) bool {
 	for _, v := range permissions {
 		if strings.ToLower(v) != value {
@@ -1689,6 +1927,10 @@ func resolveAlertAction(permissions map[string]string) string {
 }
 
 // getIOSPermissions returns all common iOS privacy services.
+// getIOSPermissions lists the privacy services simctl will accept for a
+// reset-everything pass. Deliberately excludes `notifications` and `faceid`:
+// simctl rejects both, and including them meant every reset logged failures
+// nobody could act on.
 func getIOSPermissions() []string {
 	return []string{
 		"location-always",
@@ -1698,6 +1940,78 @@ func getIOSPermissions() []string {
 		"contacts",
 		"calendar",
 		"reminders",
-		"notifications",
 	}
+}
+
+// ============================================================================
+// Dark mode (Maestro #2507)
+// ============================================================================
+
+// Appearance is only settable on simulators under this driver, because
+// `simctl ui` has no real-device equivalent and WebDriverAgent exposes no
+// endpoint for it. iOS itself can do this on a device — XCUIDevice has an
+// appearance property — which is why the devicelab_ios driver, whose runner is
+// a UI test, supports real hardware. Here a physical device gets a clear error
+// rather than a silent no-op that would make a flow look like it passed in the
+// wrong appearance.
+func (d *Driver) setDarkMode(step *flow.SetDarkModeStep) *core.CommandResult {
+	if err := d.requireSimulatorForAppearance("setDarkMode"); err != nil {
+		return errorResult(err, err.Error())
+	}
+	out, err := exec.Command("xcrun", "simctl", "ui", d.udid, "appearance",
+		core.IOSAppearanceValue(step.Enabled)).CombinedOutput()
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to set dark mode: %v: %s", err, strings.TrimSpace(string(out))))
+	}
+	return successResult(fmt.Sprintf("Set %s mode", core.DarkModeStateName(step.Enabled)), nil)
+}
+
+func (d *Driver) toggleDarkMode(_ *flow.ToggleDarkModeStep) *core.CommandResult {
+	current, err := d.currentDarkMode()
+	if err != nil {
+		return errorResult(err, err.Error())
+	}
+	return d.setDarkMode(&flow.SetDarkModeStep{Enabled: !current})
+}
+
+func (d *Driver) assertDarkMode(_ *flow.AssertDarkModeStep) *core.CommandResult {
+	return d.assertDarkModeIs(true)
+}
+
+func (d *Driver) assertLightMode(_ *flow.AssertLightModeStep) *core.CommandResult {
+	return d.assertDarkModeIs(false)
+}
+
+func (d *Driver) assertDarkModeIs(want bool) *core.CommandResult {
+	got, err := d.currentDarkMode()
+	if err != nil {
+		return errorResult(err, err.Error())
+	}
+	if got != want {
+		assertErr := core.DarkModeAssertionError(want, got)
+		return errorResult(assertErr, assertErr.Error())
+	}
+	return successResult(fmt.Sprintf("Device is in %s mode", core.DarkModeStateName(want)), nil)
+}
+
+func (d *Driver) currentDarkMode() (bool, error) {
+	if err := d.requireSimulatorForAppearance("dark mode"); err != nil {
+		return false, err
+	}
+	out, err := exec.Command("xcrun", "simctl", "ui", d.udid, "appearance").CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("failed to read appearance: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return core.ParseIOSAppearance(string(out))
+}
+
+func (d *Driver) requireSimulatorForAppearance(what string) error {
+	if d.info == nil || !d.info.IsSimulator {
+		return fmt.Errorf("%s is not supported on a physical device with the wda driver — "+
+			"WebDriverAgent has no appearance endpoint; use --driver devicelab_ios for dark mode on real hardware", what)
+	}
+	if d.udid == "" {
+		return fmt.Errorf("%s requires a simulator UDID", what)
+	}
+	return nil
 }

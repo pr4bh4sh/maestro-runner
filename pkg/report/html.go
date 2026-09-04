@@ -58,15 +58,18 @@ func GenerateHTML(reportDir string, cfg HTMLConfig) error {
 
 // HTMLData contains all data needed for the HTML template.
 type HTMLData struct {
-	Title         string
-	GeneratedAt   string
-	Index         *Index
-	Flows         []FlowHTMLData
-	TotalDuration string
-	PassRate      float64
-	MaxDuration   int64
-	StatusClass   map[Status]string
-	JSONData      template.JS // JSON data for JavaScript
+	Title       string
+	GeneratedAt string
+	// AppVersionLabel is the app version and build number, ready to display.
+	// Computed once so the page title and the header agree.
+	AppVersionLabel string
+	Index           *Index
+	Flows           []FlowHTMLData
+	TotalDuration   string
+	PassRate        float64
+	MaxDuration     int64
+	StatusClass     map[Status]string
+	JSONData        template.JS // JSON data for JavaScript
 }
 
 // FlowHTMLData contains flow data formatted for HTML.
@@ -175,15 +178,16 @@ func buildHTMLData(index *Index, flows []FlowDetail, cfg HTMLConfig) HTMLData {
 	})
 
 	return HTMLData{
-		Title:         cfg.Title,
-		GeneratedAt:   time.Now().Format("2006-01-02 15:04:05"),
-		Index:         index,
-		Flows:         flowsData,
-		TotalDuration: formatDuration(&totalDurationMs),
-		PassRate:      passRate,
-		MaxDuration:   maxDuration,
-		StatusClass:   statusClass,
-		JSONData:      template.JS(jsonBytes),
+		Title:           cfg.Title,
+		GeneratedAt:     time.Now().Format("2006-01-02 15:04:05"),
+		AppVersionLabel: index.App.VersionLabel(),
+		Index:           index,
+		Flows:           flowsData,
+		TotalDuration:   formatDuration(&totalDurationMs),
+		PassRate:        passRate,
+		MaxDuration:     maxDuration,
+		StatusClass:     statusClass,
+		JSONData:        template.JS(jsonBytes),
 	}
 }
 
@@ -237,7 +241,7 @@ const htmlTemplate = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Title}}</title>
+    <title>{{.Title}}{{if .AppVersionLabel}} — {{.AppVersionLabel}}{{end}}</title>
     <style>
         :root {
             --bg-primary: #ffffff;
@@ -1028,6 +1032,10 @@ const htmlTemplate = `<!DOCTYPE html>
         }
 
         .console-logs { margin-top: 16px; }
+        .flow-video { margin-bottom: 12px; }
+        .flow-video summary { cursor: pointer; font-size: 13px; color: var(--text-secondary, #666); user-select: none; }
+        .flow-video video { display: block; margin-top: 8px; max-width: 100%; max-height: 480px; border-radius: 6px; }
+
         .console-header {
             display: flex;
             align-items: center;
@@ -1097,7 +1105,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 <div class="header-divider"></div>
                 <div class="header-title">
                     <span class="header-title-main">{{.Title}}</span>
-                    <span class="header-title-sub">{{.GeneratedAt}}</span>
+                    <span class="header-title-sub">{{if .AppVersionLabel}}{{.AppVersionLabel}} &middot; {{end}}{{.GeneratedAt}}</span>
                 </div>
             </div>
             <div class="header-right">
@@ -1152,7 +1160,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 </div>
                 <div class="env-item">
                     <span class="env-label">App</span>
-                    <span class="env-value">{{if .Index.App.ID}}{{.Index.App.ID}}{{if .Index.App.Version}} v{{.Index.App.Version}}{{end}}{{else}}-{{end}}</span>
+                    <span class="env-value">{{if .Index.App.ID}}{{.Index.App.ID}}{{with .Index.App.VersionLabel}} {{.}}{{end}}{{else}}{{with .Index.App.VersionLabel}}{{.}}{{else}}-{{end}}{{end}}</span>
                 </div>
                 <div class="env-item">
                     <span class="env-label">Driver</span>
@@ -1237,6 +1245,7 @@ const htmlTemplate = `<!DOCTYPE html>
                     <div class="detail-title" id="detail-title"></div>
                 </div>
                 <div class="detail-info" id="detail-info"></div>
+                <div id="flow-video"></div>
                 <div class="command-list" id="command-list"></div>
                 <div class="console-logs" id="console-logs"></div>
             </div>
@@ -1684,6 +1693,15 @@ const htmlTemplate = `<!DOCTYPE html>
             infoHtml += '<div class="info-item"><span class="info-label">Source</span><span class="info-value">' + flow.sourceFile + '</span></div>';
             document.getElementById('detail-info').innerHTML = infoHtml;
 
+            // Screen recording (--record) — collapsed by default, above the steps
+            const videoEl = document.getElementById('flow-video');
+            if (flow.artifacts && flow.artifacts.video) {
+                videoEl.innerHTML = '<details class="flow-video"><summary>Screen recording</summary>' +
+                    '<video controls preload="metadata" src="' + encodeURI(flow.artifacts.video) + '"></video></details>';
+            } else {
+                videoEl.innerHTML = '';
+            }
+
             // Commands - compact format with sub-commands support
             document.getElementById('command-list').innerHTML = renderCommands(flow.commands, flowIndex, 0);
 
@@ -1798,7 +1816,16 @@ const htmlTemplate = `<!DOCTYPE html>
         }
 
         function extractKeyValue(cmd) {
-            // Extract the most meaningful value to show in the summary
+            // A label is the author saying, in their own words, what this step
+            // is for. It wins over anything derived from the step, which is why
+            // it is checked first: it used to be a fallback, so it only ever
+            // appeared on steps that had no selector, text or direction to show
+            // instead. A labelled tapOn showed its selector and the label went
+            // nowhere, while a labelled extendedWaitUntil displayed fine — the
+            // same flow, two different behaviours (#150).
+            if (cmd.label && cmd.label !== cmd.type) {
+                return cmd.label;
+            }
             if (cmd.params) {
                 if (cmd.params.selector && cmd.params.selector.value) {
                     return cmd.params.selector.value;
@@ -1809,10 +1836,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 if (cmd.params.direction) {
                     return cmd.params.direction;
                 }
-            }
-            // Fallback: try to extract from label or return empty
-            if (cmd.label && cmd.label !== cmd.type) {
-                return cmd.label;
             }
             return '';
         }

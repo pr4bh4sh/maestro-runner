@@ -3,8 +3,12 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -31,6 +35,19 @@ type RunnerConfig struct {
 	Retries     int          // Max retries per flow (0 = no retries)
 	Artifacts   ArtifactMode // When to capture artifacts
 
+	// UpdateScreenshots overwrites existing assertScreenshot baselines.
+	// Missing baselines are always seeded on first run regardless of this flag.
+	UpdateScreenshots bool
+
+	// RecordMode decides what happens to a finished recording: "always" keeps
+	// every one, "on-failure" keeps only the flows that failed. Empty behaves
+	// as "always", so a caller that only sets Record keeps the old behaviour.
+	RecordMode string
+	// Record captures a screen recording of every flow into its assets
+	// directory (--record). Best-effort: drivers that can't record are logged
+	// and the run continues without video.
+	Record bool
+
 	// Device/App info for reports
 	Device report.Device
 	App    report.App
@@ -47,6 +64,9 @@ type RunnerConfig struct {
 	WaitForIdleTimeout int // Global wait for idle timeout in ms
 	TypingFrequency    int // Global WDA typing frequency in keys/sec (0 = WDA default)
 	ConditionTimeout   int // Default timeout (ms) for when:/while: condition checks (0 = engine default)
+	// StepDelay pauses between top-level steps (ms). Flow config overrides it.
+	// For pacing demos and apps whose animations outrun the assertions.
+	StepDelay int
 
 	// Device information (set by executor)
 	DeviceInfo *report.Device
@@ -210,7 +230,29 @@ func (r *Runner) executeFlows(ctx context.Context, flows []flow.Flow, flowDetail
 }
 
 // executeFlow runs a single flow.
-func (r *Runner) executeFlow(ctx context.Context, f flow.Flow, detail *report.FlowDetail, indexWriter *report.IndexWriter, flowIdx, totalFlows int) FlowResult {
+//
+// A panic anywhere below this point is contained to the flow that caused it.
+// Without that, one bad step takes the process with it — and under --parallel
+// that means every flow in flight dies mid-execution and every flow not yet
+// scheduled never starts, turning a single flaky screen into a total run loss
+// (#149). A crashed flow is reported as a failed flow, with the panic and its
+// stack in the result, which is both more useful and more honest than an
+// exit code and a wall of goroutine dump.
+func (r *Runner) executeFlow(ctx context.Context, f flow.Flow, detail *report.FlowDetail, indexWriter *report.IndexWriter, flowIdx, totalFlows int) (result FlowResult) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+		logger.Error("flow %q crashed the driver: %v\n%s", f.Config.Name, recovered, string(debug.Stack()))
+		result = FlowResult{
+			Name:       f.Config.Name,
+			SourceFile: f.SourcePath,
+			Status:     report.StatusFailed,
+			Error:      fmt.Sprintf("driver panic: %v", recovered),
+		}
+	}()
+
 	fr := &FlowRunner{
 		ctx:         ctx,
 		flow:        f,

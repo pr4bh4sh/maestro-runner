@@ -31,6 +31,13 @@ type DeviceLabClient interface {
 	// Element finding
 	FindElement(strategy, selector string) (*uiautomator2.Element, error)
 	FindAndClick(strategy, selector string) (*uiautomator2.Element, error)
+	// FindAndClickGuarded also passes the screen size so the agent can reject
+	// an untappable rect before injecting the tap. The bool reports whether
+	// the tap actually fired (#162).
+	FindAndClickGuarded(strategy, selector string, screenW, screenH int) (*uiautomator2.Element, bool, error)
+	// FindAndClickChecked additionally hit-tests the tap point when hitTest is
+	// set, returning what covered it when a tap is refused.
+	FindAndClickChecked(strategy, selector string, screenW, screenH int, hitTest bool) (*uiautomator2.Element, bool, string, error)
 	ActiveElement() (*uiautomator2.Element, error)
 
 	// Timeouts
@@ -44,12 +51,14 @@ type DeviceLabClient interface {
 	LongClickElement(elementID string, durationMs int) error
 	ScrollInArea(area uiautomator2.RectModel, direction string, percent float64, speed int) error
 	SwipeInArea(area uiautomator2.RectModel, direction string, percent float64, speed int) error
+	SwipeCoords(startX, startY, endX, endY, durationMs int) error
 
 	// Navigation
 	Back() error
 	HideKeyboard() error
 	PressKeyCode(keyCode int) error
 	SendKeyActions(text string) error
+	AddMedia(name, mime string, data []byte) error
 
 	// Device state
 	Screenshot() ([]byte, error)
@@ -94,6 +103,10 @@ type Driver struct {
 	info   *core.PlatformInfo
 	device ShellExecutor // for ADB commands (fallback)
 
+	// currentAppID is the app the flow last launched, remembered so a
+	// mid-flow death can be explained rather than surfacing as "not found".
+	currentAppID string
+
 	// Parent context for element-finding operations (nil = context.Background())
 	ctx context.Context
 
@@ -118,6 +131,15 @@ type Driver struct {
 	lastCDPScan   time.Time     // rate-limit ADB shell CDP scans
 	lastCDPResult *core.CDPInfo // cached result from last scan
 	knownCDPType  string        // "browser" or "webview" — set from socket name, cleared on CDP down
+	// Backoff for a WebView CDP endpoint that fails to connect. A stalled/
+	// unreachable devtools socket makes connect() spend its full timeout
+	// (~20s), and ensureWebViewConnection retries on every command while
+	// disconnected — so without a backoff a single flaky WebView adds ~20s to
+	// every step. We record the failing socket + time and skip re-connecting
+	// to that same socket until the backoff elapses; commands fall through to
+	// native finding meanwhile.
+	lastWebViewConnectFail   time.Time
+	lastWebViewConnectFailSk string
 
 	// Lazy retry state: each successful tap captures the pre-tap tree hash
 	// + selector + time. If the NEXT element-based command can't find its
@@ -213,9 +235,9 @@ func (d *Driver) tapHadEffectViaWindowUpdate(appID string) bool {
 }
 
 const (
-	tapVerifyAttempts     = 3 //nolint:unused
+	tapVerifyAttempts     = 3                     //nolint:unused
 	tapVerifyInterval     = 30 * time.Millisecond //nolint:unused
-	windowUpdateTimeoutMs = 500 //nolint:unused
+	windowUpdateTimeoutMs = 500                   //nolint:unused
 )
 
 // recordTap captures the current tree hash so a later failing assertion can
@@ -301,12 +323,22 @@ func (d *Driver) maybeLazyRetryTap() bool {
 
 	// Re-issue the tap via FindAndClick. Reset the timer so further probes
 	// keep counting from this re-attempt, not the original.
+	// Guard the re-issued tap the same way tapOn does. This path had no rect
+	// check at all, and it fires exactly when a tap "had no effect" — which
+	// is when a clipped rect is most likely (#162).
+	sw, sh, _ := d.tappableScreenSize()
 	for _, s := range buildClickableOrAllStrategies(d.lastTapSelector) {
-		if _, err := d.client.FindAndClick(s.Strategy, s.Value); err == nil {
-			d.lastTapRetries++
-			d.lastTapTime = time.Now()
-			return true
+		_, clicked, err := d.client.FindAndClickGuarded(s.Strategy, s.Value, sw, sh)
+		if err != nil {
+			continue
 		}
+		if !clicked {
+			logger.Info("[devicelab] lazy retry: agent skipped the tap for %s (untappable rect) — not counting a retry", d.lastTapSelector.Describe())
+			continue
+		}
+		d.lastTapRetries++
+		d.lastTapTime = time.Now()
+		return true
 	}
 	return false
 }
@@ -476,6 +508,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.longPressOn(s)
 	case *flow.TapOnPointStep:
 		result = d.tapOnPoint(s)
+	case *flow.DragAndDropStep:
+		result = d.dragAndDrop(s)
 
 	// Assert commands
 	case *flow.AssertVisibleStep:
@@ -518,6 +552,11 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.killApp(s)
 	case *flow.ClearStateStep:
 		result = d.clearState(s)
+	case *flow.SetPermissionsStep:
+		// The grant/revoke machinery already existed for launchApp's
+		// `permissions:` block; only the step was never dispatched, so a flow
+		// using setPermissions aborted with "unknown step type" (#148).
+		result = d.applyPermissions(s.AppID, s.Permissions)
 
 	// Clipboard
 	case *flow.CopyTextFromStep:
@@ -540,6 +579,14 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.setAirplaneMode(s)
 	case *flow.ToggleAirplaneModeStep:
 		result = d.toggleAirplaneMode(s)
+	case *flow.SetDarkModeStep:
+		result = d.setDarkMode(s)
+	case *flow.ToggleDarkModeStep:
+		result = d.toggleDarkMode(s)
+	case *flow.AssertDarkModeStep:
+		result = d.assertDarkMode(s)
+	case *flow.AssertLightModeStep:
+		result = d.assertLightMode(s)
 	case *flow.TravelStep:
 		result = d.travel(s)
 
@@ -558,6 +605,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	// Media
 	case *flow.TakeScreenshotStep:
 		result = d.takeScreenshot(s)
+	case *flow.AssertScreenshotStep:
+		result = d.takeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
 	case *flow.StartRecordingStep:
 		result = d.startRecording(s)
 	case *flow.StopRecordingStep:
@@ -639,7 +688,9 @@ func (d *Driver) ensureWebViewConnection() {
 			logger.Info("[cdp:3-connection] CDP socket gone, disconnecting webview")
 			d.webView.disconnect()
 		}
-		d.knownCDPType = "" // Clear browser mode when CDP goes away
+		d.knownCDPType = ""                    // Clear browser mode when CDP goes away
+		d.lastWebViewConnectFail = time.Time{} // reset backoff — socket is gone
+		d.lastWebViewConnectFailSk = ""
 		return
 	}
 
@@ -658,11 +709,40 @@ func (d *Driver) ensureWebViewConnection() {
 	//   - chrome_devtools_remote sockets are only reported when a browser is in the foreground
 	// So we trust whatever socket the agent sends us.
 	if !d.webView.isConnected() {
-		logger.Info("[cdp:3-connection] CDP socket available, initiating connection to %s (type=%s)", cdpInfo.Socket, cdpType)
-		if err := d.webView.connect(cdpInfo, cdpType); err != nil {			logger.Info("[cdp:3-connection] connect failed: %v (socket=%s)", err, cdpInfo.Socket)
+		// Skip re-connecting to a socket that failed recently — connect() can
+		// spend ~20s on a stalled endpoint, and this runs on every command, so
+		// without the backoff one flaky WebView slows every step. Keyed on the
+		// socket so a different/new WebView still connects immediately.
+		if inWebViewConnectBackoff(cdpInfo.Socket, d.lastWebViewConnectFailSk, d.lastWebViewConnectFail, time.Now()) {
 			return
 		}
+		logger.Info("[cdp:3-connection] CDP socket available, initiating connection to %s (type=%s)", cdpInfo.Socket, cdpType)
+		if err := d.webView.connect(cdpInfo, cdpType); err != nil {
+			logger.Info("[cdp:3-connection] connect failed: %v (socket=%s)", err, cdpInfo.Socket)
+			d.lastWebViewConnectFail = time.Now()
+			d.lastWebViewConnectFailSk = cdpInfo.Socket
+			return
+		}
+		// Connected — clear any backoff state.
+		d.lastWebViewConnectFail = time.Time{}
+		d.lastWebViewConnectFailSk = ""
 	}
+}
+
+// webViewConnectBackoff is how long ensureWebViewConnection waits before
+// re-attempting a WebView CDP connect that just failed for the same socket,
+// so a stalled/unreachable devtools endpoint can't add the full connect
+// timeout to every command (mirrors Maestro's MA-4119 bound).
+const webViewConnectBackoff = 5 * time.Second
+
+// inWebViewConnectBackoff reports whether a connect to socket should be skipped
+// because the same socket failed to connect within webViewConnectBackoff of now.
+// A different socket (or no prior failure) is never in backoff.
+func inWebViewConnectBackoff(socket, lastFailSocket string, lastFail, now time.Time) bool {
+	if lastFail.IsZero() || socket != lastFailSocket {
+		return false
+	}
+	return now.Sub(lastFail) < webViewConnectBackoff
 }
 
 // getCDPInfo returns the current CDP socket info.
@@ -794,7 +874,7 @@ func (d *Driver) findFocused() (core.Element, error) {
 	// Try native
 	if d.webView == nil || d.webView.webViewType() != "browser" {
 		active, err := d.client.ActiveElement()
-		if err == nil {
+		if err == nil && active != nil {
 			info := &core.ElementInfo{Visible: true, Enabled: true}
 			if text, textErr := active.Text(); textErr == nil {
 				info.Text = text
@@ -1020,7 +1100,7 @@ func buildClickableOnlyStrategies(sel flow.Selector) ([]LocatorStrategy, error) 
 		// the literal string ".*For You.*" instead of "anything around For You".
 		if looksLikeRegex(sel.Text) {
 			regexEscaped := escapeUIAutomatorString(sel.Text)
-			pattern := "(?is)" + regexEscaped
+			pattern := "(?s)" + regexEscaped
 			strategies = append(strategies, LocatorStrategy{
 				Strategy: uiautomator2.StrategyUIAutomator,
 				Value:    `new UiSelector().textMatches("` + pattern + `").clickable(true)` + stateFilters,
@@ -1450,7 +1530,7 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector) (*core.ElementInfo, 
 
 	candidates = SortClickableFirst(candidates)
 
-	selected := SelectByIndex(candidates, sel.Index)
+	selected := selectRelativeCandidate(candidates, sel.Index, filterType)
 
 	clickableElem := GetClickableElement(selected)
 
@@ -1527,7 +1607,7 @@ func (d *Driver) findElementRelativeWithElements(sel flow.Selector, allElements 
 
 	candidates = SortClickableFirst(candidates)
 
-	selected := SelectByIndex(candidates, sel.Index)
+	selected := selectRelativeCandidate(candidates, sel.Index, filterType)
 
 	clickableElem := GetClickableElement(selected)
 
@@ -1671,126 +1751,97 @@ func buildSelectorsWithOptions(sel flow.Selector, timeoutMs int, preferClickable
 	var strategies []LocatorStrategy
 	stateFilters := buildStateFilters(sel)
 
-	// ID-based selector — exact match FIRST, substring fallback ONLY if exact
-	// fails. Mirrors the parallel fix in pkg/driver/uiautomator2: substring-
-	// only `resourceIdMatches(".*X.*")` triggered internal scrolling and
-	// returned a wrong element when the target id wasn't in the rendered
-	// tree (lazy ListView with target offscreen). Web driver does the same
-	// cascade — exact → testid → substring → name → aria-label.
-	if sel.ID != "" {
-		escaped := escapeUIAutomatorString(sel.ID)
-		if preferClickable {
-			// Exact match — clickable first for tap commands.
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().resourceId("` + escaped + `").clickable(true)` + stateFilters,
-			})
+	// One tier is a set of equally-good queries; tiers are tried in order, and
+	// within a tier the clickable variants come first when a tap is being
+	// located.
+	emit := func(tiers [][]string) {
+		for _, tier := range tiers {
+			if preferClickable {
+				for _, body := range tier {
+					strategies = append(strategies, LocatorStrategy{
+						Strategy: uiautomator2.StrategyUIAutomator,
+						Value:    `new UiSelector()` + body + `.clickable(true)` + stateFilters,
+					})
+				}
+			}
+			for _, body := range tier {
+				strategies = append(strategies, LocatorStrategy{
+					Strategy: uiautomator2.StrategyUIAutomator,
+					Value:    `new UiSelector()` + body + stateFilters,
+				})
+			}
 		}
-		// Exact match — any element.
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().resourceId("` + escaped + `")` + stateFilters,
-		})
-		if preferClickable {
-			// Substring fallback — clickable. Backward compat with users
-			// relying on substring behaviour.
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().resourceIdMatches(".*` + escaped + `.*").clickable(true)` + stateFilters,
-			})
-		}
-		// Substring fallback — any.
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().resourceIdMatches(".*` + escaped + `.*")` + stateFilters,
-		})
 	}
 
-	// Text-based selector: case-sensitive first, case-insensitive fallback.
-	// hintContains / hintMatches are DeviceLab-agent extensions — match EditText
-	// android:hint placeholder so "tapOn: 'Email'" finds an empty field by hint.
+	// ID — exact match FIRST, substring fallback ONLY if exact fails. Mirrors
+	// the parallel fix in pkg/driver/uiautomator2: substring-only
+	// `resourceIdMatches(".*X.*")` triggered internal scrolling and returned a
+	// wrong element when the target id wasn't in the rendered tree (lazy
+	// ListView with target offscreen).
+	var idTiers [][]string
+	if sel.ID != "" {
+		escaped := escapeUIAutomatorString(sel.ID)
+		idTiers = [][]string{
+			{`.resourceId("` + escaped + `")`},
+			{`.resourceIdMatches(".*` + escaped + `.*")`},
+		}
+	}
+
+	// Text — case-sensitive first, case-insensitive fallback. hintContains /
+	// hintMatches are DeviceLab-agent extensions: they match the EditText
+	// android:hint placeholder, so "tapOn: 'Email'" finds an empty field by
+	// hint.
+	var textTiers [][]string
 	if sel.Text != "" {
 		escaped := escapeUIAutomatorString(sel.Text)
 		ciPattern := `(?is).*\Q` + escaped + `\E.*`
-		if preferClickable {
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().textContains("` + escaped + `").clickable(true)` + stateFilters,
-			})
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().descriptionContains("` + escaped + `").clickable(true)` + stateFilters,
-			})
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().hintContains("` + escaped + `").clickable(true)` + stateFilters,
-			})
+		textTiers = [][]string{
+			{
+				`.textContains("` + escaped + `")`,
+				`.descriptionContains("` + escaped + `")`,
+				`.hintContains("` + escaped + `")`,
+			},
+			{
+				`.textMatches("` + ciPattern + `")`,
+				`.descriptionMatches("` + ciPattern + `")`,
+				`.hintMatches("` + ciPattern + `")`,
+			},
 		}
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().textContains("` + escaped + `")` + stateFilters,
-		})
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().descriptionContains("` + escaped + `")` + stateFilters,
-		})
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().hintContains("` + escaped + `")` + stateFilters,
-		})
-		// Case-insensitive fallback
-		if preferClickable {
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().textMatches("` + ciPattern + `").clickable(true)` + stateFilters,
-			})
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().descriptionMatches("` + ciPattern + `").clickable(true)` + stateFilters,
-			})
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().hintMatches("` + ciPattern + `").clickable(true)` + stateFilters,
-			})
-		}
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().textMatches("` + ciPattern + `")` + stateFilters,
-		})
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().descriptionMatches("` + ciPattern + `")` + stateFilters,
-		})
-		strategies = append(strategies, LocatorStrategy{
-			Strategy: uiautomator2.StrategyUIAutomator,
-			Value:    `new UiSelector().hintMatches("` + ciPattern + `")` + stateFilters,
-		})
-		// Fall back to regex match (case-insensitive). Text is already a regex
-		// per looksLikeRegex — use it as-is; only escape Java-string quotes.
-		// Escaping regex metachars here would defeat the regex (turns `.*` into
-		// `\.\*` which matches the literal string ".*").
+		// Text is already a regex per looksLikeRegex — use it as-is; only
+		// escape Java-string quotes. Escaping regex metachars here would defeat
+		// the regex (turns `.*` into `\.\*`, matching the literal ".*").
 		if looksLikeRegex(sel.Text) {
-			regexEscaped := escapeUIAutomatorString(sel.Text)
-			pattern := "(?is)" + regexEscaped
-			if preferClickable {
-				strategies = append(strategies, LocatorStrategy{
-					Strategy: uiautomator2.StrategyUIAutomator,
-					Value:    `new UiSelector().textMatches("` + pattern + `").clickable(true)` + stateFilters,
-				})
-				strategies = append(strategies, LocatorStrategy{
-					Strategy: uiautomator2.StrategyUIAutomator,
-					Value:    `new UiSelector().descriptionMatches("` + pattern + `").clickable(true)` + stateFilters,
-				})
-			}
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().textMatches("` + pattern + `")` + stateFilters,
-			})
-			strategies = append(strategies, LocatorStrategy{
-				Strategy: uiautomator2.StrategyUIAutomator,
-				Value:    `new UiSelector().descriptionMatches("` + pattern + `")` + stateFilters,
+			pattern := "(?s)" + escapeUIAutomatorString(sel.Text)
+			textTiers = append(textTiers, []string{
+				`.textMatches("` + pattern + `")`,
+				`.descriptionMatches("` + pattern + `")`,
 			})
 		}
+	}
+
+	// A selector naming both must match one element carrying both. Emitting the
+	// id-only and text-only queries as separate candidates made them an OR: the
+	// finder returns on the first that hits anything, so the id matched and the
+	// text was never read. Same defect as the WDA one fixed in #130.
+	switch {
+	case len(idTiers) > 0 && len(textTiers) > 0:
+		var combined [][]string
+		for _, idTier := range idTiers {
+			for _, textTier := range textTiers {
+				var tier []string
+				for _, id := range idTier {
+					for _, text := range textTier {
+						tier = append(tier, id+text)
+					}
+				}
+				combined = append(combined, tier)
+			}
+		}
+		emit(combined)
+	case len(idTiers) > 0:
+		emit(idTiers)
+	case len(textTiers) > 0:
+		emit(textTiers)
 	}
 
 	// CSS selector for web views
@@ -1813,6 +1864,14 @@ func looksLikeRegex(text string) bool {
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		if i > 0 && text[i-1] == '\\' {
+			// A backslash-escaped metacharacter is regex syntax (\. matches a
+			// literal dot, \$ a literal $), so the whole pattern is a regex.
+			// Classifying it as literal would match the backslash verbatim and
+			// never hit an element whose text has no backslash (#136).
+			switch c {
+			case '.', '*', '+', '?', '[', ']', '{', '}', '|', '(', ')', '^', '$', '\\':
+				return true
+			}
 			continue
 		}
 		switch c {
@@ -1897,4 +1956,29 @@ func successResult(msg string, elem *core.ElementInfo) *core.CommandResult {
 
 func errorResult(err error, msg string) *core.CommandResult {
 	return core.ErrorResult(err, msg)
+}
+
+// selectRelativeCandidate picks which of the filtered candidates a relative
+// selector means.
+//
+// Directional filters (below/above/leftOf/rightOf) sort candidates by distance
+// from the anchor, so the nearest one is what the flow author meant — matching
+// Maestro. Without an explicit index, SelectByIndex would instead fall through
+// to DeepestMatchingElement and could return a far-away, deeply-nested node.
+//
+// This runs after SortClickableFirst, which is a stable partition: it moves the
+// clickable candidates ahead of the rest without disturbing distance order
+// inside either group. So the first candidate is the nearest clickable one, or
+// the nearest of any kind when none are clickable — which is what a tap wants.
+//
+// Non-directional filters keep the old behaviour: containsChild and friends do
+// not order by distance, and depth is the useful tiebreak there.
+func selectRelativeCandidate(candidates []*ParsedElement, index string, filterType relativeFilterType) *ParsedElement {
+	if index == "" {
+		switch filterType {
+		case filterBelow, filterAbove, filterLeftOf, filterRightOf:
+			return candidates[0]
+		}
+	}
+	return SelectByIndex(candidates, index)
 }

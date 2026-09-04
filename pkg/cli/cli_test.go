@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -84,7 +85,7 @@ func TestResolveOutputDir_Flatten(t *testing.T) {
 func TestResolveOutputDir_FlattenWithoutOutput(t *testing.T) {
 	_, err := resolveOutputDir("", true)
 	if err == nil {
-		t.Error("expected error when flatten is used without output")
+		t.Fatal("expected error when flatten is used without output")
 	}
 
 	if !strings.Contains(err.Error(), "--flatten requires --output") {
@@ -259,7 +260,7 @@ func TestStartDeviceCommand_NoPlatform(t *testing.T) {
 	// start-device requires platform
 	err := app.Run([]string{"test-app", "start-device"})
 	if err == nil {
-		t.Error("expected error when platform not provided")
+		t.Fatal("expected error when platform not provided")
 	}
 	if err != nil && !strings.Contains(err.Error(), "--platform is required") {
 		t.Errorf("expected platform required error, got: %v", err)
@@ -278,8 +279,8 @@ func TestHierarchyCommand(t *testing.T) {
 	os.Stdout, _ = os.Open(os.DevNull)
 	defer func() { os.Stdout = oldStdout }()
 
-	// hierarchy should work without args (not yet implemented, just prints)
-	err := app.Run([]string{"test-app", "hierarchy"})
+	// The mock driver makes this deterministic regardless of connected devices.
+	err := app.Run([]string{"test-app", "--platform", "mock", "hierarchy"})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -292,14 +293,61 @@ func TestHierarchyCommand_WithCompact(t *testing.T) {
 		Commands: []*cli.Command{hierarchyCommand},
 	}
 
-	// Capture stdout to suppress output
 	oldStdout := os.Stdout
-	os.Stdout, _ = os.Open(os.DevNull)
-	defer func() { os.Stdout = oldStdout }()
+	reader, writer, _ := os.Pipe()
+	os.Stdout = writer
+	defer func() { os.Stdout = oldStdout; reader.Close() }()
 
-	err := app.Run([]string{"test-app", "hierarchy", "--compact"})
+	err := app.Run([]string{"test-app", "--platform", "mock", "hierarchy", "--compact"})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+	writer.Close()
+	output, _ := io.ReadAll(reader)
+	got := string(output)
+	// Compact output is a flat, indented listing — not JSON braces.
+	if strings.Contains(got, "{") {
+		t.Errorf("compact output should not contain JSON braces:\n%s", got)
+	}
+	for _, expected := range []string{"Button", "id=mock-element", `text="Mock Element"`} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("compact output missing %q\nfull output:\n%s", expected, got)
+		}
+	}
+}
+
+func TestHierarchyCommand_WithMock(t *testing.T) {
+	app := &cli.App{
+		Name:     "test-app",
+		Flags:    GlobalFlags,
+		Commands: []*cli.Command{hierarchyCommand},
+	}
+
+	// Capture stdout for validation
+	oldStdout := os.Stdout
+	reader, writer, _ := os.Pipe()
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = oldStdout
+		reader.Close()
+	}()
+
+	err := app.Run([]string{"test-app", "--platform", "mock", "hierarchy"})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	writer.Close()
+	output, _ := io.ReadAll(reader)
+	response := string(output)
+	// Mock driver emits a static JSON response, check for a handful of text snippets
+	for _, expected := range []string{
+		`"type": "View"`,
+		`"id": "mock-element"`,
+		`"text": "Mock Element"`,
+	} {
+		if !strings.Contains(response, expected) {
+			t.Errorf("hierarchy output missing %q\nfull output:\n%s", expected, response)
+		}
 	}
 }
 
@@ -575,9 +623,11 @@ func TestHierarchyCommand_WithDevice(t *testing.T) {
 	os.Stdout, _ = os.Open(os.DevNull)
 	defer func() { os.Stdout = oldStdout }()
 
+	// A non-existent device must now surface an error (the command no longer
+	// swallows failures and exits 0).
 	err := app.Run([]string{"test-app", "--device", "emulator-5554", "hierarchy"})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
+	if err == nil {
+		t.Error("expected an error for a non-existent device, got nil")
 	}
 }
 
@@ -690,7 +740,7 @@ func TestLoadCapabilities_InvalidJSON(t *testing.T) {
 
 	_, err := loadCapabilities(capsFile)
 	if err == nil {
-		t.Error("expected error for invalid JSON")
+		t.Fatal("expected error for invalid JSON")
 	}
 	if !strings.Contains(err.Error(), "failed to parse caps JSON") {
 		t.Errorf("expected parse error, got: %v", err)
@@ -700,7 +750,7 @@ func TestLoadCapabilities_InvalidJSON(t *testing.T) {
 func TestLoadCapabilities_FileNotFound(t *testing.T) {
 	_, err := loadCapabilities("/nonexistent/caps.json")
 	if err == nil {
-		t.Error("expected error for nonexistent file")
+		t.Fatal("expected error for nonexistent file")
 	}
 	if !strings.Contains(err.Error(), "failed to read caps file") {
 		t.Errorf("expected read error, got: %v", err)
@@ -1580,7 +1630,7 @@ func TestExecuteFlowsWithMode_AppiumParallel(t *testing.T) {
 	testFlows := []flow.Flow{{}, {}} // need flows so min(parallel, flows) > 0
 	_, err := executeFlowsWithMode(cfg, testFlows, true, []string{"appium-1", "appium-2"})
 	if err == nil {
-		t.Error("expected error for parallel Appium with no server URL")
+		t.Fatal("expected error for parallel Appium with no server URL")
 	}
 	// Should fail on session creation (no AppiumURL), not on "not supported"
 	if strings.Contains(err.Error(), "not yet supported") {
@@ -2195,7 +2245,7 @@ func TestHandleDeviceStartup_EmulatorFlagOnIOS(t *testing.T) {
 
 	err := handleDeviceStartup(cfg, emulatorMgr, simulatorMgr)
 	if err == nil {
-		t.Error("expected error when --start-emulator is used with --platform ios")
+		t.Fatal("expected error when --start-emulator is used with --platform ios")
 	}
 	if !strings.Contains(err.Error(), "--start-emulator is for Android") {
 		t.Errorf("expected mismatch error message, got: %v", err)
@@ -2212,7 +2262,7 @@ func TestHandleDeviceStartup_SimulatorFlagOnAndroid(t *testing.T) {
 
 	err := handleDeviceStartup(cfg, emulatorMgr, simulatorMgr)
 	if err == nil {
-		t.Error("expected error when --start-simulator is used with --platform android")
+		t.Fatal("expected error when --start-simulator is used with --platform android")
 	}
 	if !strings.Contains(err.Error(), "--start-simulator is for iOS") {
 		t.Errorf("expected mismatch error message, got: %v", err)
@@ -2229,7 +2279,7 @@ func TestHandleDeviceStartup_SimulatorFlagOnDefaultPlatform(t *testing.T) {
 
 	err := handleDeviceStartup(cfg, emulatorMgr, simulatorMgr)
 	if err == nil {
-		t.Error("expected error when --start-simulator is used without --platform ios")
+		t.Fatal("expected error when --start-simulator is used without --platform ios")
 	}
 	if !strings.Contains(err.Error(), "--start-simulator is for iOS") {
 		t.Errorf("expected mismatch error message, got: %v", err)
@@ -2299,7 +2349,7 @@ func TestActiveCleanup_NilSafeInSignalHandler(t *testing.T) {
 func TestAutoDetectDevices_InvalidCount(t *testing.T) {
 	_, err := autoDetectDevices("android", 0)
 	if err == nil {
-		t.Error("expected error for count=0")
+		t.Fatal("expected error for count=0")
 	}
 	if !strings.Contains(err.Error(), "device count must be positive") {
 		t.Errorf("unexpected error: %v", err)
@@ -2314,7 +2364,7 @@ func TestAutoDetectDevices_InvalidCount(t *testing.T) {
 func TestAutoDetectDevices_UnsupportedPlatform(t *testing.T) {
 	_, err := autoDetectDevices("web", 1)
 	if err == nil {
-		t.Error("expected error for unsupported platform")
+		t.Fatal("expected error for unsupported platform")
 	}
 	if !strings.Contains(err.Error(), "unsupported platform for auto-detection") {
 		t.Errorf("unexpected error: %v", err)
@@ -2405,5 +2455,35 @@ func TestIOSTargetsSimulator(t *testing.T) {
 				t.Errorf("iosTargetsSimulator() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- #121: --parallel shortage hints must match the platform ---
+
+func TestBuildParallelDeviceError_IOSGetsSimulatorHints(t *testing.T) {
+	cfg := &RunConfig{Parallel: 2, Platform: "ios"}
+	msg := buildParallelDeviceError(cfg, 1).Error()
+
+	for _, banned := range []string{"AVD", "avdmanager", "emulator -avd"} {
+		if strings.Contains(msg, banned) {
+			t.Errorf("iOS hint must not mention %q, got:\n%s", banned, msg)
+		}
+	}
+	for _, want := range []string{"simulator", "--auto-start-emulator", "iOS device(s)"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("iOS hint should mention %q, got:\n%s", want, msg)
+		}
+	}
+}
+
+func TestBuildParallelDeviceError_AndroidKeepsAVDHints(t *testing.T) {
+	cfg := &RunConfig{Parallel: 2, Platform: "android"}
+	msg := buildParallelDeviceError(cfg, 0).Error()
+
+	if strings.Contains(msg, "simctl") {
+		t.Errorf("Android hint must not mention simctl, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "AVD") {
+		t.Errorf("Android hint should mention AVDs, got:\n%s", msg)
 	}
 }

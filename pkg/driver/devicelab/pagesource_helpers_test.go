@@ -43,12 +43,12 @@ func TestMatchesID(t *testing.T) {
 		pattern, id string
 		want        bool
 	}{
-		{"button", "com.app:id/button", true},               // substring fallback
-		{"^com\\.app", "com.app:id/foo", true},              // regex
-		{"^com\\.app", "com.example:id/foo", false},         // regex no match
-		{"((", "com.app:id/((stuff", true},                  // invalid regex → substring fallback
-		{"((", "no match here", false},                      // invalid regex + no substring
-		{"\\d+", "foo123bar", true},                         // regex with digits
+		{"button", "com.app:id/button", true},       // substring fallback
+		{"^com\\.app", "com.app:id/foo", true},      // regex
+		{"^com\\.app", "com.example:id/foo", false}, // regex no match
+		{"((", "com.app:id/((stuff", true},          // invalid regex → substring fallback
+		{"((", "no match here", false},              // invalid regex + no substring
+		{"\\d+", "foo123bar", true},                 // regex with digits
 	}
 	for _, c := range cases {
 		if got := matchesID(c.pattern, c.id); got != c.want {
@@ -59,9 +59,9 @@ func TestMatchesID(t *testing.T) {
 
 func TestMatchesText(t *testing.T) {
 	cases := []struct {
-		name                          string
-		pattern, text, content, hint  string
-		want                          bool
+		name                         string
+		pattern, text, content, hint string
+		want                         bool
 	}{
 		{"literal text match", "Login", "Login Button", "", "", true},
 		{"literal case-insensitive", "LOGIN", "login button", "", "", true},
@@ -112,10 +112,10 @@ func TestIsInside(t *testing.T) {
 func TestFilterBelow(t *testing.T) {
 	anchor := makeElement(0, 100, 50, 50, 0) // bottom = 150
 	elements := []*ParsedElement{
-		makeElement(0, 50, 10, 10, 0),   // above anchor
-		makeElement(0, 150, 10, 10, 0),  // flush at anchor bottom — below
-		makeElement(0, 200, 10, 10, 0),  // further below
-		makeElement(0, 130, 10, 10, 0),  // overlaps anchor — not strictly below
+		makeElement(0, 50, 10, 10, 0),  // above anchor
+		makeElement(0, 150, 10, 10, 0), // flush at anchor bottom — below
+		makeElement(0, 200, 10, 10, 0), // further below
+		makeElement(0, 130, 10, 10, 0), // overlaps anchor — not strictly below
 	}
 	got := FilterBelow(elements, anchor)
 	if len(got) != 2 {
@@ -286,9 +286,9 @@ func TestSortByDistanceYReverse(t *testing.T) {
 	// Reverse: sort by (refY - elem.Bottom), closest-to-anchor first means
 	// highest bottom first (i.e. element nearest above the anchor).
 	elems := []*ParsedElement{
-		makeElement(0, 0, 10, 50, 0),   // bottom = 50
-		makeElement(0, 0, 10, 90, 0),   // bottom = 90 — closest
-		makeElement(0, 0, 10, 10, 0),   // bottom = 10 — farthest
+		makeElement(0, 0, 10, 50, 0), // bottom = 50
+		makeElement(0, 0, 10, 90, 0), // bottom = 90 — closest
+		makeElement(0, 0, 10, 10, 0), // bottom = 10 — farthest
 	}
 	sortByDistanceYReverse(elems, 100)
 	if elems[0].Bounds.Height != 90 {
@@ -313,9 +313,9 @@ func TestSortByDistanceX(t *testing.T) {
 
 func TestSortByDistanceXReverse(t *testing.T) {
 	elems := []*ParsedElement{
-		makeElement(0, 0, 50, 10, 0),  // right = 50
-		makeElement(0, 0, 90, 10, 0),  // right = 90 — closest to anchorLeft=100
-		makeElement(0, 0, 10, 10, 0),  // right = 10
+		makeElement(0, 0, 50, 10, 0), // right = 50
+		makeElement(0, 0, 90, 10, 0), // right = 90 — closest to anchorLeft=100
+		makeElement(0, 0, 10, 10, 0), // right = 10
 	}
 	sortByDistanceXReverse(elems, 100)
 	if elems[0].Bounds.Width != 90 {
@@ -566,5 +566,85 @@ func TestGetClickableElement(t *testing.T) {
 	deadend := &ParsedElement{Clickable: false}
 	if e := GetClickableElement(deadend); e != deadend {
 		t.Error("no clickable parent → return original")
+	}
+}
+
+func TestCountDisplayedMatches(t *testing.T) {
+	elements := []*ParsedElement{
+		{ResourceID: "com.app:id/row", Text: "Row", Displayed: true},
+		{ResourceID: "com.app:id/row", Text: "Row", Displayed: true},
+		{ResourceID: "com.app:id/row", Text: "Row", Displayed: false}, // off-pane, must not count
+		{ResourceID: "com.app:id/other", Text: "Other", Displayed: true},
+	}
+
+	if got := CountDisplayedMatches(elements, flow.Selector{ID: "com.app:id/row"}); got != 2 {
+		t.Errorf("CountDisplayedMatches(id=row) = %d, want 2", got)
+	}
+	if got := CountDisplayedMatches(elements, flow.Selector{Text: "Row"}); got != 2 {
+		t.Errorf("CountDisplayedMatches(text=Row) = %d, want 2", got)
+	}
+	if got := CountDisplayedMatches(elements, flow.Selector{ID: "com.app:id/missing"}); got != 0 {
+		t.Errorf("CountDisplayedMatches(missing id) = %d, want 0", got)
+	}
+}
+
+// TestParsePageSourceHintAttributeSpellings pins that both attribute names
+// reach HintText. The on-device agent emits "hint-text"; the Appium UIA2
+// server emits "hint". Parsing only "hint" left HintText permanently empty on
+// this driver.
+func TestParsePageSourceHintAttributeSpellings(t *testing.T) {
+	tests := []struct {
+		name string
+		xml  string
+		want string
+	}{
+		{
+			name: "agent spelling hint-text",
+			xml:  `<hierarchy><node class="android.widget.EditText" hint-text="Username" text="typed" bounds="[0,0][100,50]"/></hierarchy>`,
+			want: "Username",
+		},
+		{
+			name: "uia2 server spelling hint",
+			xml:  `<hierarchy><node class="android.widget.EditText" hint="Username" text="typed" bounds="[0,0][100,50]"/></hierarchy>`,
+			want: "Username",
+		},
+		{
+			name: "absent leaves it empty",
+			xml:  `<hierarchy><node class="android.widget.EditText" text="typed" bounds="[0,0][100,50]"/></hierarchy>`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			elems, err := ParsePageSource(tt.xml)
+			if err != nil {
+				t.Fatalf("ParsePageSource: %v", err)
+			}
+			if len(elems) == 0 {
+				t.Fatal("no elements parsed")
+			}
+			var got string
+			for _, e := range elems {
+				if e.HintText != "" {
+					got = e.HintText
+					break
+				}
+			}
+			if got != tt.want {
+				t.Errorf("HintText = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatchesTextFindsHintOnceFieldHasText covers why the bug stayed hidden:
+// matching by hint only matters when `text` holds something else. An empty
+// field reports its hint as text, so every selector still resolved.
+func TestMatchesTextFindsHintOnceFieldHasText(t *testing.T) {
+	if !matchesText("Username", "typed-value", "", "Username") {
+		t.Error("expected hint to match when text differs")
+	}
+	if !matchesText("typed-value", "typed-value", "", "Username") {
+		t.Error("expected text to still match")
 	}
 }

@@ -3,6 +3,8 @@ package wda
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1593,6 +1595,80 @@ func TestResolveRelativeSelectorContainsDescendants(t *testing.T) {
 	}
 }
 
+// mockWDAServerForRelativeDepthTest creates a server with elements that test
+// distance vs. depth selection in directional relative selectors.
+// The page source has a close TextField (depth 2) and a far-but-deeply-nested
+// Link (depth 5) below the anchor. The correct behavior is to select the closer one.
+func mockWDAServerForRelativeDepthTest() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if strings.HasSuffix(path, "/source") {
+			jsonResponse(w, map[string]interface{}{
+				"value": `<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication type="XCUIElementTypeApplication" name="TestApp" enabled="true" visible="true" x="0" y="0" width="390" height="844">
+    <XCUIElementTypeStaticText type="XCUIElementTypeStaticText" label="Email Address" enabled="true" visible="true" x="50" y="100" width="290" height="30"/>
+    <XCUIElementTypeTextField type="XCUIElementTypeTextField" label="email input" enabled="true" visible="true" x="50" y="140" width="290" height="40"/>
+    <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" visible="true" x="50" y="300" width="290" height="100">
+      <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" visible="true" x="50" y="300" width="290" height="100">
+        <XCUIElementTypeOther type="XCUIElementTypeOther" enabled="true" visible="true" x="50" y="300" width="290" height="100">
+          <XCUIElementTypeLink type="XCUIElementTypeLink" label="deep link" enabled="true" visible="true" x="50" y="350" width="290" height="30"/>
+        </XCUIElementTypeOther>
+      </XCUIElementTypeOther>
+    </XCUIElementTypeOther>
+  </XCUIElementTypeApplication>
+</AppiumAUT>`,
+			})
+			return
+		}
+
+		if strings.Contains(path, "/window/size") {
+			jsonResponse(w, map[string]interface{}{
+				"value": map[string]interface{}{"width": 390.0, "height": 844.0},
+			})
+			return
+		}
+
+		jsonResponse(w, map[string]interface{}{"status": 0})
+	}))
+}
+
+// TestResolveRelativeSelectorPrefersClosestOverDeepest verifies that directional
+// relative selectors (below/above/leftOf/rightOf) pick the closest element by
+// distance rather than the deepest in the DOM. This matches Maestro's
+// .firstOrNull() behavior on the distance-sorted candidate list.
+func TestResolveRelativeSelectorPrefersClosestOverDeepest(t *testing.T) {
+	server := mockWDAServerForRelativeDepthTest()
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	source, _ := driver.client.Source()
+	elements, _ := ParsePageSource(source)
+
+	sel := flow.Selector{
+		Below: &flow.Selector{Text: "Email Address"},
+	}
+
+	info, err := driver.resolveRelativeSelector(sel, elements)
+	if err != nil {
+		t.Fatalf("Expected success, got: %v", err)
+	}
+	if info == nil {
+		t.Fatal("Expected element info")
+	}
+
+	// The closest element below "Email Address" (bottom at y=130) is the
+	// TextField at y=140, not the deeply-nested Link at y=350 (depth 5).
+	if info.Text != "email input" {
+		t.Errorf("Expected closest element 'email input', got '%s'", info.Text)
+	}
+	if info.Bounds.Y != 140 {
+		t.Errorf("Expected element at y=140, got y=%d", info.Bounds.Y)
+	}
+}
+
 // TestEraseTextWithActiveElement tests eraseText with active element
 func TestEraseTextWithActiveElement(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2463,6 +2539,15 @@ func TestInputTextWithSelectorNoElementID(t *testing.T) {
     <XCUIElementTypeTextField type="XCUIElementTypeTextField" label="Email" enabled="true" visible="true" x="50" y="200" width="290" height="44"/>
   </XCUIElementTypeApplication>
 </AppiumAUT>`,
+			})
+			return
+		}
+
+		// The tap focuses the field, so the active-element probe finds it.
+		if strings.HasSuffix(path, "/element/active") {
+			jsonResponse(w, map[string]interface{}{
+				"status": 0,
+				"value":  map[string]interface{}{"ELEMENT": "elem-focused"},
 			})
 			return
 		}
@@ -4524,6 +4609,14 @@ func TestInputTextAppendMode(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// A text field holds focus, which is the state inputText runs in.
+		if strings.HasSuffix(r.URL.Path, "/element/active") {
+			jsonResponse(w, map[string]interface{}{
+				"status": 0,
+				"value":  map[string]interface{}{"ELEMENT": "elem-focused"},
+			})
+			return
+		}
 		jsonResponse(w, map[string]interface{}{"status": 0})
 	}))
 	defer server.Close()
@@ -4581,7 +4674,7 @@ func TestParseResponseWDAErrorNoMessage(t *testing.T) {
 
 	_, err := client.get("/test")
 	if err == nil {
-		t.Error("Expected error")
+		t.Fatal("Expected error")
 	}
 	if !strings.Contains(err.Error(), "simple error") {
 		t.Errorf("Expected error to contain 'simple error', got: %s", err)
@@ -5439,6 +5532,14 @@ func TestInputTextWithUnicodeChars(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// A text field holds focus, which is the state inputText runs in.
+		if strings.HasSuffix(r.URL.Path, "/element/active") {
+			jsonResponse(w, map[string]interface{}{
+				"status": 0,
+				"value":  map[string]interface{}{"ELEMENT": "elem-focused"},
+			})
+			return
+		}
 		jsonResponse(w, map[string]interface{}{"status": 0})
 	}))
 	defer server.Close()
@@ -5986,5 +6087,66 @@ func TestPrepareForFlow_NoLaunchApp(t *testing.T) {
 	d.PrepareForFlow([]flow.Step{&flow.TapOnStep{}, &flow.BackStep{}})
 	if d.alertAction != "" {
 		t.Errorf("alertAction = %q, want empty (no launchApp = no monitor)", d.alertAction)
+	}
+}
+
+// TestFindElementByWDA_ExactIDBeforeContains verifies that a literal id
+// selector issues an exact `name == 'id'` class-chain query before falling
+// back to `name CONTAINS 'id'`, so a substring superset id can't win (#128).
+func TestFindElementByWDA_ExactIDBeforeContains(t *testing.T) {
+	var queries []string
+	server := mockWDAServer(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/element") && r.Method == "POST" {
+			body, _ := io.ReadAll(r.Body)
+			var req map[string]interface{}
+			_ = json.Unmarshal(body, &req)
+			if using, _ := req["using"].(string); using == "class chain" {
+				queries = append(queries, req["value"].(string))
+			}
+		}
+		// Return "not found" for everything — we only care about query order.
+		w.WriteHeader(http.StatusNotFound)
+		jsonResponse(w, map[string]interface{}{"value": map[string]interface{}{"error": "no such element"}})
+	})
+	defer server.Close()
+
+	d := &Driver{client: NewClient(8100), info: &core.PlatformInfo{Platform: "ios"}}
+	d.client.baseURL = server.URL
+	d.client.sessionID = "s1"
+
+	_, _ = d.findElementByWDA(flow.Selector{ID: "enriched-text"})
+
+	if len(queries) < 2 {
+		t.Fatalf("expected at least 2 class-chain queries (exact + contains), got %v", queries)
+	}
+	if !strings.Contains(queries[0], "name == 'enriched-text'") {
+		t.Errorf("first query should be exact match, got: %s", queries[0])
+	}
+	if !strings.Contains(queries[1], "name CONTAINS 'enriched-text'") {
+		t.Errorf("second query should be CONTAINS fallback, got: %s", queries[1])
+	}
+}
+
+// TestInputTextFailsWhenNothingTakesFocus pins the focus gate. Previously the
+// active-element poll ran, was ignored, and the keys were sent regardless — so
+// text could land somewhere other than the field the flow named while the step
+// still reported success. That is the iOS shape of the Android keyPress
+// misdirection in #139.
+func TestInputTextFailsWhenNothingTakesFocus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// /element/active never yields an ELEMENT: nothing has focus.
+		jsonResponse(w, map[string]interface{}{"status": 0})
+	}))
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	result := driver.inputText(&flow.InputTextStep{Text: "Hello World"})
+
+	if result.Success {
+		t.Fatal("expected inputText to fail when nothing took keyboard focus")
+	}
+	if !strings.Contains(result.Message, "keyboard focus") {
+		t.Errorf("error should name the missing focus, got %q", result.Message)
 	}
 }

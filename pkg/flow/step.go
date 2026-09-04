@@ -3,6 +3,8 @@ package flow
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,6 +19,7 @@ const (
 	StepDoubleTapOn        StepType = "doubleTapOn"
 	StepLongPressOn        StepType = "longPressOn"
 	StepTapOnPoint         StepType = "tapOnPoint"
+	StepDragAndDrop        StepType = "dragAndDrop"
 	StepSwipe              StepType = "swipe"
 	StepScroll             StepType = "scroll"
 	StepScrollUntilVisible StepType = "scrollUntilVisible"
@@ -61,6 +64,10 @@ const (
 	StepSetOrientation     StepType = "setOrientation"
 	StepSetAirplaneMode    StepType = "setAirplaneMode"
 	StepToggleAirplaneMode StepType = "toggleAirplaneMode"
+	StepSetDarkMode        StepType = "setDarkMode"
+	StepToggleDarkMode     StepType = "toggleDarkMode"
+	StepAssertDarkMode     StepType = "assertDarkMode"
+	StepAssertLightMode    StepType = "assertLightMode"
 	StepTravel             StepType = "travel"
 	StepOpenLink           StepType = "openLink"
 	StepOpenBrowser        StepType = "openBrowser"
@@ -70,11 +77,12 @@ const (
 	StepRetry             StepType = "retry"
 	StepRunFlow           StepType = "runFlow"
 	StepRunScript         StepType = "runScript"
+	StepRunShell          StepType = "runShell"
 	StepEvalScript        StepType = "evalScript"
-	StepEvalBrowserScript  StepType = "evalBrowserScript"
-	StepRunBrowserScript   StepType = "runBrowserScript"
-	StepEvalWebViewScript  StepType = "evalWebViewScript"
-	StepRunWebViewScript   StepType = "runWebViewScript"
+	StepEvalBrowserScript StepType = "evalBrowserScript"
+	StepRunBrowserScript  StepType = "runBrowserScript"
+	StepEvalWebViewScript StepType = "evalWebViewScript"
+	StepRunWebViewScript  StepType = "runWebViewScript"
 	StepGetConsoleLogs    StepType = "getConsoleLogs"
 	StepClearConsoleLogs  StepType = "clearConsoleLogs"
 	StepAssertNoJSErrors  StepType = "assertNoJSErrors"
@@ -104,11 +112,12 @@ const (
 	StepClearNetworkMocks    StepType = "clearNetworkMocks"
 
 	// Media
-	StepTakeScreenshot StepType = "takeScreenshot"
-	StepStartRecording StepType = "startRecording"
-	StepStopRecording  StepType = "stopRecording"
-	StepAddMedia       StepType = "addMedia"
-	StepRemoveMedia    StepType = "removeMedia"
+	StepTakeScreenshot   StepType = "takeScreenshot"
+	StepAssertScreenshot StepType = "assertScreenshot"
+	StepStartRecording   StepType = "startRecording"
+	StepStopRecording    StepType = "stopRecording"
+	StepAddMedia         StepType = "addMedia"
+	StepRemoveMedia      StepType = "removeMedia"
 
 	// Queries
 	StepIsKeyboardVisible StepType = "isKeyboardVisible"
@@ -126,6 +135,9 @@ type Step interface {
 	IsOptional() bool
 	Label() string
 	Describe() string
+	// PlatformGate returns the platform this step is restricted to
+	// ("ios"/"android"/"web", lowercased) or "" to run on all platforms.
+	PlatformGate() string
 }
 
 // BaseStep contains common fields for all steps.
@@ -134,7 +146,13 @@ type BaseStep struct {
 	Optional  bool     `yaml:"optional" json:"optional,omitempty"`
 	StepLabel string   `yaml:"label" json:"label,omitempty"`
 	TimeoutMs int      `yaml:"timeout" json:"timeout,omitempty"`
+	// Platform restricts this step to a single platform; when set and it
+	// doesn't match the running driver, the step is skipped (Maestro #1353).
+	Platform string `yaml:"platform" json:"platform,omitempty"`
 }
+
+// PlatformGate returns the step's platform restriction, lowercased, or "".
+func (b *BaseStep) PlatformGate() string { return strings.ToLower(strings.TrimSpace(b.Platform)) }
 
 // Type returns the step type.
 func (b *BaseStep) Type() StepType { return b.StepType }
@@ -204,6 +222,26 @@ type TapOnPointStep struct {
 // `from:` YAML key (matching upstream Maestro syntax) or the historical
 // `selector:` key. Custom `UnmarshalYAML` handles the mapping — both keys
 // resolve to the same field, with `from:` taking precedence if both are set.
+// DragAndDropStep long-presses one element (or point) and drags it to another,
+// the way list-reorder and drag-handle UIs expect: press, hold until the item
+// lifts, move, settle, release.
+type DragAndDropStep struct {
+	BaseStep `yaml:",inline"`
+	From     Selector `yaml:"from"` // what to pick up — selector or point
+	To       Selector `yaml:"to"`   // where to drop it — selector or point
+	// HoldDuration is how long to press before moving (ms). Reorder UIs lift
+	// the item only after a long press, so the default is a full second.
+	HoldDuration int `yaml:"holdDuration"`
+	// Duration is how long the movement itself takes (ms). Drag targets track
+	// the finger, so moving too fast skips drop zones; default one second.
+	Duration int `yaml:"duration"`
+}
+
+// Describe returns a human-readable description of the drag step.
+func (s *DragAndDropStep) Describe() string {
+	return "dragAndDrop: " + s.From.DescribeQuoted() + " → " + s.To.DescribeQuoted()
+}
+
 type SwipeStep struct {
 	BaseStep              `yaml:",inline" json:",inline"`
 	Direction             string    `yaml:"direction" json:"direction,omitempty"` // UP, DOWN, LEFT, RIGHT
@@ -216,6 +254,7 @@ type SwipeStep struct {
 	EndY                  int       `yaml:"endY" json:"endY,omitempty"`         // Absolute Y end
 	Duration              int       `yaml:"duration" json:"duration,omitempty"` // Duration in ms
 	Speed                 int       `yaml:"speed" json:"speed,omitempty"`       // Speed 0-100
+	Distance              float64   `yaml:"distance" json:"distance,omitempty"` // Fraction of screen (0-1) for direction swipes; 0 = default
 	WaitToSettleTimeoutMs int       `yaml:"waitToSettleTimeoutMs" json:"waitToSettleTimeoutMs,omitempty"`
 }
 
@@ -263,6 +302,10 @@ type ScrollStep struct {
 type ScrollUntilVisibleStep struct {
 	BaseStep              `yaml:",inline" json:",inline"`
 	Element               Selector `yaml:"element" json:"element"`
+	// From restricts the scroll gesture to one container, for a screen with an
+	// inner list or a horizontal carousel that a full-width swipe would miss.
+	// Empty means scroll the screen, which is the usual case.
+	From                  Selector `yaml:"from" json:"from,omitempty"`
 	Direction             string   `yaml:"direction" json:"direction,omitempty"`
 	MaxScrolls            int      `yaml:"maxScrolls" json:"maxScrolls,omitempty"` // Legacy: max scroll attempts
 	Speed                 int      `yaml:"speed" json:"speed,omitempty"`
@@ -356,6 +399,28 @@ type SetClipboardStep struct {
 type AssertVisibleStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
 	Selector Selector `yaml:",inline" json:"selector"`
+	// Count asserts that the selector matches exactly N visible elements
+	// (Maestro #1363). A string so flows can write `count: ${N}`; empty means
+	// the ordinary at-least-one assertion.
+	Count string `yaml:"count" json:"count,omitempty"`
+}
+
+// ExpectedCount resolves the step's count assertion. Returns (0, false, nil)
+// when no count was requested. The value must be a positive integer once
+// variables are expanded — zero would silently shadow assertNotVisible, and
+// anything unparseable is a flow bug worth failing loudly on.
+func (s *AssertVisibleStep) ExpectedCount() (int, bool, error) {
+	if s.Count == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s.Count))
+	if err != nil {
+		return 0, false, fmt.Errorf("assertVisible count: %q is not a number", s.Count)
+	}
+	if n < 1 {
+		return 0, false, fmt.Errorf("assertVisible count: must be at least 1 (got %d) — use assertNotVisible to assert absence", n)
+	}
+	return n, true, nil
 }
 
 // AssertNotVisibleStep asserts element is not visible.
@@ -516,6 +581,32 @@ type ToggleAirplaneModeStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
 }
 
+// SetDarkModeStep switches the system UI between dark and light appearance.
+//
+// Mirrors SetAirplaneModeStep: YAML accepts a bool (`enabled: true`) or a
+// string carrying a variable (`enabled: ${DARK}`), with EnabledRaw holding the
+// raw scalar until the executor's expansion pass resolves it.
+type SetDarkModeStep struct {
+	BaseStep   `yaml:",inline"`
+	Enabled    bool `yaml:"-"`
+	EnabledRaw any  `yaml:"enabled"`
+}
+
+// ToggleDarkModeStep flips the current appearance.
+type ToggleDarkModeStep struct {
+	BaseStep `yaml:",inline"`
+}
+
+// AssertDarkModeStep asserts the system UI is currently in dark appearance.
+type AssertDarkModeStep struct {
+	BaseStep `yaml:",inline"`
+}
+
+// AssertLightModeStep asserts the system UI is currently in light appearance.
+type AssertLightModeStep struct {
+	BaseStep `yaml:",inline"`
+}
+
 // TravelStep simulates travel.
 type TravelStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
@@ -578,6 +669,26 @@ type RunScriptStep struct {
 	Script   string            `yaml:"script" json:"script,omitempty"` // Script content or filename (string form)
 	File     string            `yaml:"file" json:"file,omitempty"`     // Script filename (map form)
 	Env      map[string]string `yaml:"env" json:"env,omitempty"`
+}
+
+// RunShellStep runs a command on the machine driving the test — the host, not
+// the device. That is what makes it useful: it is the escape hatch for adb,
+// simctl, xcrun and the rest of the platform tooling a flow occasionally needs
+// and the runner deliberately does not wrap.
+type RunShellStep struct {
+	BaseStep `yaml:",inline"`
+	// Command is the shell command line. Handed to `sh -c`, so pipes,
+	// redirection and quoting all work as written.
+	Command string `yaml:"command"`
+	// Output names a flow variable to receive the command's trimmed stdout,
+	// making it available to later steps as ${NAME}.
+	Output string `yaml:"output"`
+	// Env adds variables to the command's environment, on top of the runner's
+	// own and the MAESTRO_* values describing the device under test.
+	//
+	// `timeout` comes from BaseStep and bounds the command; it defaults to 30s
+	// here, because a hung shell call must not hang the run.
+	Env map[string]string `yaml:"env"`
 }
 
 // ScriptPath returns the script path (either Script or File field).
@@ -800,6 +911,20 @@ type TakeScreenshotStep struct {
 	CropOn   *Selector `yaml:"cropOn,omitempty"`
 }
 
+// AssertScreenshotStep compares a screenshot with a reference image.
+//
+// ThresholdRaw captures the raw `thresholdPercentage:` value (a number, or a
+// string like "${VAR}"), while ThresholdPercentage holds the resolved float.
+// A literal number is resolved at parse time; a string is deferred to the
+// expand pass so `${VAR}` interpolation works (Maestro #3444).
+type AssertScreenshotStep struct {
+	BaseStep            `yaml:",inline"`
+	Path                string    `yaml:"path"`
+	CropOn              *Selector `yaml:"cropOn,omitempty"`
+	ThresholdPercentage float64   `yaml:"-"`
+	ThresholdRaw        any       `yaml:"thresholdPercentage,omitempty"`
+}
+
 // StartRecordingStep starts recording.
 type StartRecordingStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
@@ -900,6 +1025,9 @@ func (s *LongPressOnStep) Describe() string {
 
 // Describe returns a human-readable description of the assert visible step.
 func (s *AssertVisibleStep) Describe() string {
+	if s.Count != "" {
+		return "assertVisible: " + s.Selector.DescribeQuoted() + " (count: " + s.Count + ")"
+	}
 	return "assertVisible: " + s.Selector.DescribeQuoted()
 }
 

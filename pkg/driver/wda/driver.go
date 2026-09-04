@@ -11,6 +11,7 @@ import (
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
+	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
 
 // Driver implements core.Driver using WebDriverAgent for iOS.
@@ -18,6 +19,9 @@ type Driver struct {
 	client *Client
 	info   *core.PlatformInfo
 	udid   string // Device UDID for simctl commands
+
+	// In-flight --record capture (simulators only)
+	recording *simulator.Recording
 
 	// Parent context for element-finding operations (nil = context.Background())
 	ctx context.Context
@@ -227,6 +231,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.longPressOn(s)
 	case *flow.TapOnPointStep:
 		result = d.tapOnPoint(s)
+	case *flow.DragAndDropStep:
+		result = d.dragAndDrop(s)
 
 	// Assert commands
 	case *flow.AssertVisibleStep:
@@ -297,10 +303,22 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.waitForAnimationToEnd(s)
 
 	// Media
+	case *flow.AddMediaStep:
+		result = d.addMedia(s)
 	case *flow.TakeScreenshotStep:
 		result = d.takeScreenshot(s)
+	case *flow.AssertScreenshotStep:
+		result = d.takeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
 
 	// Airplane mode
+	case *flow.SetDarkModeStep:
+		result = d.setDarkMode(s)
+	case *flow.ToggleDarkModeStep:
+		result = d.toggleDarkMode(s)
+	case *flow.AssertDarkModeStep:
+		result = d.assertDarkMode(s)
+	case *flow.AssertLightModeStep:
+		result = d.assertLightMode(s)
 	case *flow.SetAirplaneModeStep:
 		result = d.setAirplaneMode(s)
 	case *flow.ToggleAirplaneModeStep:
@@ -535,6 +553,23 @@ func (d *Driver) findElementForTapWithContext(ctx context.Context, sel flow.Sele
 			}
 			return nil, fmt.Errorf("element '%s' not found: %w", sel.Describe(), ctx.Err())
 		default:
+			// A regex selector goes straight to page source. WDA predicates
+			// have no regex operator we can use safely: the text is
+			// interpolated into `CONTAINS[c] '...'`, so `^SIGN OUT$` asked for
+			// a literal caret and every query 404'd before the page-source path
+			// resolved it anyway — six wasted round trips per step (#151).
+			//
+			// NSPredicate does have MATCHES, but its ICU dialect is not Go's,
+			// and having two matchers disagree about what a pattern means is
+			// the bug underneath this one. One matcher decides.
+			if looksLikeRegex(sel.Text) {
+				if info, err := d.findElementByPageSourceOnce(sel); err == nil {
+					return info, nil
+				}
+				lastErr = fmt.Errorf("regex selector %q not found in page source", sel.Text)
+				continue
+			}
+
 			// Step 1: Try interactive element types first (TextField, SecureTextField, Button)
 			if info, err := d.findInteractiveElementByWDA(sel, stateFilter); err == nil {
 				return info, nil
@@ -708,6 +743,7 @@ func (d *Driver) findElementQuick(sel flow.Selector, timeoutMs int) (*core.Eleme
 // wrapper views that XCUITest can't classify as accessible but which clearly
 // contain visible content. Hidden-but-still-mounted screens (all descendants
 // invisible) are correctly excluded.
+//
 //nolint:unused
 func filterVisibleOrHostingVisible(candidates []*ParsedElement) []*ParsedElement {
 	out := candidates[:0]
@@ -777,17 +813,39 @@ func buildStateFilter(sel flow.Selector) string {
 func (d *Driver) findElementByWDA(sel flow.Selector) (*core.ElementInfo, error) {
 	stateFilter := buildStateFilter(sel)
 
+	// When BOTH an id and text are given, the single-field fast paths below each
+	// match on one field only — the id branch returns as soon as it finds an
+	// element with that id, before text is ever checked — silently degrading a
+	// combined selector to an OR (an element with the right id but wrong text
+	// would pass, or the text branch would match a different element entirely).
+	// Defer to the page-source matcher, which ANDs id + text on one element. (#130)
+	if sel.ID != "" && sel.Text != "" {
+		return nil, fmt.Errorf("combined id+text selector requires page-source AND matching")
+	}
+
 	// Try class chain for accessibility ID
 	if sel.ID != "" {
-		// Use CONTAINS for literal IDs, MATCHES for regex patterns
-		op := "CONTAINS"
 		if looksLikeRegex(sel.ID) {
-			op = "MATCHES"
-		}
-		query := fmt.Sprintf("**/XCUIElementTypeAny[`name %s '%s'%s`]", op, sel.ID, stateFilter)
-		elemID, err := d.client.FindElement("class chain", query)
-		if err == nil && elemID != "" {
-			return d.getElementInfo(elemID)
+			// Regex id: match against name via MATCHES.
+			query := fmt.Sprintf("**/XCUIElementTypeAny[`name MATCHES '%s'%s`]", sel.ID, stateFilter)
+			if elemID, err := d.client.FindElement("class chain", query); err == nil && elemID != "" {
+				return d.getElementInfo(elemID)
+			}
+		} else {
+			// Literal id: prefer an EXACT name match, then fall back to
+			// CONTAINS. Without the exact pass, `id: enriched-text` could
+			// resolve to `set-enriched-text-button` (a substring superset),
+			// since WDA returns the first class-chain hit (#128). The
+			// CONTAINS fallback preserves the lenient Maestro-compat behavior
+			// for callers that rely on partial-id matching.
+			exact := fmt.Sprintf("**/XCUIElementTypeAny[`name == '%s'%s`]", sel.ID, stateFilter)
+			if elemID, err := d.client.FindElement("class chain", exact); err == nil && elemID != "" {
+				return d.getElementInfo(elemID)
+			}
+			contains := fmt.Sprintf("**/XCUIElementTypeAny[`name CONTAINS '%s'%s`]", sel.ID, stateFilter)
+			if elemID, err := d.client.FindElement("class chain", contains); err == nil && elemID != "" {
+				return d.getElementInfo(elemID)
+			}
 		}
 	}
 
@@ -824,12 +882,12 @@ func (d *Driver) getElementInfo(elemID string) (*core.ElementInfo, error) {
 	}
 
 	var (
-		text      string
-		elemName  string
-		x, y, w, h int
-		displayed bool
+		text                               string
+		elemName                           string
+		x, y, w, h                         int
+		displayed                          bool
 		textErr, rectErr, dispErr, nameErr error
-		wg sync.WaitGroup
+		wg                                 sync.WaitGroup
 	)
 
 	wg.Add(4)
@@ -984,7 +1042,14 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 	// Prioritize clickable/interactive elements
 	candidates = SortClickableFirst(candidates)
 
-	selected := SelectByIndex(candidates, sel.Index)
+	var selected *ParsedElement
+	if sel.Index == "" && (filterType == filterBelow || filterType == filterAbove || filterType == filterLeftOf || filterType == filterRightOf) {
+		// Directional filters sort candidates by distance. Pick the closest
+		// (first) element to match Maestro's .firstOrNull() behavior.
+		selected = candidates[0]
+	} else {
+		selected = SelectByIndex(candidates, sel.Index)
+	}
 
 	info := &core.ElementInfo{
 		Text:    selected.Label,

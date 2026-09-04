@@ -182,6 +182,7 @@ func TestParse_AllStepTypes(t *testing.T) {
 		{"waitForRequest mapping", `- waitForRequest: {url: "*/api/submit", method: POST, output: reqBody}`, StepWaitForRequest},
 		{"clearNetworkMocks", `- clearNetworkMocks:`, StepClearNetworkMocks},
 		{"takeScreenshot", `- takeScreenshot: "screen.png"`, StepTakeScreenshot},
+		{"assertScreenshot", `- assertScreenshot: "screen.png"`, StepAssertScreenshot},
 		{"startRecording", `- startRecording: "video.mp4"`, StepStartRecording},
 		{"stopRecording", `- stopRecording: "video.mp4"`, StepStopRecording},
 		{"addMedia", `- addMedia: {files: ["img.png"]}`, StepAddMedia},
@@ -203,6 +204,128 @@ func TestParse_AllStepTypes(t *testing.T) {
 				t.Errorf("expected type %v, got %v", tc.stepType, flow.Steps[0].Type())
 			}
 		})
+	}
+}
+
+func TestParse_AssertScreenshotStep(t *testing.T) {
+	yaml := `
+- assertScreenshot:
+    path: screenshots/banner.png
+    cropOn:
+      id: banner
+    thresholdPercentage: 98.5
+`
+
+	parsed, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	step, ok := parsed.Steps[0].(*AssertScreenshotStep)
+	if !ok {
+		t.Fatalf("expected AssertScreenshotStep, got %T", parsed.Steps[0])
+	}
+	if step.Path != "screenshots/banner.png" {
+		t.Errorf("Path = %q, want %q", step.Path, "screenshots/banner.png")
+	}
+	if step.CropOn == nil || step.CropOn.ID != "banner" {
+		t.Errorf("CropOn = %#v, want selector with id banner", step.CropOn)
+	}
+	if step.ThresholdPercentage != 98.5 {
+		t.Errorf("ThresholdPercentage = %v, want 98.5", step.ThresholdPercentage)
+	}
+}
+
+func TestParse_AssertScreenshotStep_DefaultThreshold(t *testing.T) {
+	parsed, err := Parse([]byte(`- assertScreenshot: splash.png`), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	step, ok := parsed.Steps[0].(*AssertScreenshotStep)
+	if !ok {
+		t.Fatalf("expected AssertScreenshotStep, got %T", parsed.Steps[0])
+	}
+	if step.ThresholdPercentage != 95 {
+		t.Errorf("ThresholdPercentage = %v, want 95", step.ThresholdPercentage)
+	}
+}
+
+func TestParse_AddMediaStep_Forms(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{"bare sequence (Maestro syntax)", "- addMedia:\n    - \"./a.jpg\"\n    - \"./b.png\"", []string{"./a.jpg", "./b.png"}},
+		{"flow sequence", `- addMedia: ["a.jpg", "b.png"]`, []string{"a.jpg", "b.png"}},
+		{"single scalar path", `- addMedia: "only.jpg"`, []string{"only.jpg"}},
+		{"mapping form (historical)", `- addMedia: {files: ["m.png"]}`, []string{"m.png"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			parsed, err := Parse([]byte(c.yaml), "test.yaml")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			step, ok := parsed.Steps[0].(*AddMediaStep)
+			if !ok {
+				t.Fatalf("expected AddMediaStep, got %T", parsed.Steps[0])
+			}
+			if len(step.Files) != len(c.want) {
+				t.Fatalf("Files = %#v, want %#v", step.Files, c.want)
+			}
+			for i := range c.want {
+				if step.Files[i] != c.want[i] {
+					t.Errorf("Files[%d] = %q, want %q", i, step.Files[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParse_AssertScreenshotStep_VarThreshold(t *testing.T) {
+	// A ${VAR} threshold must parse without error (it can't decode into a
+	// float at YAML time), leaving the raw string for the expand pass. (#3444)
+	parsed, err := Parse([]byte(`
+- assertScreenshot:
+    path: banner.png
+    thresholdPercentage: ${THRESH}
+`), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step, ok := parsed.Steps[0].(*AssertScreenshotStep)
+	if !ok {
+		t.Fatalf("expected AssertScreenshotStep, got %T", parsed.Steps[0])
+	}
+	if s, _ := step.ThresholdRaw.(string); s != "${THRESH}" {
+		t.Errorf("ThresholdRaw = %#v, want %q", step.ThresholdRaw, "${THRESH}")
+	}
+	// Not resolved yet — the executor's expand pass fills this in.
+	if step.ThresholdPercentage != 0 {
+		t.Errorf("ThresholdPercentage = %v, want 0 (unresolved)", step.ThresholdPercentage)
+	}
+}
+
+func TestThresholdAsFloat(t *testing.T) {
+	cases := []struct {
+		in   any
+		want float64
+		ok   bool
+	}{
+		{float64(98.5), 98.5, true},
+		{int(90), 90, true},
+		{"87.5", 87.5, true},
+		{"  91 ", 91, true},
+		{"${VAR}", 0, false},
+		{nil, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := ThresholdAsFloat(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("ThresholdAsFloat(%#v) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }
 
@@ -1356,6 +1479,23 @@ func TestSplitYAMLDocuments(t *testing.T) {
 			content:  "   \n  \n  ",
 			expected: 0,
 		},
+		{
+			// #119: a header comment ending in "->" must not flip the
+			// splitter into multiline mode and swallow the --- separator.
+			name:     "comment ending in arrow before separator",
+			content:  "appId: com.app\n# navigation: Library ->\ntags:\n  - e2e\n---\n- launchApp",
+			expected: 2,
+		},
+		{
+			name:     "comment ending in pipe before separator",
+			content:  "appId: com.app\n# see table |\n---\n- launchApp",
+			expected: 2,
+		},
+		{
+			name:     "plain value ending in arrow before separator",
+			content:  "appId: com.app\nname: Library ->\n---\n- launchApp",
+			expected: 2,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1365,6 +1505,73 @@ func TestSplitYAMLDocuments(t *testing.T) {
 				t.Errorf("splitYAMLDocuments() returned %d parts, want %d", len(parts), tc.expected)
 			}
 		})
+	}
+}
+
+// TestParse_ArrowCommentHeader is the end-to-end regression for #119: the
+// full file from the issue report must parse with config and steps intact.
+func TestParse_ArrowCommentHeader(t *testing.T) {
+	content := `appId: com.example.app
+name: "x"
+# navigation: Library ->
+tags:
+  - e2e
+---
+- launchApp
+`
+	f, err := Parse([]byte(content), "bug.yaml")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if f.Config.AppID != "com.example.app" {
+		t.Errorf("AppID = %q, want com.example.app", f.Config.AppID)
+	}
+	if len(f.Steps) != 1 {
+		t.Errorf("got %d steps, want 1", len(f.Steps))
+	}
+}
+
+// TestParse_BareScrollDefaultsDown is the regression for #120: `- scroll`
+// with no arguments scrolls down, matching Maestro's documented default.
+func TestParse_BareScrollDefaultsDown(t *testing.T) {
+	content := "appId: com.app\n---\n- launchApp\n- scroll\n"
+	f, err := Parse([]byte(content), "scroll.yaml")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	var scroll *ScrollStep
+	for _, s := range f.Steps {
+		if ss, ok := s.(*ScrollStep); ok {
+			scroll = ss
+		}
+	}
+	if scroll == nil {
+		t.Fatal("no ScrollStep parsed")
+	}
+	if scroll.Direction != "down" {
+		t.Errorf("Direction = %q, want \"down\"", scroll.Direction)
+	}
+}
+
+func TestStartsBlockScalar(t *testing.T) {
+	cases := map[string]bool{
+		"script: |":                true,
+		"script: |-":               true,
+		"text: >":                  true,
+		"text: >-":                 true,
+		"cmd: |2":                  true,
+		"cmd: >+":                  true,
+		"# navigation: Library ->": false,
+		"# see the table |":        false,
+		"name: Library ->":         false,
+		"name: value":              false,
+		"":                         false,
+		"# comment: use |":         false,
+	}
+	for in, want := range cases {
+		if got := startsBlockScalar(in); got != want {
+			t.Errorf("startsBlockScalar(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 
@@ -1940,5 +2147,279 @@ func TestFlow_GetTestCases(t *testing.T) {
 	}
 	if testCases[1].File != "checkout.yaml" {
 		t.Errorf("testCases[1].File = %q, want 'checkout.yaml'", testCases[1].File)
+	}
+}
+
+// TestParse_StepPlatformGate verifies a step's `platform:` field parses and
+// PlatformGate() normalizes it (Maestro #1353).
+func TestParse_StepPlatformGate(t *testing.T) {
+	f, err := Parse([]byte("appId: com.app\n---\n- tapOn:\n    text: Login\n    platform: iOS\n- back\n"), "p.yaml")
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if len(f.Steps) != 2 {
+		t.Fatalf("got %d steps, want 2", len(f.Steps))
+	}
+	if g := f.Steps[0].PlatformGate(); g != "ios" {
+		t.Errorf("step 0 PlatformGate() = %q, want \"ios\"", g)
+	}
+	if g := f.Steps[1].PlatformGate(); g != "" {
+		t.Errorf("ungated step PlatformGate() = %q, want \"\"", g)
+	}
+}
+
+// TestParseDarkModeSteps covers the dark-mode commands (Maestro #2507). The
+// scalar spellings matter: `setDarkMode: dark` reads better in a flow than
+// `enabled: true`, and both must land on the same step.
+func TestParseDarkModeSteps(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		wantType StepType
+		wantOn   bool
+	}{
+		{"scalar enabled", `- setDarkMode: enabled`, StepSetDarkMode, true},
+		{"scalar dark", `- setDarkMode: dark`, StepSetDarkMode, true},
+		{"scalar disabled", `- setDarkMode: disabled`, StepSetDarkMode, false},
+		{"scalar light", `- setDarkMode: light`, StepSetDarkMode, false},
+		{"mapping true", `- setDarkMode: {enabled: true}`, StepSetDarkMode, true},
+		{"mapping false", `- setDarkMode: {enabled: false}`, StepSetDarkMode, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := Parse([]byte(tt.yaml), "test.yaml")
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if len(f.Steps) != 1 {
+				t.Fatalf("got %d steps, want 1", len(f.Steps))
+			}
+			step, ok := f.Steps[0].(*SetDarkModeStep)
+			if !ok {
+				t.Fatalf("got %T, want *SetDarkModeStep", f.Steps[0])
+			}
+			if step.Type() != tt.wantType {
+				t.Errorf("Type() = %v, want %v", step.Type(), tt.wantType)
+			}
+			if step.Enabled != tt.wantOn {
+				t.Errorf("Enabled = %v, want %v", step.Enabled, tt.wantOn)
+			}
+		})
+	}
+
+	t.Run("rejects an unknown scalar", func(t *testing.T) {
+		if _, err := Parse([]byte(`- setDarkMode: purple`), "test.yaml"); err == nil {
+			t.Error("expected an error for an unrecognised setDarkMode value")
+		}
+	})
+
+	t.Run("variable is deferred to the expansion pass", func(t *testing.T) {
+		f, err := Parse([]byte(`- setDarkMode: {enabled: "${DARK}"}`), "test.yaml")
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		step := f.Steps[0].(*SetDarkModeStep)
+		if raw, ok := step.EnabledRaw.(string); !ok || raw != "${DARK}" {
+			t.Errorf("EnabledRaw = %v, want the raw ${DARK} for later expansion", step.EnabledRaw)
+		}
+	})
+
+	for _, tc := range []struct {
+		yaml     string
+		wantType StepType
+	}{
+		{`- toggleDarkMode:`, StepToggleDarkMode},
+		{`- assertDarkMode:`, StepAssertDarkMode},
+		{`- assertLightMode:`, StepAssertLightMode},
+	} {
+		t.Run(string(tc.wantType), func(t *testing.T) {
+			f, err := Parse([]byte(tc.yaml), "test.yaml")
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if got := f.Steps[0].Type(); got != tc.wantType {
+				t.Errorf("Type() = %v, want %v", got, tc.wantType)
+			}
+		})
+	}
+}
+
+func TestParse_AssertVisibleCount(t *testing.T) {
+	yaml := `
+- assertVisible:
+    id: product-row
+    count: 3
+`
+	parsed, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step, ok := parsed.Steps[0].(*AssertVisibleStep)
+	if !ok {
+		t.Fatalf("expected AssertVisibleStep, got %T", parsed.Steps[0])
+	}
+	if step.Count != "3" {
+		t.Errorf("Count = %q, want %q", step.Count, "3")
+	}
+	n, has, err := step.ExpectedCount()
+	if err != nil || !has || n != 3 {
+		t.Errorf("ExpectedCount() = (%d, %v, %v), want (3, true, nil)", n, has, err)
+	}
+}
+
+func TestParse_AssertVisibleCount_Variable(t *testing.T) {
+	yaml := `
+- assertVisible:
+    id: row
+    count: ${ROWS}
+`
+	parsed, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("a ${VAR} count must parse (validated after expansion): %v", err)
+	}
+	step := parsed.Steps[0].(*AssertVisibleStep)
+	if step.Count != "${ROWS}" {
+		t.Errorf("Count = %q, want %q", step.Count, "${ROWS}")
+	}
+	if _, _, err := step.ExpectedCount(); err == nil {
+		t.Error("ExpectedCount on an unexpanded variable should error")
+	}
+}
+
+func TestParse_AssertVisibleCount_Invalid(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"zero":       "- assertVisible: {id: row, count: 0}",
+		"negative":   "- assertVisible: {id: row, count: -2}",
+		"not number": "- assertVisible: {id: row, count: many}",
+		"with index": "- assertVisible: {id: row, count: 2, index: 1}",
+	} {
+		if _, err := Parse([]byte(yaml), "test.yaml"); err == nil {
+			t.Errorf("%s: expected a parse error for %q", name, yaml)
+		}
+	}
+}
+
+func TestAssertVisibleStep_DescribeWithCount(t *testing.T) {
+	s := &AssertVisibleStep{Selector: Selector{ID: "row"}, Count: "3"}
+	got := s.Describe()
+	if !strings.Contains(got, "count: 3") {
+		t.Errorf("Describe() = %q, want it to mention the count", got)
+	}
+}
+
+func TestParse_DragAndDrop(t *testing.T) {
+	yaml := `
+- dragAndDrop:
+    from:
+      id: item-3
+    to:
+      point: "50%, 20%"
+    holdDuration: 800
+`
+	parsed, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s, ok := parsed.Steps[0].(*DragAndDropStep)
+	if !ok {
+		t.Fatalf("expected DragAndDropStep, got %T", parsed.Steps[0])
+	}
+	if s.From.ID != "item-3" || s.To.Point != "50%, 20%" {
+		t.Errorf("from/to = %v / %v", s.From, s.To)
+	}
+	if s.HoldDuration != 800 {
+		t.Errorf("HoldDuration = %d, want 800", s.HoldDuration)
+	}
+	if s.Duration != 1000 {
+		t.Errorf("Duration default = %d, want 1000", s.Duration)
+	}
+}
+
+func TestParse_DragAndDrop_RequiresFromAndTo(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"missing to":   "- dragAndDrop: {from: {id: a}}",
+		"missing from": "- dragAndDrop: {to: {id: b}}",
+		"empty":        "- dragAndDrop: {}",
+	} {
+		if _, err := Parse([]byte(yaml), "test.yaml"); err == nil {
+			t.Errorf("%s: expected a parse error", name)
+		}
+	}
+}
+
+func TestParseRunShellStep(t *testing.T) {
+	yamlSrc := `appId: com.example
+---
+- runShell: adb devices
+- runShell:
+    command: echo hi
+    output: GREETING
+    env:
+      NAME: value
+    timeout: 500
+`
+	f, err := Parse([]byte(yamlSrc), "test.yaml")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(f.Steps) != 2 {
+		t.Fatalf("got %d steps, want 2", len(f.Steps))
+	}
+
+	short, ok := f.Steps[0].(*RunShellStep)
+	if !ok {
+		t.Fatalf("first step is %T, want *RunShellStep", f.Steps[0])
+	}
+	if short.Command != "adb devices" {
+		t.Errorf("string form should become the command, got %q", short.Command)
+	}
+
+	full, ok := f.Steps[1].(*RunShellStep)
+	if !ok {
+		t.Fatalf("second step is %T, want *RunShellStep", f.Steps[1])
+	}
+	if full.Command != "echo hi" || full.Output != "GREETING" || full.Env["NAME"] != "value" || full.TimeoutMs != 500 {
+		t.Errorf("map form parsed as %+v", full)
+	}
+}
+
+func TestParseRunShellRejectsAnEmptyCommand(t *testing.T) {
+	// A runShell with nothing to run is a mistake worth catching at lint time
+	// rather than at the device.
+	if _, err := Parse([]byte("appId: com.example\n---\n- runShell:\n    output: X\n"), "test.yaml"); err == nil {
+		t.Error("expected an error for a runShell with no command")
+	}
+}
+
+// Windows checks out with core.autocrlf=true by default, so a flow file there
+// arrives with \r\n. Splitting on "\n" alone left a trailing \r that made the
+// "---" separator unrecognisable, and the header's map was then handed to the
+// step list — every flow on Windows failed to parse (#159).
+func TestParseHandlesCRLFLineEndings(t *testing.T) {
+	crlf := "appId: com.example\r\n---\r\n- launchApp\r\n- assertVisible: \"Hello\"\r\n"
+
+	f, err := Parse([]byte(crlf), "windows.yaml")
+	if err != nil {
+		t.Fatalf("CRLF flow should parse: %v", err)
+	}
+	if f.Config.AppID != "com.example" {
+		t.Errorf("appId = %q, want com.example", f.Config.AppID)
+	}
+	if len(f.Steps) != 2 {
+		t.Fatalf("got %d steps, want 2 — the document separator was not recognised", len(f.Steps))
+	}
+}
+
+// A "---" inside a block scalar is content, not a separator. The CRLF
+// normalisation must not change that.
+func TestParseCRLFKeepsBlockScalarSeparatorsAsContent(t *testing.T) {
+	src := "appId: com.example\r\n---\r\n- runScript: |\r\n    const dashes = '---';\r\n- launchApp\r\n"
+
+	f, err := Parse([]byte(src), "windows.yaml")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(f.Steps) != 2 {
+		t.Errorf("got %d steps, want 2 — a --- inside a block scalar split the document", len(f.Steps))
 	}
 }

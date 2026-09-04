@@ -140,8 +140,15 @@ extension RunnerTests {
       if let bundleId = requestedBundleId, targetNeedsActivation(activeApp) {
         activeApp = activateTarget(bundleId: bundleId, reason: "stale_target")
       } else if requestedBundleId == nil, targetNeedsActivation(activeApp) {
-        ensureRunnerHostAppActive(reason: "missing_app_bundle")
-        activeApp = app
+        // No bundle named: target whatever is on screen rather than
+        // hijacking it with the placeholder host app.
+        if let front = frontmostApplication() {
+          currentApp = front
+          activeApp = front
+        } else {
+          ensureRunnerHostAppActive(reason: "missing_app_bundle")
+          activeApp = app
+        }
       }
 
       let skipExistenceWait = canUseFastForegroundAppGuard(
@@ -164,8 +171,13 @@ extension RunnerTests {
         if let bundleId = requestedBundleId, activeApp.state != .runningForeground {
           activeApp = activateTarget(bundleId: bundleId, reason: "interaction_foreground_guard")
         } else if requestedBundleId == nil, activeApp.state != .runningForeground {
-          ensureRunnerHostAppActive(reason: "interaction_missing_app_bundle")
-          activeApp = app
+          if let front = frontmostApplication() {
+            currentApp = front
+            activeApp = front
+          } else {
+            ensureRunnerHostAppActive(reason: "interaction_missing_app_bundle")
+            activeApp = app
+          }
         }
         let skipInteractionExistenceWait = canUseFastForegroundAppGuard(
           activeApp: activeApp,
@@ -186,6 +198,8 @@ extension RunnerTests {
     case .shutdown:
       stopRecordingIfNeeded()
       return Response(ok: true, data: DataPayload(message: "shutdown"))
+    case .addMedia:
+      return try executeAddMedia(command: command)
     case .idleCheck:
       // Local extension: take two consecutive screenshots in-process,
       // diff them on the runner side, return just the fraction of
@@ -580,6 +594,7 @@ extension RunnerTests {
         return Response(ok: false, error: ErrorPayload(message: "drag requires x, y, x2, and y2"))
       }
       let holdDuration = min(max((command.durationMs ?? 60) / 1000.0, 0.016), 10.0)
+      let moveDuration = command.moveDurationMs.map { min(max($0 / 1000.0, 0.05), 30.0) }
       let dragPoints = keyboardAvoidingDragPoints(app: activeApp, x: x, y: y, x2: x2, y2: y2)
       let dragFrame = resolvedDragVisualizationFrame(
         app: activeApp,
@@ -597,7 +612,8 @@ extension RunnerTests {
             y: dragPoints.y,
             x2: dragPoints.x2,
             y2: dragPoints.y2,
-            holdDuration: holdDuration
+            holdDuration: holdDuration,
+            moveDuration: moveDuration
           )
         }
       }
@@ -823,6 +839,31 @@ extension RunnerTests {
       return Response(
         ok: false,
         error: ErrorPayload(message: "unsupported rotate orientation: \(orientation)")
+      )
+    case .appearance:
+      return Response(
+        ok: true,
+        data: DataPayload(message: "appearance", appearance: appearanceName(XCUIDevice.shared.appearance))
+      )
+    case .setAppearance:
+      guard let wanted = command.appearance?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !wanted.isEmpty
+      else {
+        return Response(ok: false, error: ErrorPayload(message: "setAppearance requires appearance"))
+      }
+      guard let style = appearanceValue(wanted) else {
+        return Response(
+          ok: false,
+          error: ErrorPayload(message: "unsupported appearance: \(wanted)")
+        )
+      }
+      XCUIDevice.shared.appearance = style
+      // Read back rather than echoing the request: the setter is a request to
+      // the system, and reporting what actually took effect is what makes the
+      // host's assertDarkMode meaningful.
+      return Response(
+        ok: true,
+        data: DataPayload(message: "setAppearance", appearance: appearanceName(XCUIDevice.shared.appearance))
       )
     case .appSwitcher:
       performAppSwitcherGesture(app: activeApp)

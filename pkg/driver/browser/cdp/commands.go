@@ -243,6 +243,23 @@ func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
 			})
 	}
 
+	// An explicit `point:` has to go through coordinates — the element-scoped
+	// click always lands on the centre.
+	if step.Selector.Point != "" {
+		x, y, perr := core.PointInBounds(step.Selector.Point, info.Bounds)
+		if perr != nil {
+			return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+		}
+		m := d.page.Mouse
+		if err := m.MoveTo(proto.NewPoint(float64(x), float64(y))); err != nil {
+			return errorResult(err, "Failed to move to point for double tap")
+		}
+		if err := m.Click(proto.InputMouseButtonLeft, 2); err != nil {
+			return errorResult(err, "Failed to double tap at point")
+		}
+		return successResult(fmt.Sprintf("Double tapped %s", step.Selector.DescribeQuoted()), info)
+	}
+
 	if err := elem.Click(proto.InputMouseButtonLeft, 2); err != nil {
 		return errorResult(err, "Failed to double tap on element")
 	}
@@ -250,7 +267,17 @@ func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Double tapped on %s", step.Selector.DescribeQuoted()), info)
 }
 
-// longPressOn performs a long press (mouse down, hold 1s, mouse up).
+// longPressDuration returns the press duration for a long press, defaulting to
+// a second when the flow does not say. The step has always carried
+// `duration:`; the mouse paths used to hardcode the default and drop it.
+func longPressDuration(step *flow.LongPressOnStep) time.Duration {
+	if step.DurationMs > 0 {
+		return time.Duration(step.DurationMs) * time.Millisecond
+	}
+	return time.Second
+}
+
+// longPressOn performs a long press (mouse down, hold, mouse up).
 func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 	elem, info, err := d.findElement(step.Selector, isOptional(step.Selector.Optional), step.TimeoutMs)
 	if err != nil {
@@ -275,9 +302,30 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 				if err := m.Down(proto.InputMouseButtonLeft, 1); err != nil {
 					return err
 				}
-				time.Sleep(1 * time.Second)
+				time.Sleep(longPressDuration(step))
 				return m.Up(proto.InputMouseButtonLeft, 1)
 			})
+	}
+
+	// An explicit `point:` has to go through coordinates — WaitInteractable
+	// below returns the element's own interaction point, always the centre.
+	if step.Selector.Point != "" {
+		x, y, perr := core.PointInBounds(step.Selector.Point, info.Bounds)
+		if perr != nil {
+			return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+		}
+		m := d.page.Mouse
+		if err := m.MoveTo(proto.NewPoint(float64(x), float64(y))); err != nil {
+			return errorResult(err, "Failed to move to point for long press")
+		}
+		if err := m.Down(proto.InputMouseButtonLeft, 1); err != nil {
+			return errorResult(err, "Failed to press at point")
+		}
+		time.Sleep(longPressDuration(step))
+		if err := m.Up(proto.InputMouseButtonLeft, 1); err != nil {
+			return errorResult(err, "Failed to release at point")
+		}
+		return successResult(fmt.Sprintf("Long pressed %s", step.Selector.DescribeQuoted()), info)
 	}
 
 	// Scroll into view and wait for interactable
@@ -293,7 +341,7 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 	if err := mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
 		return errorResult(err, "Failed to mouse down")
 	}
-	time.Sleep(1 * time.Second)
+	time.Sleep(longPressDuration(step))
 	if err := mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
 		return errorResult(err, "Failed to mouse up")
 	}
@@ -348,6 +396,12 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 	// (findElement records them but the fast path bypasses findElement).
 	d.recordUnsupportedFields(&step.Selector)
 
+	if n, has, cntErr := step.ExpectedCount(); cntErr != nil {
+		return errorResult(cntErr, cntErr.Error())
+	} else if has {
+		return d.assertVisibleCount(step.Selector, n, timeoutMs)
+	}
+
 	selectorType, selectorValue := jsSelectorTypeValue(step.Selector)
 	if selectorType != "" && !needsGoFinder(step.Selector) {
 		// Use RAF-based JS polling: consistent with waitUntil visibility checks
@@ -379,6 +433,49 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		)
 	}
 	return successResult(fmt.Sprintf("Element %s is visible", desc), info)
+}
+
+// assertVisibleCount asserts that exactly expected elements matching the
+// selector are visible. Counting rides the JS helper's cross-root enumeration
+// (the same matching waitForVisible uses), polling via requestAnimationFrame
+// until the count is met or the timeout expires.
+//
+// Selector features only the Go-side finder implements — state filters, and
+// ARIA roles resolved through the accessibility tree — have no all-matches
+// enumeration to count with, so they are rejected rather than miscounted.
+func (d *Driver) assertVisibleCount(sel flow.Selector, expected, timeoutMs int) *core.CommandResult {
+	desc := sel.DescribeQuoted()
+
+	if sel.Enabled != nil || sel.Checked != nil || sel.Focused != nil || sel.Selected != nil {
+		err := fmt.Errorf("assertVisible count with state filters (enabled/checked/focused/selected) is not supported on web")
+		return errorResult(err, err.Error())
+	}
+	if sel.Role != "" {
+		err := fmt.Errorf("assertVisible count with role selectors is not supported on web — roles resolve through the accessibility tree, which cannot enumerate all matches")
+		return errorResult(err, err.Error())
+	}
+
+	selectorType, selectorValue := jsSelectorTypeValue(sel)
+	if selectorValue == "" {
+		err := fmt.Errorf("no selector specified")
+		return errorResult(err, err.Error())
+	}
+
+	result, err := d.page.Timeout(time.Duration(timeoutMs+1000) * time.Millisecond).Evaluate(
+		rod.Eval(`(type, value, expected, timeout) => window.__maestro.waitForVisibleCount(type, value, expected, timeout)`,
+			selectorType, selectorValue, expected, timeoutMs).ByPromise(),
+	)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Expected %d visible matches of %s", expected, desc))
+	}
+	observed := int(result.Value.Int())
+	if observed != expected {
+		return errorResult(
+			fmt.Errorf("expected %d visible matches, found %d", expected, observed),
+			fmt.Sprintf("Expected %d visible matches of %s, found %d", expected, desc, observed),
+		)
+	}
+	return successResult(fmt.Sprintf("Element %s is visible exactly %d time(s)", desc, expected), nil)
 }
 
 // needsGoFinder reports whether a selector has features the JS fast-path
@@ -603,6 +700,13 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 // the right primitive: it scrolls every ancestor scroll container in every
 // frame up the chain. Issues #71/#72 acting layer.
 func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.CommandResult {
+	// `from:` confines the scroll to a container. Only the UIAutomator2 driver
+	// implements it so far; refusing here is better than silently scrolling the
+	// whole page and leaving the flow author to wonder why.
+	if !step.From.IsEmpty() {
+		return errorResult(fmt.Errorf("unsupported option"), "scrollUntilVisible `from:` is not supported on this driver yet — it currently works on the uiautomator2 driver")
+	}
+
 	dir := strings.ToLower(step.Direction)
 	if dir == "" {
 		dir = "down"
@@ -618,13 +722,32 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	center := d.viewportCenter()
+	partiallyVisible := false
 	for i := 0; i < maxScrolls; i++ {
 		elem, info, err := d.findElementOnce(step.Element)
 		if err == nil && info != nil && info.Visible {
-			return successResult(
-				fmt.Sprintf("Element visible after %d scrolls", i),
-				info,
-			)
+			// Visible in the DOM is not enough on the top frame: an element
+			// below the fold passes every CSS visibility check, so without a
+			// viewport test this loop could declare success without scrolling
+			// at all. Require the fraction the step asks for (default: fully
+			// inside the viewport). Iframe elements keep the old acceptance —
+			// their bounds are frame-local and their scroll path is
+			// scrollIntoView, which the finder's visibility already reflects.
+			inIframe := false
+			if elem != nil {
+				if v, _ := elem.Eval(`() => window.__maestro._isInIframe(this)`); v != nil {
+					inIframe = v.Value.Bool()
+				}
+			}
+			boundsKnown := info.Bounds.Width > 0 && info.Bounds.Height > 0 && d.viewportW > 0 && d.viewportH > 0
+			if inIframe || !boundsKnown ||
+				core.MeetsVisibility(info.Bounds, d.viewportW, d.viewportH, step.VisibilityPercentage) {
+				return successResult(
+					fmt.Sprintf("Element visible after %d scrolls", i),
+					info,
+				)
+			}
+			partiallyVisible = true
 		}
 
 		// Iframe / shadow-root branch: top-frame Mouse.Scroll dispatches a
@@ -658,53 +781,170 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		time.Sleep(300 * time.Millisecond)
 	}
 
+	if partiallyVisible {
+		return errorResult(
+			fmt.Errorf("element found but never sufficiently visible after %d scrolls", maxScrolls),
+			fmt.Sprintf("Element %s stayed partially outside the viewport after scrolling", step.Element.DescribeQuoted()),
+		)
+	}
 	return errorResult(
 		fmt.Errorf("element not visible after %d scrolls", maxScrolls),
 		fmt.Sprintf("Element %s not visible after scrolling", step.Element.DescribeQuoted()),
 	)
 }
 
-// swipe performs a swipe gesture using mouse drag.
-func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
-	dir := strings.ToLower(step.Direction)
-	center := d.viewportCenter()
-	cx, cy := center.X, center.Y
+// resolveDragEnd turns one end of a dragAndDrop into viewport coordinates:
+// a bare point resolves against the viewport, anything else finds the
+// element and uses its center.
+func (d *Driver) resolveDragEnd(sel flow.Selector, timeoutMs int) (float64, float64, *core.ElementInfo, error) {
+	if sel.Point != "" && sel.IsEmpty() {
+		x, y, err := core.ParsePointCoords(sel.Point, d.viewportW, d.viewportH)
+		return float64(x), float64(y), nil, err
+	}
+	_, info, err := d.findElement(sel, false, timeoutMs)
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("element not found: %s: %w", sel.Describe(), err)
+	}
+	cx, cy := info.Bounds.Center()
+	return float64(cx), float64(cy), info, nil
+}
 
-	var startX, startY, endX, endY float64
-	switch dir {
-	case "up":
-		startX, startY = cx, cy*1.4
-		endX, endY = cx, cy*0.6
-	case "down":
-		startX, startY = cx, cy*0.6
-		endX, endY = cx, cy*1.4
-	case "left":
-		startX, startY = cx*1.4, cy
-		endX, endY = cx*0.6, cy
-	case "right":
-		startX, startY = cx*0.6, cy
-		endX, endY = cx*1.4, cy
-	default:
-		return errorResult(fmt.Errorf("unsupported swipe direction: %s", dir), "Invalid swipe direction")
+// dragAndDrop long-presses at the source, drags to the target in interpolated
+// moves, settles, and releases — the sequence JS drag widgets (sortable
+// lists, sliders, canvas editors) track. Native HTML5 draggable is the known
+// exception: dragstart/drop fire only for real OS drags and ignore synthetic
+// mouse events, so pages built solely on the HTML5 drag-and-drop API won't
+// move; that is a Chromium limitation, not a selector problem.
+func (d *Driver) dragAndDrop(step *flow.DragAndDropStep) *core.CommandResult {
+	fromX, fromY, fromInfo, err := d.resolveDragEnd(step.From, step.TimeoutMs)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("dragAndDrop from: %v", err))
+	}
+	toX, toY, _, err := d.resolveDragEnd(step.To, step.TimeoutMs)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("dragAndDrop to: %v", err))
 	}
 
 	mouse := d.page.Mouse
-	startPt := proto.NewPoint(startX, startY)
-	if err := mouse.MoveTo(startPt); err != nil {
+	if err := mouse.MoveTo(proto.NewPoint(fromX, fromY)); err != nil {
+		return errorResult(err, "Failed to move mouse for drag")
+	}
+	if err := mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
+		return errorResult(err, "Failed to press for drag")
+	}
+	time.Sleep(time.Duration(step.HoldDuration) * time.Millisecond)
+
+	const dragSteps = 20
+	stepDelay := time.Duration(step.Duration) * time.Millisecond / dragSteps
+	for i := 1; i <= dragSteps; i++ {
+		t := float64(i) / dragSteps
+		pt := proto.NewPoint(fromX+(toX-fromX)*t, fromY+(toY-fromY)*t)
+		if err := mouse.MoveTo(pt); err != nil {
+			return errorResult(err, "Failed to drag")
+		}
+		if stepDelay > 0 {
+			time.Sleep(stepDelay)
+		}
+	}
+	// Settle before release so drop targets register the hover.
+	time.Sleep(250 * time.Millisecond)
+	if err := mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
+		return errorResult(err, "Failed to release drag")
+	}
+
+	return successResult(fmt.Sprintf("Dragged (%.0f, %.0f) → (%.0f, %.0f)", fromX, fromY, toX, toY), fromInfo)
+}
+
+// swipe performs a swipe gesture using mouse drag.
+func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
+	dir, err := core.NormalizeSwipeDirection(step.Direction)
+	if err != nil {
+		return errorResult(err, "Invalid swipe direction")
+	}
+
+	center := d.viewportCenter()
+	startX, startY, endX, endY := viewportSwipeCoords(dir, center.X, center.Y)
+
+	// If a from:/selector element is specified, anchor the drag on the
+	// element's box instead of the viewport so drag targets (sliders,
+	// sortable lists) receive the gesture (#114 parity with the mobile
+	// drivers). Optional selectors fall back to the viewport swipe.
+	if step.Selector != nil && !step.Selector.IsEmpty() {
+		_, info, err := d.findElement(*step.Selector, step.IsOptional(), step.TimeoutMs)
+		if err != nil {
+			if !step.IsOptional() {
+				return errorResult(err, fmt.Sprintf("Element not found for swipe: %v", err))
+			}
+		} else if info != nil && info.Bounds.Width > 0 {
+			startX, startY, endX, endY = elementSwipeCoords(dir, info.Bounds)
+		}
+	}
+
+	mouse := d.page.Mouse
+	if err := mouse.MoveTo(proto.NewPoint(startX, startY)); err != nil {
 		return errorResult(err, "Failed to move mouse for swipe")
 	}
 	if err := mouse.Down(proto.InputMouseButtonLeft, 1); err != nil {
 		return errorResult(err, "Failed to mouse down for swipe")
 	}
-	endPt := proto.NewPoint(endX, endY)
-	if err := mouse.MoveTo(endPt); err != nil {
-		return errorResult(err, "Failed to drag for swipe")
+	// Drag gradually — JS drag handlers (sliders, sortable lists) need
+	// intermediate mousemove events to track the pointer, and `duration:`
+	// paces them. A single move-to-end jump loses the drag on most
+	// libraries.
+	const dragSteps = 10
+	var stepDelay time.Duration
+	if step.Duration > 0 {
+		stepDelay = time.Duration(step.Duration) * time.Millisecond / dragSteps
+	}
+	for i := 1; i <= dragSteps; i++ {
+		t := float64(i) / dragSteps
+		pt := proto.NewPoint(startX+(endX-startX)*t, startY+(endY-startY)*t)
+		if err := mouse.MoveTo(pt); err != nil {
+			return errorResult(err, "Failed to drag for swipe")
+		}
+		if stepDelay > 0 {
+			time.Sleep(stepDelay)
+		}
 	}
 	if err := mouse.Up(proto.InputMouseButtonLeft, 1); err != nil {
 		return errorResult(err, "Failed to mouse up for swipe")
 	}
 
 	return successResult(fmt.Sprintf("Swiped %s", dir), nil)
+}
+
+// viewportSwipeCoords returns the full-viewport drag segment for a swipe
+// direction: the central 40% band around the viewport center (cy*1.4 →
+// cy*0.6 for "up", mirrored for the other directions).
+func viewportSwipeCoords(dir string, cx, cy float64) (startX, startY, endX, endY float64) {
+	switch dir {
+	case "up":
+		return cx, cy * 1.4, cx, cy * 0.6
+	case "down":
+		return cx, cy * 0.6, cx, cy * 1.4
+	case "left":
+		return cx * 1.4, cy, cx * 0.6, cy
+	default: // "right" — dir is pre-validated by NormalizeSwipeDirection
+		return cx * 0.6, cy, cx * 1.4, cy
+	}
+}
+
+// elementSwipeCoords returns a drag segment across an element's box: 90% →
+// 10% along the swipe axis, centered on the other axis. Unlike the mobile
+// drivers the end point stays inside the element — web drag handlers without
+// pointer capture stop tracking when the pointer leaves their hit area.
+func elementSwipeCoords(dir string, b core.Bounds) (startX, startY, endX, endY float64) {
+	x, y, w, h := float64(b.X), float64(b.Y), float64(b.Width), float64(b.Height)
+	switch dir {
+	case "up":
+		return x + w*0.5, y + h*0.9, x + w*0.5, y + h*0.1
+	case "down":
+		return x + w*0.5, y + h*0.1, x + w*0.5, y + h*0.9
+	case "left":
+		return x + w*0.9, y + h*0.5, x + w*0.1, y + h*0.5
+	default: // "right" — dir is pre-validated by NormalizeSwipeDirection
+		return x + w*0.1, y + h*0.5, x + w*0.9, y + h*0.5
+	}
 }
 
 // waitForPageReady waits for the page to finish loading and DOM to stabilize.
@@ -2056,4 +2296,77 @@ func (d *Driver) waitForActionable(elem *rod.Element, timeoutMs int) error {
 		reason = r.Value.Str()
 	}
 	return fmt.Errorf("element not actionable within %dms (last rejection: %s)", timeoutMs, reason)
+}
+
+// ============================================================================
+// Dark Mode
+// ============================================================================
+
+// On the web there is no device appearance to switch. What a page actually
+// responds to is the prefers-color-scheme media feature, so these commands
+// drive that: setDarkMode overrides the feature for this page via
+// Emulation.setEmulatedMedia, and the assertions read back what the page
+// currently sees through window.matchMedia.
+//
+// Reading the effective value rather than remembering what was set means
+// assertDarkMode is meaningful without a preceding setDarkMode — it reports the
+// browser's own preference, which for headless Chrome is light unless the
+// launch flags say otherwise.
+const colorSchemeFeature = "prefers-color-scheme"
+
+// colorSchemeValue is the media-feature value for a dark-mode boolean.
+func colorSchemeValue(enabled bool) string {
+	if enabled {
+		return "dark"
+	}
+	return "light"
+}
+
+// applyDarkMode overrides prefers-color-scheme for the page.
+//
+// setEmulatedMedia replaces the whole override rather than merging into it, so
+// the call has to carry every feature that should stay in force. Only
+// prefers-color-scheme is managed here, and Media is deliberately left empty:
+// that disables any media *type* override (print/screen), which this command
+// never sets and must not clobber into something else.
+func (d *Driver) applyDarkMode(enabled bool) *core.CommandResult {
+	err := proto.EmulationSetEmulatedMedia{
+		Features: []*proto.EmulationMediaFeature{
+			{Name: colorSchemeFeature, Value: colorSchemeValue(enabled)},
+		},
+	}.Call(d.page)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to set dark mode: %v", err))
+	}
+	return successResult(fmt.Sprintf("Set %s mode", core.DarkModeStateName(enabled)), nil)
+}
+
+func (d *Driver) toggleDarkMode() *core.CommandResult {
+	current, err := d.currentDarkMode()
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to read dark mode: %v", err))
+	}
+	return d.applyDarkMode(!current)
+}
+
+func (d *Driver) assertDarkModeIs(want bool) *core.CommandResult {
+	got, err := d.currentDarkMode()
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Failed to read dark mode: %v", err))
+	}
+	if got != want {
+		assertErr := core.DarkModeAssertionError(want, got)
+		return errorResult(assertErr, assertErr.Error())
+	}
+	return successResult(fmt.Sprintf("Page is in %s mode", core.DarkModeStateName(want)), nil)
+}
+
+// currentDarkMode reports whether the page currently resolves
+// prefers-color-scheme to dark, override or not.
+func (d *Driver) currentDarkMode() (bool, error) {
+	obj, err := d.page.Eval(`() => window.matchMedia('(prefers-color-scheme: dark)').matches`)
+	if err != nil {
+		return false, err
+	}
+	return obj.Value.Bool(), nil
 }

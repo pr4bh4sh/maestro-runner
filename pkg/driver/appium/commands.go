@@ -90,7 +90,10 @@ func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %s", step.Selector.Describe()))
 	}
 
-	cx, cy := info.Bounds.Center()
+	cx, cy, perr := core.PointInBounds(step.Selector.Point, info.Bounds)
+	if perr != nil {
+		return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+	}
 	if err := d.client.DoubleTap(cx, cy); err != nil {
 		return errorResult(err, "Failed to double tap")
 	}
@@ -115,7 +118,10 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 		duration = 1000 // Default 1 second for long press
 	}
 
-	cx, cy := info.Bounds.Center()
+	cx, cy, perr := core.PointInBounds(step.Selector.Point, info.Bounds)
+	if perr != nil {
+		return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+	}
 	if err := d.client.LongPress(cx, cy, duration); err != nil {
 		return errorResult(err, "Failed to long press")
 	}
@@ -201,9 +207,39 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 	}
 
 	// Direction-based swipe
-	direction := strings.ToLower(step.Direction)
-	if direction == "" {
-		direction = "up"
+	direction, err := core.NormalizeSwipeDirection(step.Direction)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("Invalid swipe direction: %s", step.Direction))
+	}
+
+	duration := step.Duration
+	if duration <= 0 {
+		duration = 500
+	}
+
+	// If a from:/selector element is specified, anchor the swipe on the
+	// element's bounds so drag targets (sliders, drag handles) receive the
+	// gesture, and honour `duration:` — parity with the uiautomator2 /
+	// devicelab fix (#114).
+	if step.Selector != nil && !step.Selector.IsEmpty() {
+		timeout := time.Duration(step.TimeoutMs) * time.Millisecond
+		if timeout <= 0 {
+			timeout = d.getFindTimeout()
+		}
+		info, err := d.findElement(*step.Selector, timeout)
+		if err != nil {
+			return errorResult(err, fmt.Sprintf("Element not found for swipe: %s", step.Selector.Describe()))
+		}
+		if info != nil && info.Bounds.Width > 0 {
+			startX, startY, endX, endY, err := core.SwipeCoordsInBounds(direction, info.Bounds, w, h)
+			if err != nil {
+				return errorResult(err, fmt.Sprintf("Invalid swipe direction: %s", step.Direction))
+			}
+			if err := d.client.Swipe(startX, startY, endX, endY, duration); err != nil {
+				return errorResult(err, "Failed to swipe")
+			}
+			return successResult(fmt.Sprintf("Swiped %s in element", direction), info)
+		}
 	}
 
 	// Swipe coordinates match Maestro behavior:
@@ -230,7 +266,7 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("invalid direction: %s", direction), "")
 	}
 
-	if err := d.client.Swipe(startX, startY, endX, endY, 500); err != nil {
+	if err := d.client.Swipe(startX, startY, endX, endY, duration); err != nil {
 		return errorResult(err, "Failed to swipe")
 	}
 
@@ -265,7 +301,52 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Scrolled %s", direction), nil)
 }
 
+// resolveDragPoint turns one end of a dragAndDrop into screen coordinates:
+// a bare point resolves against the screen, anything else finds the element
+// and uses its center.
+func (d *Driver) resolveDragPoint(sel flow.Selector, timeout time.Duration) (int, int, *core.ElementInfo, error) {
+	if sel.Point != "" && sel.IsEmpty() {
+		w, h := d.client.ScreenSize()
+		x, y, err := core.ParsePointCoords(sel.Point, w, h)
+		return x, y, nil, err
+	}
+	info, err := d.findElement(sel, timeout)
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("element not found: %s: %w", sel.Describe(), err)
+	}
+	x, y := info.Bounds.Center()
+	return x, y, info, nil
+}
+
+func (d *Driver) dragAndDrop(step *flow.DragAndDropStep) *core.CommandResult {
+	timeout := time.Duration(step.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = d.getFindTimeout()
+	}
+
+	fromX, fromY, fromInfo, err := d.resolveDragPoint(step.From, timeout)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("dragAndDrop from: %v", err))
+	}
+	toX, toY, _, err := d.resolveDragPoint(step.To, timeout)
+	if err != nil {
+		return errorResult(err, fmt.Sprintf("dragAndDrop to: %v", err))
+	}
+
+	if err := d.client.DragAndDrop(fromX, fromY, toX, toY, step.HoldDuration, step.Duration); err != nil {
+		return errorResult(err, "Failed to drag and drop")
+	}
+	return successResult(fmt.Sprintf("Dragged (%d, %d) → (%d, %d)", fromX, fromY, toX, toY), fromInfo)
+}
+
 func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.CommandResult {
+	// `from:` confines the scroll to a container. Only the UIAutomator2 driver
+	// implements it so far; refusing here is better than silently scrolling the
+	// whole screen and leaving the flow author to wonder why.
+	if !step.From.IsEmpty() {
+		return errorResult(fmt.Errorf("unsupported option"), "scrollUntilVisible `from:` is not supported on this driver yet — it currently works on the uiautomator2 driver")
+	}
+
 	direction := strings.ToLower(step.Direction)
 	if direction == "" {
 		direction = "down"
@@ -282,15 +363,25 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		maxScrolls = step.MaxScrolls
 	}
 
+	partiallyVisible := false
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		if err := d.parentContext().Err(); err != nil {
 			return errorResult(fmt.Errorf("scroll cancelled: %w", err), "")
 		}
 
-		// Check if element is visible
+		// Found in the tree is not enough: an element half-hidden behind a bar
+		// or peeking over the fold would stop the scroll and the next tap
+		// lands wrong. Require the visibility fraction the step asks for
+		// (default: fully on screen). Elements without usable bounds keep the
+		// old found-is-enough behavior — there is nothing to measure.
 		info, err := d.findElement(step.Element, 1*time.Second)
 		if err == nil && info != nil {
-			return successResult("Element found", info)
+			w, h := d.client.ScreenSize()
+			boundsKnown := info.Bounds.Width > 0 && info.Bounds.Height > 0 && w > 0 && h > 0
+			if !boundsKnown || core.MeetsVisibility(info.Bounds, w, h, step.VisibilityPercentage) {
+				return successResult("Element found", info)
+			}
+			partiallyVisible = true
 		}
 
 		// Scroll
@@ -298,13 +389,58 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		time.Sleep(300 * time.Millisecond)
 	}
 
+	if partiallyVisible {
+		return errorResult(fmt.Errorf("element found but never sufficiently visible after scrolling"), "")
+	}
 	return errorResult(fmt.Errorf("element not found after scrolling"), "")
 }
 
 // Text input
 
+// textField adapts an Appium element id to the shape core verifies against.
+func (d *Driver) textField(elementID string) core.TextField {
+	return core.TextFieldFuncs(
+		func() (string, error) { return d.client.GetElementText(elementID) },
+		func(text string) error { return d.client.ElementSendKeys(elementID, text) },
+		func() error { return d.client.ClearElement(elementID) },
+	)
+}
+
 func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 	text := step.Text
+
+	// Inline selector: find the element and type into it directly — parity
+	// with the uiautomator2/devicelab drivers, which already honour it.
+	// Guard against the YAML artifact where InputTextStep.Text and
+	// Selector.Text share the `text:` key (map form), which would otherwise
+	// send us hunting for an element whose text equals the input value.
+	selectorIsReal := !step.Selector.IsEmpty() && step.Selector.Text != text
+	if selectorIsReal {
+		timeout := time.Duration(step.TimeoutMs) * time.Millisecond
+		if timeout <= 0 {
+			timeout = d.getFindTimeout()
+		}
+		info, err := d.findElement(step.Selector, timeout)
+		if err != nil {
+			return errorResult(err, fmt.Sprintf("Element not found: %s", step.Selector.Describe()))
+		}
+		if info != nil && info.ID != "" {
+			// Read first: after typing, a value that has not changed is the
+			// only thing separating a driver reporting an empty field's hint
+			// from a keystroke lost to a janky frame.
+			before, _ := d.client.GetElementText(info.ID)
+			if err := d.client.ElementSendKeys(info.ID, text); err != nil {
+				return errorResult(err, "Failed to input text")
+			}
+			note := core.ConfirmTypedText(d.textField(info.ID), text, before, logger.Warn)
+			return successResult(fmt.Sprintf("Input text: %s%s", text, note), info)
+		}
+	}
+
+	// Set when typing went to an element we can read back; nil leaves the
+	// verification a no-op, which is the right answer for blind key events.
+	var verified core.TextField
+	var beforeText string
 
 	if d.platform == "ios" {
 		// On iOS, use ElementSendKeys (POST /element/{id}/value) which internally
@@ -319,9 +455,12 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 
 		if elemID != "" {
 			d.waitForKeyboardFocus(elemID)
+			before, _ := d.client.GetElementText(elemID)
 			if err := d.client.ElementSendKeys(elemID, text); err != nil {
 				return errorResult(err, "Failed to input text")
 			}
+			verified = d.textField(elemID)
+			beforeText = before
 		} else {
 			// Final fallback: use "mobile: keys" which types into currently focused element
 			_, err := d.client.ExecuteMobile("keys", map[string]interface{}{
@@ -332,12 +471,33 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 			}
 		}
 	} else {
-		if err := d.client.SendKeys(text); err != nil {
-			return errorResult(err, "Failed to input text")
+		// Android: prefer element-scoped typing into the focused element
+		// (POST /element/{id}/value). Blind W3C key actions silently no-op
+		// on WebView DOM inputs — the keystrokes never reach the page, but
+		// the call still reports success (#122). Element send-keys routes
+		// through accessibility ACTION_SET_TEXT, which Chrome translates
+		// into a real DOM value change with input/change events. The
+		// UiAutomator2 server appends rather than replaces, preserving
+		// type-into-focused semantics. Fall back to blind key actions when
+		// no element has focus.
+		typed := false
+		if elemID, err := d.client.GetActiveElement(); err == nil && elemID != "" {
+			before, _ := d.client.GetElementText(elemID)
+			if err := d.client.ElementSendKeys(elemID, text); err == nil {
+				typed = true
+				verified = d.textField(elemID)
+				beforeText = before
+			}
+		}
+		if !typed {
+			if err := d.client.SendKeys(text); err != nil {
+				return errorResult(err, "Failed to input text")
+			}
 		}
 	}
 
-	return successResult(fmt.Sprintf("Input text: %s", text), nil)
+	note := core.ConfirmTypedText(verified, text, beforeText, logger.Warn)
+	return successResult(fmt.Sprintf("Input text: %s%s", text, note), nil)
 }
 
 // waitForKeyboardFocus polls until the element has keyboard focus or timeout.
@@ -431,12 +591,98 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		timeout = d.getFindTimeout()
 	}
 
+	if n, has, err := step.ExpectedCount(); err != nil {
+		return errorResult(err, err.Error())
+	} else if has {
+		return d.assertVisibleCount(step.Selector, n, timeout)
+	}
+
 	info, err := d.findElement(step.Selector, timeout)
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Element not visible: %s", step.Selector.Describe()))
 	}
 
+	// Being findable is not the same as being visible: a UiAutomator selector
+	// matches an element whether or not it is on screen. This used to pass on
+	// mere presence, which made the same flow mean different things on this
+	// driver and on uiautomator2. The displayed state was already fetched and
+	// then ignored, so checking it costs nothing.
+	//
+	// Android only. XCUITest reports displayed=false for elements that are
+	// plainly on screen — verified against a simulator, where gating on it
+	// failed two auth flows whose target was large, centred and unobstructed.
+	// Whatever that attribute means there, it is not "the user can see this".
+	if d.platform != "ios" && info != nil && !info.Visible {
+		return errorResult(fmt.Errorf("element found but not visible"),
+			fmt.Sprintf("Element exists but is not visible: %s", step.Selector.Describe()))
+	}
+
 	return successResult(fmt.Sprintf("Element is visible: %s", step.Selector.Describe()), info)
+}
+
+// assertVisibleCount asserts that exactly expected displayed elements match
+// the selector. Counting enumerates the page source with the same matcher
+// index selection uses, so what counts as a match is identical to what
+// `index:` would pick among. Polls until the count is met or the timeout
+// expires, then reports the last observed count.
+func (d *Driver) assertVisibleCount(sel flow.Selector, expected int, timeout time.Duration) *core.CommandResult {
+	desc := sel.Describe()
+	deadline := time.Now().Add(timeout)
+	observed := -1
+	var lastErr error
+
+	for {
+		if err := d.parentContext().Err(); err != nil {
+			return errorResult(err, fmt.Sprintf("Expected %d visible matches of %s", expected, desc))
+		}
+
+		n, err := d.countVisibleMatches(sel)
+		if err != nil {
+			lastErr = err
+		} else {
+			observed = n
+			if n == expected {
+				return successResult(fmt.Sprintf("Element is visible exactly %d time(s): %s", expected, desc), nil)
+			}
+		}
+
+		if time.Now().After(deadline) {
+			if observed < 0 {
+				return errorResult(lastErr, fmt.Sprintf("Expected %d visible matches of %s: could not read page source", expected, desc))
+			}
+			return errorResult(
+				fmt.Errorf("expected %d visible matches, found %d", expected, observed),
+				fmt.Sprintf("Expected %d visible matches of %s, found %d", expected, desc, observed),
+			)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// countVisibleMatches counts the displayed elements matching the selector in
+// the current page source.
+func (d *Driver) countVisibleMatches(sel flow.Selector) (int, error) {
+	source, err := d.client.Source()
+	if err != nil {
+		return 0, err
+	}
+	elements, platform, err := ParsePageSource(source)
+	if err != nil {
+		return 0, err
+	}
+	d.platform = platform
+	return countDisplayed(FilterBySelector(elements, sel, platform)), nil
+}
+
+// countDisplayed counts the elements the platform reports as displayed.
+func countDisplayed(elements []*ParsedElement) int {
+	n := 0
+	for _, e := range elements {
+		if e.Displayed {
+			n++
+		}
+	}
+	return n
 }
 
 func (d *Driver) assertNotVisible(step *flow.AssertNotVisibleStep) *core.CommandResult {
@@ -453,7 +699,14 @@ func (d *Driver) assertNotVisible(step *flow.AssertNotVisibleStep) *core.Command
 
 	for {
 		info, err := d.findElementOnce(step.Selector)
-		if err != nil || info == nil {
+		// Gone, or present but not on screen — either satisfies "not visible".
+		// Requiring it to be unfindable made a hidden element fail this
+		// assertion, which is the mirror of the bug in assertVisible.
+		// Android only, for the same reason as assertVisible: iOS reports
+		// displayed=false for visibly-rendered elements, which here would
+		// wrongly report a visible element as gone.
+		notVisible := d.platform != "ios" && info != nil && !info.Visible
+		if err != nil || info == nil || notVisible {
 			return successResult(fmt.Sprintf("Element is not visible: %s", step.Selector.Describe()), nil)
 		}
 
@@ -627,10 +880,12 @@ func (d *Driver) copyTextFrom(step *flow.CopyTextFromStep) *core.CommandResult {
 		return errorResult(err, "Element not found for copyTextFrom")
 	}
 
-	// Get text, falling back to AccessibilityLabel if empty
+	// Fall back to the accessibility description when the element carries no
+	// text. Fetched here rather than on every element lookup — this is the only
+	// command that reads it.
 	text := info.Text
-	if text == "" && info.AccessibilityLabel != "" {
-		text = info.AccessibilityLabel
+	if text == "" {
+		text = d.accessibilityLabelOf(info.ID)
 	}
 	if text == "" {
 		return errorResult(fmt.Errorf("element has no text"), "")
@@ -1057,14 +1312,11 @@ func (d *Driver) grantPermissions(appID string, permissions map[string]string) {
 		return
 	}
 
-	for _, perm := range getAllPermissions() {
-		if _, err := d.client.ExecuteMobile("shell", map[string]interface{}{
-			"command": "pm",
-			"args":    []string{"grant", appID, perm},
-		}); err != nil {
-			logger.Warn("failed to grant permission %s to %s: %v", perm, appID, err)
-		}
-	}
+	// No explicit list: grant what the app declares, in one call. Walking a
+	// hardcoded list of every runtime permission cost ~32 round trips and
+	// failed on most of them, since granting an undeclared permission raises
+	// a SecurityException.
+	d.client.GrantDeclaredPermissions(appID)
 }
 
 // getAllPermissions returns all common Android runtime permissions.
@@ -1103,4 +1355,79 @@ func getAllPermissions() []string {
 		"android.permission.BODY_SENSORS",
 		"android.permission.ACTIVITY_RECOGNITION",
 	}
+}
+
+// setPermissions grants or revokes Android runtime permissions mid-flow.
+//
+// The step was parsed and then rejected by the dispatcher, so a flow using it
+// aborted with "unsupported step type" before anything reached Appium (#148).
+// The capability was already here: `mobile: changePermissions` takes an
+// explicit list and an action, which is exactly what this needs.
+//
+// Android only. iOS permissions are decided when the app is installed and
+// Appium exposes no equivalent, so saying so is better than a silent no-op.
+func (d *Driver) setPermissions(step *flow.SetPermissionsStep) *core.CommandResult {
+	if d.platform == "ios" {
+		return errorResult(
+			fmt.Errorf("unsupported on iOS"),
+			"setPermissions is not supported on the Appium iOS driver — set appium:autoAcceptAlerts in --caps, or use the wda driver",
+		)
+	}
+
+	appID := step.AppID
+	if appID == "" {
+		return errorResult(fmt.Errorf("no appId"), "setPermissions needs an appId")
+	}
+	if len(step.Permissions) == 0 {
+		return errorResult(fmt.Errorf("no permissions"), "setPermissions needs at least one permission")
+	}
+
+	// Group by action so each one is a single call: changePermissions takes a
+	// whole list, and issuing one request per permission is what made launchApp
+	// slow enough to be worth fixing in the first place.
+	byAction := map[string][]string{}
+	for name, value := range step.Permissions {
+		action := ""
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "allow":
+			action = "grant"
+		case "deny":
+			action = "revoke"
+		case "unset":
+			// Android has no per-permission reset — `pm reset-permissions`
+			// resets the whole app. Revoking is the closest honest answer, and
+			// saying which is better than pretending they are the same.
+			logger.Warn("setPermissions: Android cannot reset a single permission; revoking %q instead", name)
+			action = "revoke"
+		default:
+			logger.Warn("setPermissions: ignoring unsupported value %q for permission %q", value, name)
+			continue
+		}
+
+		var names []string
+		if strings.EqualFold(name, "all") {
+			names = getAllPermissions()
+		} else {
+			names = core.AndroidPermissionShortcut(name)
+		}
+		byAction[action] = append(byAction[action], names...)
+	}
+
+	if len(byAction) == 0 {
+		return errorResult(fmt.Errorf("no usable permissions"), "setPermissions: no recognised permission values")
+	}
+
+	var applied int
+	for action, names := range byAction {
+		if _, err := d.client.ExecuteMobile("changePermissions", map[string]interface{}{
+			"permissions": names,
+			"appPackage":  appID,
+			"action":      action,
+		}); err != nil {
+			return errorResult(err, fmt.Sprintf("Failed to %s permissions: %v", action, err))
+		}
+		applied += len(names)
+	}
+
+	return successResult(fmt.Sprintf("Permissions updated: %d", applied), nil)
 }

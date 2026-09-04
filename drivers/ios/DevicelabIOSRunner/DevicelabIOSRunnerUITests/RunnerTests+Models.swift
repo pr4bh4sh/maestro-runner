@@ -43,6 +43,20 @@ enum CommandType: String, Codable {
   // diff threshold; loops idleCheck internally until settled or timeout.
   // Avoids HTTP roundtrips per poll iteration.
   case awaitIdle
+  // Local extension (not in upstream agent-device): add a photo/video to the
+  // device Photos library via PhotoKit. This is the only way to inject media
+  // on a real iOS device (no host-side path exists), so it runs on-device.
+  case addMedia
+  // Local extension: read the device's light/dark appearance.
+  //
+  // The host used to answer this with `simctl ui appearance`, which exists
+  // only for simulators, so dark mode was unavailable on physical devices.
+  // XCUIDevice exposes the same state to a UI test on both (iOS 15+), so
+  // routing it through the runner covers real hardware too.
+  case appearance
+  // Local extension: set the device's light/dark appearance. Takes
+  // `appearance` as "dark" or "light".
+  case setAppearance
 }
 
 struct Command: Codable {
@@ -67,6 +81,11 @@ struct Command: Codable {
   let x2: Double?
   let y2: Double?
   let durationMs: Double?
+  // moveDurationMs — local extension for drag: how long the movement itself
+  // takes (durationMs is the press-before-move hold). Absent = XCUITest's
+  // default drag velocity, which keeps the pre-existing swipe/scroll wire
+  // shape byte-for-byte compatible.
+  let moveDurationMs: Double?
   let direction: String?
   let orientation: String?
   let scale: Double?
@@ -79,6 +98,10 @@ struct Command: Codable {
   let scope: String?
   let raw: Bool?
   let fullscreen: Bool?
+  let mediaName: String?
+  let mimeType: String?
+  let mediaData: String?  // base64-encoded file bytes (addMedia)
+  let appearance: String?  // "dark" or "light" (setAppearance)
 }
 
 struct Response: Codable {
@@ -124,6 +147,15 @@ struct DataPayload: Codable {
   let pngBase64: String?
   // Local extension: fraction of differing pixels from idleCheck.
   let diffFraction: Double?
+  // Local extension: "dark" or "light" from the appearance command.
+  let appearance: String?
+  // Local extension (DeviceDeck): the target app's XCUIApplication.state
+  // at snapshot time — "runningForeground", "runningBackground",
+  // "runningBackgroundSuspended", "notRunning" or "unknown". A snapshot
+  // is not an interaction command, so it is never auto-activated first;
+  // this is the app's true state, which no signal in the node tree
+  // reports reliably (hittable oscillates while a screen backgrounds).
+  let appState: String?
 
   init(
     message: String? = nil,
@@ -147,7 +179,9 @@ struct DataPayload: Codable {
     orientation: String? = nil,
     pngBase64: String? = nil,
     diffFraction: Double? = nil,
-    identifier: String? = nil
+    identifier: String? = nil,
+    appearance: String? = nil,
+    appState: String? = nil
   ) {
     self.message = message
     self.text = text
@@ -171,6 +205,8 @@ struct DataPayload: Codable {
     self.pngBase64 = pngBase64
     self.diffFraction = diffFraction
     self.identifier = identifier
+    self.appearance = appearance
+    self.appState = appState
   }
 }
 

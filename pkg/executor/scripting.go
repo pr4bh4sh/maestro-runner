@@ -67,6 +67,11 @@ func (se *ScriptEngine) SetFlowDir(dir string) {
 	se.flowDir = dir
 }
 
+// FlowDir returns the current flow directory used for relative path resolution.
+func (se *ScriptEngine) FlowDir() string {
+	return se.flowDir
+}
+
 // SetVariable sets a variable in both Go map and JS engine.
 func (se *ScriptEngine) SetVariable(name, value string) {
 	se.variables[name] = value
@@ -105,6 +110,17 @@ func (se *ScriptEngine) ImportSystemEnv() {
 // GetVariable returns a variable value.
 func (se *ScriptEngine) GetVariable(name string) string {
 	return se.variables[name]
+}
+
+// Variables returns a copy of every variable currently defined, for callers
+// that need to hand the whole set to something outside the engine — a shell
+// command's environment, for instance.
+func (se *ScriptEngine) Variables() map[string]string {
+	out := make(map[string]string, len(se.variables))
+	for name, value := range se.variables {
+		out[name] = value
+	}
+	return out
 }
 
 // SetPlatform sets the platform in the JS engine.
@@ -234,6 +250,14 @@ func (se *ScriptEngine) RunScript(script string, env map[string]string) error {
 	// Sync output back to variables
 	se.SyncOutputToVariables()
 	return nil
+}
+
+// expandEnvMap expands `${VAR}` / `${VAR || "default"}` in every value of a
+// YAML `env:` map, in place.
+func (se *ScriptEngine) expandEnvMap(env map[string]string) {
+	for k, v := range env {
+		env[k] = se.ExpandVariables(v)
+	}
 }
 
 // applyScopedEnv sets env vars (with their values variable-expanded) for one
@@ -649,6 +673,20 @@ func (se *ScriptEngine) ParseIntStrict(s string, defaultVal int) (int, error) {
 // ExpandStep expands variables in all string fields of a step.
 // Note: This modifies the step in place. For steps used in loops,
 // the parser creates fresh instances each iteration.
+// expandStringMap returns a copy of m with variables expanded in both keys and
+// values. Keys are expanded too so a permission name can itself be `${VAR}`
+// (Maestro #3428). Returns m unchanged when empty.
+func (se *ScriptEngine) expandStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[se.ExpandVariables(k)] = se.ExpandVariables(v)
+	}
+	return out
+}
+
 func (se *ScriptEngine) ExpandStep(step flow.Step) {
 	switch s := step.(type) {
 	case *flow.InputTextStep:
@@ -660,8 +698,12 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		s.Selector = *se.expandSelector(&s.Selector)
 	case *flow.LongPressOnStep:
 		s.Selector = *se.expandSelector(&s.Selector)
+	case *flow.DragAndDropStep:
+		s.From = *se.expandSelector(&s.From)
+		s.To = *se.expandSelector(&s.To)
 	case *flow.AssertVisibleStep:
 		s.Selector = *se.expandSelector(&s.Selector)
+		s.Count = se.ExpandVariables(s.Count)
 	case *flow.AssertNotVisibleStep:
 		s.Selector = *se.expandSelector(&s.Selector)
 	case *flow.WaitUntilStep:
@@ -678,6 +720,10 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		if str, ok := s.EnabledRaw.(string); ok {
 			s.Enabled = parseBoolExpr(se.ExpandVariables(str))
 		}
+	case *flow.SetDarkModeStep:
+		if str, ok := s.EnabledRaw.(string); ok {
+			s.Enabled = parseBoolExpr(se.ExpandVariables(str))
+		}
 	case *flow.CopyTextFromStep:
 		s.Selector = *se.expandSelector(&s.Selector)
 	case *flow.LaunchAppStep:
@@ -690,6 +736,10 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		for k, v := range s.Environment {
 			s.Environment[k] = se.ExpandVariables(v)
 		}
+		s.Permissions = se.expandStringMap(s.Permissions)
+	case *flow.SetPermissionsStep:
+		s.AppID = se.ExpandVariables(s.AppID)
+		s.Permissions = se.expandStringMap(s.Permissions)
 	case *flow.StopAppStep:
 		s.AppID = se.ExpandVariables(s.AppID)
 	case *flow.KillAppStep:
@@ -700,15 +750,78 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		s.Link = se.ExpandVariables(s.Link)
 	case *flow.PressKeyStep:
 		s.Key = se.ExpandVariables(s.Key)
+	case *flow.TakeScreenshotStep:
+		s.Path = se.ExpandVariables(s.Path)
+		s.CropOn = se.expandSelector(s.CropOn)
+	case *flow.AssertScreenshotStep:
+		s.Path = se.ExpandVariables(s.Path)
+		s.CropOn = se.expandSelector(s.CropOn)
+		// A string threshold (e.g. "${VAR}") is resolved here; a numeric
+		// literal was already resolved at parse time (Maestro #3444).
+		if str, ok := s.ThresholdRaw.(string); ok {
+			if f, ok := flow.ThresholdAsFloat(se.ExpandVariables(str)); ok && f != 0 {
+				s.ThresholdPercentage = f
+			} else {
+				s.ThresholdPercentage = 95.0
+			}
+		}
+	case *flow.AddMediaStep:
+		// Expand vars and resolve each media path to an absolute local path
+		// relative to the flow dir, so drivers receive host paths they can
+		// push to the device / feed to simctl.
+		for i, f := range s.Files {
+			s.Files[i] = se.ResolvePath(se.ExpandVariables(f))
+		}
 	case *flow.RunFlowStep:
 		s.File = se.ExpandVariables(s.File)
 		s.ElseFile = se.ExpandVariables(s.ElseFile)
 		if s.When != nil {
 			se.ExpandCondition(s.When)
 		}
-		for k, v := range s.Env {
-			s.Env[k] = se.ExpandVariables(v)
+		se.expandEnvMap(s.Env)
+
+	// Every other step type carrying a YAML `env:` map. Without these, a
+	// value like `TOKEN: "${AUTH}"` reached the step verbatim: the `${AUTH}`
+	// went through as six literal characters and whatever read it got nonsense
+	// rather than the token.
+	case *flow.RetryStep:
+		se.expandEnvMap(s.Env)
+	case *flow.RunBrowserScriptStep:
+		se.expandEnvMap(s.Env)
+	case *flow.RunWebViewScriptStep:
+		se.expandEnvMap(s.Env)
+	case *flow.DefineVariablesStep:
+		se.expandEnvMap(s.Env)
+	case *flow.RunShellStep:
+		// Only `env:`. The command itself is deliberately left alone so shell
+		// syntax stays shell syntax — `${VAR}` means the same thing in both
+		// languages, and expanding it here would blank the MAESTRO_* values the
+		// step puts in the environment for the command to use. Flow variables
+		// are already exported into that environment, so `$MY_VAR` in a command
+		// resolves without any expansion happening first.
+		se.expandEnvMap(s.Env)
+
+	// Device-control / gesture steps: string value fields were missing from
+	// this allowlist, so `${VAR}` reached the driver verbatim (e.g.
+	// setOrientation: ${VAR} → "invalid orientation", #137).
+	case *flow.SetOrientationStep:
+		s.Orientation = se.ExpandVariables(s.Orientation)
+	case *flow.SetLocationStep:
+		s.Latitude = se.ExpandVariables(s.Latitude)
+		s.Longitude = se.ExpandVariables(s.Longitude)
+	case *flow.SetClipboardStep:
+		s.Text = se.ExpandVariables(s.Text)
+	case *flow.SwipeStep:
+		s.Direction = se.ExpandVariables(s.Direction)
+		s.Start = se.ExpandVariables(s.Start)
+		s.End = se.ExpandVariables(s.End)
+		if s.Selector != nil {
+			s.Selector = se.expandSelector(s.Selector)
 		}
+	case *flow.ScrollStep:
+		s.Direction = se.ExpandVariables(s.Direction)
+	case *flow.OpenBrowserStep:
+		s.URL = se.ExpandVariables(s.URL)
 	}
 }
 

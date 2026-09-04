@@ -3,6 +3,7 @@ package wda
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,13 +16,15 @@ import (
 
 	goios "github.com/danielpaulus/go-ios/ios"
 	"github.com/danielpaulus/go-ios/ios/forward"
+	"github.com/danielpaulus/go-ios/ios/instruments"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
+	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
 
 const (
-	wdaBasePort    = uint16(8100)
-	wdaPortRange   = uint16(1000)
+	wdaBasePort  = uint16(8100)
+	wdaPortRange = uint16(1000)
 	buildTimeout = 10 * time.Minute
 	// startupTimeout covers the full window from invoking
 	// `xcodebuild test-without-building` to WDA's FBWebServer printing
@@ -93,9 +96,17 @@ func PortFromUDID(udid string) uint16 {
 	if idx := strings.LastIndex(udid, "-"); idx >= 0 {
 		seg = udid[idx+1:]
 	}
+	// Bound to the last 12 hex chars before parsing. A standard UUID's final
+	// segment is already exactly 12 chars, so UUID-derived ports are unchanged;
+	// a legacy 40-char hyphenless UDID would otherwise overflow uint64 in
+	// ParseUint and fall back to 8100 for every device — colliding in parallel
+	// runs (#129).
+	if len(seg) > 12 {
+		seg = seg[len(seg)-12:]
+	}
 	val, err := strconv.ParseUint(seg, 16, 64)
 	if err != nil {
-		return wdaBasePort // fallback to 8100 if UDID is not a standard UUID
+		return wdaBasePort // fallback to 8100 if the tail isn't hex
 	}
 	return wdaBasePort + uint16(val%uint64(wdaPortRange))
 }
@@ -198,7 +209,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	for attempt := 1; attempt <= maxStartupAttempts; attempt++ {
 		if attempt > 1 {
 			banner := fmt.Sprintf(
-				"  ⚠ WDA stalled on attempt %d/%d: %v",
+				"  ⚠ WDA startup failed on attempt %d/%d: %v",
 				attempt-1, maxStartupAttempts, lastErr,
 			)
 			fmt.Fprintln(os.Stderr, banner)
@@ -222,6 +233,12 @@ func (r *Runner) Start(ctx context.Context) error {
 				if rerr := resetSimulator(ctx, r.deviceUDID); rerr != nil {
 					fmt.Fprintf(os.Stderr, "  ⚠ simctl reset failed: %v (continuing anyway)\n", rerr)
 				}
+			} else {
+				// A device had no recovery step at all, on the assumption it
+				// could not get wedged. A WebDriverAgentRunner left running
+				// from the previous attempt still owns the device, so every
+				// retry raced the session it needed to replace.
+				terminateDeviceWDA(r.deviceUDID)
 			}
 		}
 
@@ -239,6 +256,13 @@ func (r *Runner) Start(ctx context.Context) error {
 			}
 			fmt.Println("WebDriverAgent started")
 			return nil
+		}
+		// Deterministic configuration failures won't be fixed by retrying —
+		// report the real error immediately instead of burning ~4 blind
+		// attempts (#118).
+		var perm *permanentStartupError
+		if errors.As(err, &perm) {
+			return fmt.Errorf("WDA failed to start: %w", err)
 		}
 		lastErr = err
 	}
@@ -290,7 +314,15 @@ func (r *Runner) startOnce(ctx context.Context, xctestrun, logPath string, attem
 		return fmt.Errorf("failed to start WDA: %w", err)
 	}
 
-	if err := r.waitForStartup(logPath); err != nil {
+	// Watch for the process exiting before WDA is ready. A fast-failing
+	// xcodebuild (bad -destination, missing runtime, …) previously looked
+	// identical to a hang: the log stopped growing and the stall detector
+	// misreported it 60s later, burning blind retries (#118).
+	cmd := r.cmd
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- cmd.Wait() }()
+
+	if err := r.waitForStartup(logPath, exitCh); err != nil {
 		r.Stop()
 		return err
 	}
@@ -574,9 +606,82 @@ func (r *Runner) destination() string {
 	// so the resolver gets a single concrete destination.
 	isSim, _ := r.isSimulator()
 	if isSim {
-		return fmt.Sprintf("platform=iOS Simulator,arch=%s,id=%s", runtime.GOARCH, r.deviceUDID)
+		return fmt.Sprintf("platform=iOS Simulator,arch=%s,id=%s", simulator.XcodebuildArch(runtime.GOARCH), r.deviceUDID)
 	}
-	return fmt.Sprintf("platform=iOS,id=%s", r.deviceUDID)
+	// A physical device has the same ambiguity: the resolver lists both arm64
+	// and arm64e for one iPhone and warns "Using the first of multiple
+	// matching destinations". The pin above was simulator-only, so devices
+	// kept the coin flip — and a wrong pick stalls identically, which is what
+	// "xcodebuild stalled (no log output)" on a real device looks like.
+	//
+	// arm64 is the slice WDA is built as. MAESTRO_WDA_DEST_ARCH overrides it,
+	// and setting it to "any" drops the pin entirely, so a device whose
+	// resolver disagrees can be recovered without a new binary.
+	arch := os.Getenv("MAESTRO_WDA_DEST_ARCH")
+	if arch == "" {
+		arch = "arm64"
+	}
+	if strings.EqualFold(arch, "any") {
+		return fmt.Sprintf("platform=iOS,id=%s", r.deviceUDID)
+	}
+	return fmt.Sprintf("platform=iOS,arch=%s,id=%s", arch, r.deviceUDID)
+}
+
+// wdaRunnerBundleID is the XCTest runner installed on the device by the WDA
+// build. Its process is what survives a host-side `xcodebuild` kill.
+const wdaRunnerBundleID = "WebDriverAgentRunner-Runner"
+
+// terminateDeviceWDA kills a WebDriverAgentRunner left running on a physical
+// device.
+//
+// Killing xcodebuild on the host does not end the XCTest session on the phone:
+// the runner app stays resident holding the port, and the next
+// `test-without-building` attempts to start a second session while the first
+// still owns the device. That is the shape of "a few runs succeed, then every
+// run stalls" — nothing is cleaned up between them, so the failure is
+// cumulative rather than transient, and retrying without clearing it hits the
+// same wall every time.
+//
+// Best-effort by design: every failure here is logged and swallowed. This runs
+// on the recovery path, where the run is already failing, and a device that
+// will not answer the instruments channel must not turn a retryable stall into
+// a hard error.
+func terminateDeviceWDA(udid string) {
+	device, err := goios.GetDevice(udid)
+	if err != nil {
+		logger.Debug("device WDA cleanup: no device %s: %v", udid, err)
+		return
+	}
+	info, err := instruments.NewDeviceInfoService(device)
+	if err != nil {
+		logger.Debug("device WDA cleanup: device info service: %v", err)
+		return
+	}
+	defer info.Close()
+
+	procs, err := info.ProcessList()
+	if err != nil {
+		logger.Debug("device WDA cleanup: process list: %v", err)
+		return
+	}
+
+	pc, err := instruments.NewProcessControl(device)
+	if err != nil {
+		logger.Debug("device WDA cleanup: process control: %v", err)
+		return
+	}
+	defer func() { _ = pc.Close() }()
+
+	for _, proc := range procs {
+		if !strings.Contains(proc.Name, "WebDriverAgentRunner") {
+			continue
+		}
+		if err := pc.KillProcess(proc.Pid); err != nil {
+			logger.Debug("device WDA cleanup: kill %s (pid %d): %v", proc.Name, proc.Pid, err)
+			continue
+		}
+		logger.Info("[wda] terminated leftover %s (pid %d) on device", proc.Name, proc.Pid)
+	}
 }
 
 func (r *Runner) derivedDataPath() string {
@@ -592,7 +697,7 @@ func (r *Runner) findXctestrun() (string, error) {
 	return matches[0], nil
 }
 
-func (r *Runner) waitForStartup(logPath string) error {
+func (r *Runner) waitForStartup(logPath string, exit <-chan error) error {
 	timeout := time.After(startupTimeout)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -606,6 +711,25 @@ func (r *Runner) waitForStartup(logPath string) error {
 
 	for {
 		select {
+		case werr := <-exit:
+			// xcodebuild exited before WDA became ready — WDA runs inside
+			// the xcodebuild process, so this is always a failure even if
+			// the log shows the ready marker. Report the real error from
+			// the log instead of misdiagnosing the ensuing silence as a
+			// stall (#118). checkLog may classify it as permanent
+			// (`xcodebuild: error:`), which skips retries.
+			content, _ := os.ReadFile(logPath)
+			if cerr := r.checkLog(string(content), logPath); cerr != errNotReady && cerr != nil {
+				return cerr
+			}
+			status := "exited unexpectedly (status 0)"
+			if werr != nil {
+				status = fmt.Sprintf("exited: %v", werr)
+			}
+			return fmt.Errorf(
+				"xcodebuild %s before WDA became ready:\n%s\n\nFull log: %s",
+				status, tailLog(logPath, 20), logPath,
+			)
 		case <-ticker.C:
 			content, err := os.ReadFile(logPath)
 			if err != nil {
@@ -622,8 +746,8 @@ func (r *Runner) waitForStartup(logPath string) error {
 				lastLogActivity = time.Now()
 			} else if time.Since(lastLogActivity) > stallDetectWindow {
 				return fmt.Errorf(
-					"xcodebuild stalled (no log output for %v; log: %s)",
-					stallDetectWindow.Round(time.Second), logPath,
+					"xcodebuild stalled (no log output for %v):\n%s\n\nFull log: %s",
+					stallDetectWindow.Round(time.Second), tailLog(logPath, 20), logPath,
 				)
 			}
 		case <-timeout:
@@ -647,11 +771,36 @@ func (r *Runner) checkLog(log, logPath string) error {
 	if strings.Contains(log, "Code Sign error") {
 		return fmt.Errorf("code signing failed - check your DEVELOPMENT_TEAM and provisioning profiles")
 	}
+	// Generic xcodebuild errors (bad -destination, missing runtime, …)
+	// are deterministic configuration failures: surface the actual error
+	// line and skip the retry loop (#118).
+	if line := firstLineContaining(log, "xcodebuild: error:"); line != "" {
+		return &permanentStartupError{fmt.Errorf("%s\n\nFull log: %s", line, logPath)}
+	}
 	if strings.Contains(log, "Testing failed:") {
 		return fmt.Errorf("WDA failed:\n%s\n\nFull log: %s", tailLog(logPath, 20), logPath)
 	}
 
 	return errNotReady
+}
+
+// permanentStartupError marks startup failures that retrying cannot fix
+// (bad -destination, missing simulator runtime, …). Start stops the retry
+// loop as soon as it sees one instead of burning further attempts (#118).
+type permanentStartupError struct{ err error }
+
+func (e *permanentStartupError) Error() string { return e.err.Error() }
+func (e *permanentStartupError) Unwrap() error { return e.err }
+
+// firstLineContaining returns the first log line containing substr,
+// trimmed, or "" when absent.
+func firstLineContaining(log, substr string) string {
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, substr) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }
 
 func tailLog(path string, lines int) string {

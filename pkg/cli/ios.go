@@ -138,10 +138,18 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		return nil, nil, fmt.Errorf("get device info: %w", err)
 	}
 
-	// 7. Query app version if appId is known (only works for simulators)
-	appVersion := ""
+	// 7. Query the app's version and build number.
+	//
+	// simctl can only reach an installed simulator app, so on a physical device
+	// the same two keys are read from the .app being tested instead — that is
+	// the binary the run is about, and without it a real-device report carries
+	// no version at all.
+	appVersion, appBuild := "", ""
 	if cfg.AppID != "" && isSimulator {
-		appVersion = getIOSAppVersion(udid, cfg.AppID)
+		appVersion, appBuild = getIOSAppVersionAndBuild(udid, cfg.AppID)
+	}
+	if appVersion == "" && appBuild == "" && cfg.AppFile != "" {
+		appVersion, appBuild = readBundleVersionAndBuild(cfg.AppFile)
 	}
 
 	// 8. Get screen size
@@ -160,6 +168,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		ScreenHeight: screenH,
 		AppID:        cfg.AppID,
 		AppVersion:   appVersion,
+		AppBuild:     appBuild,
 	}
 
 	// 9. Create driver
@@ -524,31 +533,43 @@ func extractIOSVersion(runtime string) string {
 	return runtime
 }
 
-// getIOSAppVersion queries the iOS simulator for an app's version.
-func getIOSAppVersion(udid, bundleID string) string {
+// getIOSAppVersionAndBuild reads an installed simulator app's marketing version
+// and build number — CFBundleShortVersionString and CFBundleVersion.
+//
+// One release version covers many CI builds, so the version alone does not say
+// which binary a run used. Both live in the same Info.plist.
+func getIOSAppVersionAndBuild(udid, bundleID string) (version, build string) {
 	if bundleID == "" {
-		return ""
+		return "", ""
 	}
 
 	// Get app container path
 	out, err := runCommand("xcrun", "simctl", "get_app_container", udid, bundleID)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 
 	appPath := strings.TrimSpace(out)
 	if appPath == "" {
-		return ""
+		return "", ""
 	}
 
-	// Read Info.plist from app bundle
+	return readBundleVersionAndBuild(appPath)
+}
+
+// readBundleVersionAndBuild reads the two version keys out of a .app bundle's
+// Info.plist. Either is empty when it cannot be read, since a missing version is
+// worth reporting as unknown rather than failing a run over.
+func readBundleVersionAndBuild(appPath string) (version, build string) {
 	plistPath := filepath.Join(appPath, "Info.plist")
-	version, err := runCommand("/usr/libexec/PlistBuddy", "-c", "Print CFBundleShortVersionString", plistPath)
-	if err != nil {
-		return ""
+	read := func(key string) string {
+		out, err := runCommand("/usr/libexec/PlistBuddy", "-c", "Print "+key, plistPath)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(out)
 	}
-
-	return strings.TrimSpace(version)
+	return read("CFBundleShortVersionString"), read("CFBundleVersion")
 }
 
 // autoDetectIOSDevices finds up to N available booted iOS simulators that are not in use.
@@ -599,4 +620,21 @@ func autoDetectIOSDevices(count int) ([]string, error) {
 	}
 
 	return devices, nil
+}
+
+// listPhysicalIOSUDIDs returns the UDIDs of every physical iOS device attached
+// over usbmux. Unlike findConnectedDevice it does not stop at the first one —
+// the `devices` command needs the whole list.
+func listPhysicalIOSUDIDs() ([]string, error) {
+	list, err := goios.ListDevices()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list devices: %w", err)
+	}
+	udids := make([]string, 0, len(list.DeviceList))
+	for _, d := range list.DeviceList {
+		if serial := d.Properties.SerialNumber; serial != "" {
+			udids = append(udids, serial)
+		}
+	}
+	return udids, nil
 }

@@ -21,11 +21,11 @@ import (
 )
 
 const (
-	defaultFindTimeoutMs        = 17000
-	defaultActionableTimeoutMs  = 2000 // brief window to wait for the actionable gate to pass post-find
-	optionalFindTimeoutMs = 7000
-	defaultViewportW      = 1280
-	defaultViewportH      = 800
+	defaultFindTimeoutMs       = 17000
+	defaultActionableTimeoutMs = 2000 // brief window to wait for the actionable gate to pass post-find
+	optionalFindTimeoutMs      = 7000
+	defaultViewportW           = 1280
+	defaultViewportH           = 800
 )
 
 // Config holds browser driver configuration.
@@ -486,6 +486,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.scrollUntilVisible(s)
 	case *flow.SwipeStep:
 		result = d.swipe(s)
+	case *flow.DragAndDropStep:
+		result = d.dragAndDrop(s)
 
 	// Navigation commands
 	case *flow.BackStep:
@@ -530,6 +532,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	// Media
 	case *flow.TakeScreenshotStep:
 		result = d.takeScreenshot(s)
+	case *flow.AssertScreenshotStep:
+		result = d.takeScreenshot(&flow.TakeScreenshotStep{CropOn: s.CropOn})
 
 	// Alert handling
 	case *flow.AcceptAlertStep:
@@ -590,6 +594,17 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.waitForRequest(s)
 	case *flow.ClearNetworkMocksStep:
 		result = d.clearNetworkMocks()
+
+	// Dark mode is the page's prefers-color-scheme rather than an OS switch —
+	// see applyDarkMode.
+	case *flow.SetDarkModeStep:
+		result = d.applyDarkMode(s.Enabled)
+	case *flow.ToggleDarkModeStep:
+		result = d.toggleDarkMode()
+	case *flow.AssertDarkModeStep:
+		result = d.assertDarkModeIs(true)
+	case *flow.AssertLightModeStep:
+		result = d.assertDarkModeIs(false)
 
 	// Unsupported — mobile-only or not applicable to web
 	case *flow.SetAirplaneModeStep, *flow.ToggleAirplaneModeStep:

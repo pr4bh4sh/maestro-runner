@@ -42,6 +42,7 @@ type MockUIA2Client struct {
 	clickCalls          []struct{ X, Y int }
 	doubleClickCalls    []struct{ X, Y int }
 	longClickCalls      []struct{ X, Y, Duration int }
+	dragAndDropCalls    []struct{ FromX, FromY, ToX, ToY, HoldMs, MoveMs int }
 	scrollCalls         []uiautomator2.RectModel
 	scrollDirections    []string
 	swipeCalls          []uiautomator2.RectModel
@@ -107,6 +108,12 @@ func (m *MockUIA2Client) LongClick(x, y, durationMs int) error {
 
 func (m *MockUIA2Client) LongClickElement(elementID string, durationMs int) error {
 	return m.longClickErr
+}
+
+func (m *MockUIA2Client) DragAndDrop(fromX, fromY, toX, toY, holdMs, moveMs int) error {
+	m.dragAndDropCalls = append(m.dragAndDropCalls,
+		struct{ FromX, FromY, ToX, ToY, HoldMs, MoveMs int }{fromX, fromY, toX, toY, holdMs, moveMs})
+	return nil
 }
 
 func (m *MockUIA2Client) ScrollInArea(area uiautomator2.RectModel, direction string, percent float64, speed int) error {
@@ -197,10 +204,13 @@ func (m *MockUIA2Client) SetAppiumSettings(settings map[string]interface{}) erro
 // ============================================================================
 
 type MockShellExecutor struct {
-	commands  []string
-	responses []string
-	response  string
-	err       error
+	commands       []string
+	responses      []string
+	pushes         [][2]string // {local, remote} pairs recorded by Push
+	response       string
+	err            error
+	screenshotData []byte
+	screenshotErr  error
 }
 
 func (m *MockShellExecutor) Shell(cmd string) (string, error) {
@@ -211,6 +221,17 @@ func (m *MockShellExecutor) Shell(cmd string) (string, error) {
 		return resp, m.err
 	}
 	return m.response, m.err
+}
+
+// Push records a file push so addMedia (which requires a Push-capable device)
+// can be exercised without real adb.
+func (m *MockShellExecutor) Push(local, remote string) error {
+	m.pushes = append(m.pushes, [2]string{local, remote})
+	return m.err
+}
+
+func (m *MockShellExecutor) Screenshot() ([]byte, error) {
+	return m.screenshotData, m.screenshotErr
 }
 
 // ============================================================================
@@ -292,7 +313,9 @@ func TestLooksLikeRegex(t *testing.T) {
 		{"Hello World", false},          // Plain text with space
 		{"Hello_World", false},          // Plain text with underscore
 		{"Login123", false},             // Alphanumeric
-		{`\.escaped`, false},            // Escaped dot
+		{`\.escaped`, true},             // Escaped dot is regex syntax (#136)
+		{`\$0.00`, true},                // Escaped dollar — user wants regex match (#136)
+		{`example\.com`, true},          // Escaped dot in a domain is regex (#136)
 		{"mastodon.social", false},      // Domain name - period is literal
 		{"Join mastodon.social", false}, // Button text with domain
 		{"user@example.com", false},     // Email address (literal)
@@ -332,8 +355,17 @@ func TestBuildSelectorsRegexPattern(t *testing.T) {
 	if !strings.Contains(s.Value, ".+@.+") {
 		t.Errorf("expected regex pattern '.+@.+' to be preserved, got: %s", s.Value)
 	}
-	if !strings.Contains(s.Value, "(?is)") {
-		t.Error("expected case-insensitive flag in selector")
+	// Regex selectors are case-SENSITIVE, as Maestro's are. This test used to
+	// require (?i) and so pinned the defect: every regex was compiled
+	// case-insensitively, and an anchored pattern could not distinguish what
+	// it was written to distinguish — `^SIGN OUT$` matched a "Sign out" row as
+	// readily as the "SIGN OUT" button.
+	if strings.Contains(s.Value, "(?is)") {
+		t.Errorf("regex selectors must not be case-insensitive, got: %s", s.Value)
+	}
+	// (?s) stays: it only makes `.` span newlines, which multi-line labels need.
+	if !strings.Contains(s.Value, "(?s)") {
+		t.Errorf("expected the dotall flag to be preserved, got: %s", s.Value)
 	}
 }
 
@@ -382,8 +414,8 @@ func TestBuildSelectorsForTapID(t *testing.T) {
 	}
 
 	cases := []struct {
-		idx    int
-		want   string
+		idx     int
+		want    string
 		notWant string
 	}{
 		{0, `resourceId("login_btn").clickable(true)`, "resourceIdMatches"},
@@ -1108,6 +1140,38 @@ func TestScreenshotError(t *testing.T) {
 	_, err := driver.Screenshot()
 	if err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestScreenshotPrefersDeviceCapture(t *testing.T) {
+	deviceData := []byte("adb screenshot")
+	client := &MockUIA2Client{
+		screenshotData: []byte("uia2 screenshot"),
+	}
+	device := &MockShellExecutor{screenshotData: deviceData}
+	driver := New(client, nil, device)
+
+	data, err := driver.Screenshot()
+	if err != nil {
+		t.Fatalf("Screenshot failed: %v", err)
+	}
+	if string(data) != string(deviceData) {
+		t.Errorf("Screenshot data = %q, want ADB capture %q", data, deviceData)
+	}
+}
+
+func TestScreenshotFallsBackToUIA2(t *testing.T) {
+	clientData := []byte("uia2 screenshot")
+	client := &MockUIA2Client{screenshotData: clientData}
+	device := &MockShellExecutor{screenshotErr: errors.New("adb capture failed")}
+	driver := New(client, nil, device)
+
+	data, err := driver.Screenshot()
+	if err != nil {
+		t.Fatalf("Screenshot failed: %v", err)
+	}
+	if string(data) != string(clientData) {
+		t.Errorf("Screenshot data = %q, want UIA2 fallback %q", data, clientData)
 	}
 }
 
@@ -2313,6 +2377,52 @@ func TestTapOnRelativeSelectorBelow(t *testing.T) {
 	}
 	if !clickCalled {
 		t.Error("expected click to be called")
+	}
+}
+
+// TestResolveRelativeSelectorPrefersClosestOverDeepest verifies that directional
+// relative selectors pick the closest element by distance rather than the
+// deepest in the DOM.
+func TestResolveRelativeSelectorPrefersClosestOverDeepest(t *testing.T) {
+	pageSource := `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+    <node text="Email Address" bounds="[100,100][500,130]" class="android.widget.TextView" />
+    <node text="email input" bounds="[100,140][500,180]" class="android.widget.EditText" clickable="true" enabled="true" />
+    <node bounds="[100,300][500,500]" class="android.widget.FrameLayout">
+        <node bounds="[100,300][500,500]" class="android.widget.FrameLayout">
+            <node bounds="[100,300][500,500]" class="android.widget.FrameLayout">
+                <node text="deep link" bounds="[100,350][500,380]" class="android.widget.TextView" clickable="true" enabled="true" />
+            </node>
+        </node>
+    </node>
+</hierarchy>`
+
+	server := setupMockServer(t, map[string]func(w http.ResponseWriter, r *http.Request){
+		"GET /source": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, map[string]interface{}{"value": pageSource})
+		},
+	})
+	defer server.Close()
+
+	client := newMockHTTPClient(server.URL)
+	driver := New(client.Client, nil, nil)
+
+	sel := flow.Selector{
+		Below: &flow.Selector{Text: "Email Address"},
+	}
+
+	info, err := driver.resolveRelativeSelector(sel)
+	if err != nil {
+		t.Fatalf("Expected success, got: %v", err)
+	}
+	if info == nil {
+		t.Fatal("Expected element info")
+	}
+
+	// The closest element below "Email Address" (bottom at y=130) is the
+	// EditText at y=140, not the deeply-nested TextView at y=350.
+	if info.Bounds.Y != 140 {
+		t.Errorf("Expected element at y=140, got y=%d", info.Bounds.Y)
 	}
 }
 

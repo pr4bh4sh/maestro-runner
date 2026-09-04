@@ -197,6 +197,18 @@ func HasVisibleDescendant(elem *ParsedElement) bool {
 	return false
 }
 
+// CountVisibleMatches returns how many elements match the selector, applying
+// the same visibility rules as the single-match page-source path: elements
+// outside the screen bounds are excluded (when the screen size is known), and
+// XCUITest's own visible="false" opinion is not trusted (see
+// findElementByPageSourceOnce for why).
+func CountVisibleMatches(elements []*ParsedElement, sel flow.Selector, screenW, screenH int) int {
+	if screenW > 0 && screenH > 0 {
+		elements = FilterOutOfBounds(elements, screenW, screenH)
+	}
+	return len(FilterBySelector(elements, sel))
+}
+
 // FilterBySelector filters elements by selector properties.
 func FilterBySelector(elements []*ParsedElement, sel flow.Selector) []*ParsedElement {
 	var result []*ParsedElement
@@ -280,7 +292,16 @@ func matchesID(pattern, id string) bool {
 func matchesText(pattern string, texts ...string) bool {
 	pattern = norm.NFC.String(pattern)
 	if looksLikeRegex(pattern) {
-		re, err := regexp.Compile("(?i)" + pattern)
+		// Case-sensitive, deliberately. Compiling with (?i) meant an anchored
+		// pattern could not distinguish what it was written to distinguish:
+		// `^SIGN OUT$` matched a "Sign out" row as readily as the "SIGN OUT"
+		// button, and whichever came first in the page source won (#151).
+		// Maestro matches regex selectors case-sensitively, and a flow written
+		// against it has to behave the same here.
+		//
+		// Plain text selectors are untouched — they are not regexes, and fall
+		// to the case-insensitive contains path below.
+		re, err := regexp.Compile(pattern)
 		if err != nil {
 			// Invalid regex - fall back to contains
 			for _, text := range texts {
@@ -407,6 +428,14 @@ func looksLikeRegex(text string) bool {
 		c := text[i]
 		// Check if it's escaped
 		if i > 0 && text[i-1] == '\\' {
+			// A backslash-escaped metacharacter is regex syntax (\. matches a
+			// literal dot, \$ a literal $), so the whole pattern is a regex.
+			// Classifying it as literal would match the backslash verbatim and
+			// never hit an element whose text has no backslash (#136).
+			switch c {
+			case '.', '*', '+', '?', '[', ']', '{', '}', '|', '(', ')', '^', '$', '\\':
+				return true
+			}
 			continue
 		}
 		switch c {

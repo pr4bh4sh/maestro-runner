@@ -1266,6 +1266,74 @@ func TestFindElementRelativeWithElementsContainsDescendants(t *testing.T) {
 	}
 }
 
+// mockAppiumServerForRelativeDepthTest creates a server with elements that test
+// distance vs. depth selection in directional relative selectors.
+func mockAppiumServerForRelativeDepthTest() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if strings.HasSuffix(path, "/source") {
+			writeJSON(w, map[string]interface{}{
+				"value": `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2340]">
+    <android.widget.TextView text="Email Address" bounds="[100,100][500,130]"/>
+    <android.widget.EditText text="email input" clickable="true" enabled="true" bounds="[100,140][500,180]"/>
+    <android.widget.FrameLayout bounds="[100,300][500,500]">
+      <android.widget.FrameLayout bounds="[100,300][500,500]">
+        <android.widget.FrameLayout bounds="[100,300][500,500]">
+          <android.widget.TextView text="deep link" clickable="true" enabled="true" bounds="[100,350][500,380]"/>
+        </android.widget.FrameLayout>
+      </android.widget.FrameLayout>
+    </android.widget.FrameLayout>
+  </android.widget.FrameLayout>
+</hierarchy>`,
+			})
+			return
+		}
+
+		if strings.Contains(path, "/window/rect") {
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"width": 1080.0, "height": 2340.0, "x": 0.0, "y": 0.0},
+			})
+			return
+		}
+
+		writeJSON(w, map[string]interface{}{"value": nil})
+	}))
+}
+
+// TestFindElementRelativePrefersClosestOverDeepest verifies that directional
+// relative selectors pick the closest element by distance rather than the
+// deepest in the DOM.
+func TestFindElementRelativePrefersClosestOverDeepest(t *testing.T) {
+	server := mockAppiumServerForRelativeDepthTest()
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	source, _ := driver.client.Source()
+	elements, platform, _ := ParsePageSource(source)
+
+	sel := flow.Selector{
+		Below: &flow.Selector{Text: "Email Address"},
+	}
+
+	info, err := driver.findElementRelativeWithElements(sel, elements, platform)
+	if err != nil {
+		t.Fatalf("Expected success, got: %v", err)
+	}
+	if info == nil {
+		t.Fatal("Expected element info")
+	}
+
+	// The closest element below "Email Address" (bottom at y=130) is the
+	// EditText at y=140, not the deeply-nested TextView at y=350.
+	if info.Bounds.Y != 140 {
+		t.Errorf("Expected element at y=140, got y=%d", info.Bounds.Y)
+	}
+}
+
 // TestFindElementRelativeWithNestedRelative tests nested relative selector
 func TestFindElementRelativeWithNestedRelative(t *testing.T) {
 	server := mockAppiumServerForRelativeElements()
@@ -1672,15 +1740,15 @@ func TestGetElementInfoAndroidAttribute(t *testing.T) {
 	driver := createTestAppiumDriver(server)
 	driver.platform = "android"
 
-	info, err := driver.getElementInfo("elem-1")
-	if err != nil {
-		t.Fatalf("Expected success, got error: %v", err)
-	}
+	// The accessibility description is no longer fetched for every element —
+	// only copyTextFrom wants it — but the platform-specific attribute choice
+	// still has to be right.
+	label := driver.accessibilityLabelOf("elem-1")
 	if requestedAttr != "content-desc" {
 		t.Errorf("Expected Android to request 'content-desc', got '%s'", requestedAttr)
 	}
-	if info.AccessibilityLabel != "Submit button" {
-		t.Errorf("Expected AccessibilityLabel 'Submit button', got '%s'", info.AccessibilityLabel)
+	if label != "Submit button" {
+		t.Errorf("Expected label 'Submit button', got '%s'", label)
 	}
 }
 
@@ -1718,15 +1786,12 @@ func TestGetElementInfoIOSAttribute(t *testing.T) {
 	driver := createTestAppiumDriver(server)
 	driver.platform = "ios"
 
-	info, err := driver.getElementInfo("elem-1")
-	if err != nil {
-		t.Fatalf("Expected success, got error: %v", err)
-	}
+	label := driver.accessibilityLabelOf("elem-1")
 	if requestedAttr != "label" {
 		t.Errorf("Expected iOS to request 'label', got '%s'", requestedAttr)
 	}
-	if info.AccessibilityLabel != "Submit button" {
-		t.Errorf("Expected AccessibilityLabel 'Submit button', got '%s'", info.AccessibilityLabel)
+	if label != "Submit button" {
+		t.Errorf("Expected label 'Submit button', got '%s'", label)
 	}
 }
 
@@ -2071,7 +2136,10 @@ func TestAssertNotVisibleWhenVisible(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/source") {
 			writeJSON(w, map[string]interface{}{
-				"value": `<hierarchy><android.widget.Button text="Login" bounds="[0,0][100,50]"/></hierarchy>`,
+				// Real Appium page source always carries displayed=; verified
+				// against a device. Without it the element parses as hidden,
+				// which is now a pass rather than a failure.
+				"value": `<hierarchy><android.widget.Button text="Login" displayed="true" bounds="[0,0][100,50]"/></hierarchy>`,
 			})
 			return
 		}
@@ -2411,6 +2479,199 @@ func TestSwipeInvalidDirection(t *testing.T) {
 	}
 }
 
+// TestSwipeDirectionHonorsDuration verifies a plain direction swipe passes
+// `duration:` through to the W3C actions payload instead of a hardcoded 500ms.
+func TestSwipeDirectionHonorsDuration(t *testing.T) {
+	var actionsBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/actions") && r.Method == "POST" {
+			body, _ := io.ReadAll(r.Body)
+			actionsBody = string(body)
+		}
+		writeJSON(w, map[string]interface{}{"value": nil})
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	step := &flow.SwipeStep{Direction: "up", Duration: 1200}
+	result := driver.swipe(step)
+
+	if !result.Success {
+		t.Fatalf("Expected success, got: %s", result.Message)
+	}
+	if !strings.Contains(actionsBody, `"duration":1200`) {
+		t.Errorf("expected actions payload with duration 1200, got: %s", actionsBody)
+	}
+}
+
+// TestSwipeWithSelectorAnchorsOnElement verifies a from:/selector swipe is
+// anchored on the element's bounds and honours duration (#114 parity with
+// the uiautomator2/devicelab drivers).
+func TestSwipeWithSelectorAnchorsOnElement(t *testing.T) {
+	var actionsBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/actions") && r.Method == "POST":
+			body, _ := io.ReadAll(r.Body)
+			actionsBody = string(body)
+			writeJSON(w, map[string]interface{}{"value": nil})
+		case strings.HasSuffix(path, "/element") && r.Method == "POST":
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{
+					"element-6066-11e4-a52e-4f735466cecf": "elem-swipe",
+				},
+			})
+		case strings.Contains(path, "/rect"):
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"x": 100.0, "y": 200.0, "width": 300.0, "height": 80.0},
+			})
+		case strings.Contains(path, "/text"):
+			writeJSON(w, map[string]interface{}{"value": "Slider"})
+		case strings.Contains(path, "/displayed"), strings.Contains(path, "/enabled"):
+			writeJSON(w, map[string]interface{}{"value": true})
+		default:
+			writeJSON(w, map[string]interface{}{"value": nil})
+		}
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	sel := flow.Selector{ID: "slider"}
+	step := &flow.SwipeStep{Direction: "left", Selector: &sel, Duration: 800}
+	result := driver.swipe(step)
+
+	if !result.Success {
+		t.Fatalf("Expected success, got: %s", result.Message)
+	}
+	// Element bounds x=100,y=200,w=300,h=80: `left` starts at 90% X inside
+	// the element (370, 240) and ends 10% past its left edge (70, 240).
+	for _, want := range []string{`"x":370`, `"y":240`, `"x":70`, `"duration":800`} {
+		if !strings.Contains(actionsBody, want) {
+			t.Errorf("expected actions payload containing %s, got: %s", want, actionsBody)
+		}
+	}
+}
+
+// --- #122: Android inputText must reach WebView DOM inputs ---
+
+// TestInputText_AndroidTypesIntoActiveElement verifies the Android path
+// prefers element-scoped typing (POST /element/{id}/value) into the focused
+// element over blind W3C key actions, which silently no-op on WebView inputs.
+func TestInputText_AndroidTypesIntoActiveElement(t *testing.T) {
+	var valueBody string
+	actionsCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/element/active") && r.Method == "POST":
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"element-6066-11e4-a52e-4f735466cecf": "focused-1"},
+			})
+		case strings.HasSuffix(path, "/element/focused-1/value") && r.Method == "POST":
+			body, _ := io.ReadAll(r.Body)
+			valueBody = string(body)
+			writeJSON(w, map[string]interface{}{"value": nil})
+		case strings.HasSuffix(path, "/actions"):
+			actionsCalled = true
+			writeJSON(w, map[string]interface{}{"value": nil})
+		default:
+			writeJSON(w, map[string]interface{}{"value": nil})
+		}
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	result := driver.inputText(&flow.InputTextStep{Text: "web-input-122"})
+
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.Message)
+	}
+	if !strings.Contains(valueBody, "web-input-122") {
+		t.Errorf("expected element-scoped /value payload with text, got: %s", valueBody)
+	}
+	if actionsCalled {
+		t.Error("expected no blind /actions key events when an element has focus")
+	}
+}
+
+// TestInputText_AndroidFallsBackToBlindKeys verifies key actions remain the
+// fallback when no element reports focus.
+func TestInputText_AndroidFallsBackToBlindKeys(t *testing.T) {
+	actionsCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/element/active") && r.Method == "POST":
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(w, map[string]interface{}{"value": map[string]interface{}{"error": "no such element"}})
+		case strings.HasSuffix(path, "/actions"):
+			actionsCalled = true
+			writeJSON(w, map[string]interface{}{"value": nil})
+		default:
+			writeJSON(w, map[string]interface{}{"value": nil})
+		}
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	result := driver.inputText(&flow.InputTextStep{Text: "fallback-text"})
+
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.Message)
+	}
+	if !actionsCalled {
+		t.Error("expected fallback to blind /actions key events")
+	}
+}
+
+// TestInputText_AndroidHonorsSelector verifies an inline selector finds the
+// element and types into it directly (parity with uia2/devicelab).
+func TestInputText_AndroidHonorsSelector(t *testing.T) {
+	var valueBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/element") && r.Method == "POST":
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"element-6066-11e4-a52e-4f735466cecf": "elem-sel"},
+			})
+		case strings.HasSuffix(path, "/element/elem-sel/value") && r.Method == "POST":
+			body, _ := io.ReadAll(r.Body)
+			valueBody = string(body)
+			writeJSON(w, map[string]interface{}{"value": nil})
+		case strings.Contains(path, "/rect"):
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"x": 10.0, "y": 20.0, "width": 300.0, "height": 50.0},
+			})
+		case strings.Contains(path, "/text"):
+			writeJSON(w, map[string]interface{}{"value": ""})
+		case strings.Contains(path, "/displayed"), strings.Contains(path, "/enabled"):
+			writeJSON(w, map[string]interface{}{"value": true})
+		default:
+			writeJSON(w, map[string]interface{}{"value": nil})
+		}
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	step := &flow.InputTextStep{Text: "selector-typed"}
+	step.Selector = flow.Selector{ID: "login-username"}
+	result := driver.inputText(step)
+
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.Message)
+	}
+	if !strings.Contains(valueBody, "selector-typed") {
+		t.Errorf("expected element-scoped /value payload with text, got: %s", valueBody)
+	}
+}
+
 // TestInputTextError tests inputText when SendKeys fails
 func TestInputTextError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2551,4 +2812,90 @@ func TestAppiumScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 	if scrollCount != 3 {
 		t.Errorf("Expected exactly 3 scrolls (maxScrolls=3), got %d", scrollCount)
 	}
+}
+
+// getElementInfo used to fetch five attributes for every element. Two of them
+// were never read: nothing consumes ElementInfo.Enabled on this path, and the
+// accessibility description is wanted by exactly one command. On a real device
+// each request costs roughly the same regardless of what it asks for, so the
+// call count is the cost.
+func TestGetElementInfo_AsksOnlyForWhatIsRead(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/rect"):
+			_, _ = w.Write([]byte(`{"value":{"x":10,"y":20,"width":100,"height":50}}`))
+		case strings.HasSuffix(r.URL.Path, "/text"):
+			_, _ = w.Write([]byte(`{"value":"Products"}`))
+		case strings.HasSuffix(r.URL.Path, "/displayed"):
+			_, _ = w.Write([]byte(`{"value":true}`))
+		default:
+			_, _ = w.Write([]byte(`{"value":""}`))
+		}
+	}))
+	defer server.Close()
+
+	d := createTestAppiumDriver(server)
+	info, err := d.getElementInfo("elem-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(paths) != 3 {
+		t.Errorf("made %d requests (%v), want 3", len(paths), paths)
+	}
+	for _, p := range paths {
+		if strings.Contains(p, "/enabled") || strings.Contains(p, "/attribute/") {
+			t.Errorf("unexpected request %q — nothing reads it", p)
+		}
+	}
+
+	// The fields that survive still have to be right.
+	if info.Text != "Products" || !info.Visible {
+		t.Errorf("info = %+v", info)
+	}
+	if info.Bounds.Width != 100 || info.Bounds.Height != 50 {
+		t.Errorf("bounds = %+v", info.Bounds)
+	}
+}
+
+func TestAccessibilityLabelOf(t *testing.T) {
+	t.Run("fetches for a real element handle", func(t *testing.T) {
+		var asked string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			asked = r.URL.Path
+			_, _ = w.Write([]byte(`{"value":"Add to cart"}`))
+		}))
+		defer server.Close()
+
+		d := createTestAppiumDriver(server)
+		if got := d.accessibilityLabelOf("elem-1"); got != "Add to cart" {
+			t.Errorf("got %q", got)
+		}
+		if !strings.Contains(asked, "content-desc") {
+			t.Errorf("asked for %q, want the Android content-desc attribute", asked)
+		}
+	})
+
+	t.Run("skips page-source elements without a request", func(t *testing.T) {
+		// These carry a resource id rather than an Appium handle, and already
+		// fold the description into Text when parsed — a lookup could only fail.
+		var calls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			_, _ = w.Write([]byte(`{"value":""}`))
+		}))
+		defer server.Close()
+
+		d := createTestAppiumDriver(server)
+		for _, id := range []string{"com.testhiveapp:id/action_bar_root", ""} {
+			if got := d.accessibilityLabelOf(id); got != "" {
+				t.Errorf("accessibilityLabelOf(%q) = %q, want empty", id, got)
+			}
+		}
+		if calls != 0 {
+			t.Errorf("made %d requests, want 0", calls)
+		}
+	})
 }

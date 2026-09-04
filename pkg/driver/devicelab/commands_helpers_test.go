@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -352,20 +354,37 @@ func TestScrollByAdb_ShellError(t *testing.T) {
 // so unused methods retain their no-op behavior.
 type trackingClient struct {
 	*mockDeviceLabClient
-	backCalls       int
-	pressKeyCodes   []int
-	clipboardText   string
-	orientation     string
-	screenshotData  []byte
-	screenshotErr   error
-	setClipErr      error
-	setOrientErr    error
-	backErr         error
-	pressKeyErr     error
+	backCalls      int
+	pressKeyCodes  []int
+	clipboardText  string
+	orientation    string
+	screenshotData []byte
+	screenshotErr  error
+	setClipErr     error
+	setOrientErr   error
+	backErr        error
+	pressKeyErr    error
+	addMediaNames  []string
+	addMediaErr    error
+}
+
+func (t *trackingClient) AddMedia(name, mime string, data []byte) error {
+	t.addMediaNames = append(t.addMediaNames, name)
+	return t.addMediaErr
 }
 
 func newTrackingClient() *trackingClient {
 	return &trackingClient{mockDeviceLabClient: &mockDeviceLabClient{}}
+}
+
+// newAdbSwipeClient returns a client whose agent swipe fails, forcing
+// swipeWithAbsoluteCoords down its adb fallback. The geometry tests below
+// assert on the `input swipe` string, so they need that path specifically;
+// the agent path is preferred in production and covered separately.
+func newAdbSwipeClient() *trackingClient {
+	c := newTrackingClient()
+	c.swipeCoordsErr = errors.New("agent unavailable")
+	return c
 }
 
 func (t *trackingClient) Back() error {
@@ -614,19 +633,25 @@ func TestOpenBrowser(t *testing.T) {
 }
 
 func TestAddMedia(t *testing.T) {
-	shell := &mockShell{}
-	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
-	res := driver.addMedia(&flow.AddMediaStep{Files: []string{"/sdcard/a.jpg", "/sdcard/b.mp4"}})
+	// addMedia now streams file bytes to the agent via client.AddMedia, so the
+	// files must exist on disk.
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.jpg")
+	b := filepath.Join(dir, "b.mp4")
+	for _, f := range []string{a, b} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	client := newTrackingClient()
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+	res := driver.addMedia(&flow.AddMediaStep{Files: []string{a, b}})
 	if !res.Success {
 		t.Fatalf("addMedia failed: %v", res.Error)
 	}
-	if len(shell.commands) != 2 {
-		t.Errorf("expected 2 broadcast commands, got %d", len(shell.commands))
-	}
-	for _, c := range shell.commands {
-		if !strings.Contains(c, "MEDIA_SCANNER_SCAN_FILE") {
-			t.Errorf("expected MEDIA_SCANNER_SCAN_FILE, got: %s", c)
-		}
+	if got := client.addMediaNames; len(got) != 2 || got[0] != "a.jpg" || got[1] != "b.mp4" {
+		t.Errorf("expected AddMedia(a.jpg), AddMedia(b.mp4), got %v", got)
 	}
 
 	// Empty file list
@@ -817,7 +842,7 @@ func TestLaunchWithMonkey(t *testing.T) {
 
 func TestSwipeWithAbsoluteCoords(t *testing.T) {
 	shell := &mockShell{}
-	driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+	driver := New(newAdbSwipeClient(), &core.PlatformInfo{}, shell)
 
 	res := driver.swipeWithAbsoluteCoords(100, 200, 300, 400, 500)
 	if !res.Success {
@@ -835,13 +860,13 @@ func TestSwipeWithAbsoluteCoords(t *testing.T) {
 	}
 
 	// No device
-	res = New(newTrackingClient(), &core.PlatformInfo{}, nil).swipeWithAbsoluteCoords(0, 0, 1, 1, 100)
+	res = New(newAdbSwipeClient(), &core.PlatformInfo{}, nil).swipeWithAbsoluteCoords(0, 0, 1, 1, 100)
 	if res.Success {
 		t.Error("swipeWithAbsoluteCoords without device should fail")
 	}
 
 	// Shell error
-	res = New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{err: errors.New("nope")}).swipeWithAbsoluteCoords(0, 0, 1, 1, 100)
+	res = New(newAdbSwipeClient(), &core.PlatformInfo{}, &mockShell{err: errors.New("nope")}).swipeWithAbsoluteCoords(0, 0, 1, 1, 100)
 	if res.Success {
 		t.Error("swipeWithAbsoluteCoords should propagate shell error")
 	}
@@ -849,7 +874,7 @@ func TestSwipeWithAbsoluteCoords(t *testing.T) {
 
 func TestSwipeWithCoordinates(t *testing.T) {
 	shell := &mockShell{}
-	driver := New(newTrackingClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
+	driver := New(newAdbSwipeClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
 
 	// Percentage coords resolve to absolute via screen size.
 	res := driver.swipeWithCoordinates("50%,25%", "50%,75%", 200)
@@ -873,13 +898,13 @@ func TestSwipeWithCoordinates(t *testing.T) {
 	}
 
 	// No device
-	res = New(newTrackingClient(), &core.PlatformInfo{}, nil).swipeWithCoordinates("50%,25%", "50%,75%", 100)
+	res = New(newAdbSwipeClient(), &core.PlatformInfo{}, nil).swipeWithCoordinates("50%,25%", "50%,75%", 100)
 	if res.Success {
 		t.Error("swipeWithCoordinates without device should fail")
 	}
 
 	// No screen size
-	res = New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{}).swipeWithCoordinates("50%,25%", "50%,75%", 100)
+	res = New(newAdbSwipeClient(), &core.PlatformInfo{}, &mockShell{}).swipeWithCoordinates("50%,25%", "50%,75%", 100)
 	if res.Success {
 		t.Error("swipeWithCoordinates without screen size should fail")
 	}
@@ -1047,7 +1072,7 @@ func TestSwipeWithMaestroCoordinates(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.direction, func(t *testing.T) {
 			shell := &mockShell{}
-			driver := New(newTrackingClient(), &core.PlatformInfo{}, shell)
+			driver := New(newAdbSwipeClient(), &core.PlatformInfo{}, shell)
 			res := driver.swipeWithMaestroCoordinates(c.direction, W, H, 300)
 			if !res.Success {
 				t.Fatalf("swipeWithMaestroCoordinates failed: %v", res.Error)
@@ -1315,7 +1340,7 @@ func TestLooksLikeRegex(t *testing.T) {
 		{"end]", true},         // ]
 		{"group()", true},      // (
 		{"alt|alt", true},      // |
-		{"\\.escaped", false},  // escaped dot
+		{"\\.escaped", true},   // escaped dot is regex syntax (#136)
 		{"", false},
 	}
 	for _, c := range cases {
@@ -1331,11 +1356,11 @@ func TestLooksLikeRegex(t *testing.T) {
 
 func TestEscapeUIAutomatorString(t *testing.T) {
 	cases := map[string]string{
-		"":          "",
-		"plain":     "plain",
-		`"quoted"`:  `\"quoted\"`,
-		`a"b"c`:     `a\"b\"c`,
-		`single'`:   `single'`,
+		"":         "",
+		"plain":    "plain",
+		`"quoted"`: `\"quoted\"`,
+		`a"b"c`:    `a\"b\"c`,
+		`single'`:  `single'`,
 	}
 	for in, want := range cases {
 		if got := escapeUIAutomatorString(in); got != want {
@@ -1526,7 +1551,7 @@ func TestTapOnPoint_Errors(t *testing.T) {
 
 func TestSwipe_StartEndStrings(t *testing.T) {
 	shell := &mockShell{}
-	driver := New(newTrackingClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
+	driver := New(newAdbSwipeClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
 	res := driver.swipe(&flow.SwipeStep{Start: "50%,25%", End: "50%,75%", Duration: 100})
 	if !res.Success {
 		t.Fatalf("swipe start/end failed: %v", res.Error)
@@ -1538,7 +1563,7 @@ func TestSwipe_StartEndStrings(t *testing.T) {
 
 func TestSwipe_AbsoluteXY(t *testing.T) {
 	shell := &mockShell{}
-	driver := New(newTrackingClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
+	driver := New(newAdbSwipeClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
 	res := driver.swipe(&flow.SwipeStep{StartX: 10, StartY: 20, EndX: 100, EndY: 200, Duration: 50})
 	if !res.Success {
 		t.Fatalf("swipe absolute failed: %v", res.Error)
@@ -1550,7 +1575,7 @@ func TestSwipe_AbsoluteXY(t *testing.T) {
 
 func TestSwipe_DirectionOnly(t *testing.T) {
 	shell := &mockShell{}
-	driver := New(newTrackingClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
+	driver := New(newAdbSwipeClient(), &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
 	// No start/end, no x/y, no selector → use Maestro coordinates
 	res := driver.swipe(&flow.SwipeStep{Direction: "up", Duration: 300})
 	if !res.Success {
@@ -1606,10 +1631,12 @@ type richClient struct {
 	applySettErr error
 }
 
-func (r *richClient) Source() (string, error)                            { return r.source, r.sourceErr }
-func (r *richClient) GetOrientation() (string, error)                    { return r.orientation, nil }
-func (r *richClient) GetClipboard() (string, error)                      { return r.clipboard, nil }
-func (r *richClient) WaitForSettle(timeoutMs, quietMs int) (bool, error) { return r.settleQuiet, r.settleErr }
+func (r *richClient) Source() (string, error)         { return r.source, r.sourceErr }
+func (r *richClient) GetOrientation() (string, error) { return r.orientation, nil }
+func (r *richClient) GetClipboard() (string, error)   { return r.clipboard, nil }
+func (r *richClient) WaitForSettle(timeoutMs, quietMs int) (bool, error) {
+	return r.settleQuiet, r.settleErr
+}
 func (r *richClient) SetAppiumSettings(settings map[string]interface{}) error {
 	return r.applySettErr
 }
@@ -1762,6 +1789,10 @@ type scriptedClient struct {
 	findElementErr    error
 	findElementCalls  int
 
+	findAndClickGuardW, findAndClickGuardH int
+	findAndClickHitTest                    bool
+	findAndClickBlockedBy                  string
+	findAndClickSkip                       bool
 	// findAndClickReturn is returned for any FindAndClick call.
 	findAndClickReturn *uiautomator2.Element
 	findAndClickErr    error
@@ -1770,8 +1801,8 @@ type scriptedClient struct {
 	activeElementReturn *uiautomator2.Element
 	activeElementErr    error
 
-	sendKeyActionsCalls   []string
-	sendKeyActionsErr     error
+	sendKeyActionsCalls []string
+	sendKeyActionsErr   error
 }
 
 func (s *scriptedClient) FindElement(strategy, selector string) (*uiautomator2.Element, error) {
@@ -1781,6 +1812,16 @@ func (s *scriptedClient) FindElement(strategy, selector string) (*uiautomator2.E
 func (s *scriptedClient) FindAndClick(strategy, selector string) (*uiautomator2.Element, error) {
 	s.findAndClickCalls++
 	return s.findAndClickReturn, s.findAndClickErr
+}
+func (s *scriptedClient) FindAndClickChecked(strategy, selector string, screenW, screenH int, hitTest bool) (*uiautomator2.Element, bool, string, error) {
+	elem, clicked, err := s.FindAndClickGuarded(strategy, selector, screenW, screenH)
+	s.findAndClickHitTest = hitTest
+	return elem, clicked, s.findAndClickBlockedBy, err
+}
+func (s *scriptedClient) FindAndClickGuarded(strategy, selector string, screenW, screenH int) (*uiautomator2.Element, bool, error) {
+	s.findAndClickCalls++
+	s.findAndClickGuardW, s.findAndClickGuardH = screenW, screenH
+	return s.findAndClickReturn, !s.findAndClickSkip, s.findAndClickErr
 }
 func (s *scriptedClient) ActiveElement() (*uiautomator2.Element, error) {
 	return s.activeElementReturn, s.activeElementErr
@@ -1981,10 +2022,49 @@ func TestAssertVisible_NotFound(t *testing.T) {
 }
 
 // =============================================================================
-// inputText — no-selector path uses SendKeyActions directly
+// inputText — no-selector path prefers focused element, falls back to keys
 // =============================================================================
 
+// TestInputText_NoSelector_PrefersFocusedElement locks in the #122 fix:
+// with a focused element available, typing is element-scoped (reaches
+// WebView DOM inputs) instead of blind key events.
+func TestInputText_NoSelector_PrefersFocusedElement(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, nil)
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputText(&flow.InputTextStep{Text: "hello"})
+	if !res.Success {
+		t.Fatalf("inputText no-selector: %v", res.Error)
+	}
+	if typed != "hello" {
+		t.Errorf("expected element-scoped typing of %q, got %q", "hello", typed)
+	}
+	if len(client.sendKeyActionsCalls) != 0 {
+		t.Errorf("expected no blind key actions, got %v", client.sendKeyActionsCalls)
+	}
+}
+
+// TestInputText_NoSelector_FallsBackOnElementError verifies blind key events
+// remain the fallback when element-scoped typing fails.
+func TestInputText_NoSelector_FallsBackOnElementError(t *testing.T) {
+	var typed string
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.activeElementReturn = makeFocusedElement("", &typed, nil, fmt.Errorf("setText rejected"))
+	driver := New(client, &core.PlatformInfo{}, &mockShell{})
+
+	res := driver.inputText(&flow.InputTextStep{Text: "hello"})
+	if !res.Success {
+		t.Fatalf("inputText no-selector: %v", res.Error)
+	}
+	if len(client.sendKeyActionsCalls) != 1 || client.sendKeyActionsCalls[0] != "hello" {
+		t.Errorf("expected key-actions fallback with %q, got %v", "hello", client.sendKeyActionsCalls)
+	}
+}
+
 func TestInputText_NoSelector_SendsKeyActions(t *testing.T) {
+	// No focused element at all — key events are the last resort.
 	client := &scriptedClient{trackingClient: newTrackingClient()}
 	driver := New(client, &core.PlatformInfo{}, &mockShell{})
 
@@ -2161,7 +2241,7 @@ func TestExecute_DispatchesByStepType(t *testing.T) {
 // =============================================================================
 
 func TestScroll_NoSelector_UsesADB(t *testing.T) {
-	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client := &scriptedClient{trackingClient: newAdbSwipeClient()}
 	shell := &mockShell{}
 	driver := New(client, &core.PlatformInfo{ScreenWidth: 1000, ScreenHeight: 2000}, shell)
 
@@ -2189,14 +2269,14 @@ func TestScroll_NoScreenSize(t *testing.T) {
 
 type appLifecycleClient struct {
 	*scriptedClient
-	launches             []string
-	forceStops           []string
-	clearAppDatas        []string
-	grantPermsCalls      int
-	launchAppErr         error
-	forceStopErr         error
-	clearAppDataErr      error
-	grantPermissionsErr  error
+	launches            []string
+	forceStops          []string
+	clearAppDatas       []string
+	grantPermsCalls     int
+	launchAppErr        error
+	forceStopErr        error
+	clearAppDataErr     error
+	grantPermissionsErr error
 }
 
 func (a *appLifecycleClient) LaunchApp(id string, args map[string]interface{}) error {
@@ -2264,7 +2344,16 @@ func TestLaunchApp_ClearState_FallsBackToShell(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("launchApp should still succeed via shell fallback: %v", res.Error)
 	}
-	if len(shell.commands) == 0 || !strings.Contains(shell.commands[0], "pm clear com.test.app") {
+	// Asserts the fallback ran, not that it ran first — launchApp issues other
+	// bookkeeping shell commands too, and their order is not the contract.
+	var cleared bool
+	for _, cmd := range shell.commands {
+		if strings.Contains(cmd, "pm clear com.test.app") {
+			cleared = true
+			break
+		}
+	}
+	if !cleared {
 		t.Errorf("expected pm clear fallback in shell, got %v", shell.commands)
 	}
 }
@@ -2489,14 +2578,14 @@ func TestApplyRelativeFilter(t *testing.T) {
 		ft     relativeFilterType
 		expect int
 	}{
-		{filterBelow, 1},         // only "below"
-		{filterAbove, 1},         // only "above"
-		{filterLeftOf, 0},        // none have a smaller right edge than anchor.left=0
+		{filterBelow, 1},  // only "below"
+		{filterAbove, 1},  // only "above"
+		{filterLeftOf, 0}, // none have a smaller right edge than anchor.left=0
 		{filterRightOf, 0},
 		{filterChildOf, 0},
 		{filterContainsChild, 0},
 		{filterInsideOf, 0},
-		{filterNone, 2},          // default returns input unchanged
+		{filterNone, 2}, // default returns input unchanged
 	}
 	for _, c := range cases {
 		got := applyRelativeFilter(elems, anchor, c.ft)
@@ -2784,9 +2873,9 @@ func TestLaunchAppViaShell_ActivityResolutionFails_FallsBackToMonkey(t *testing.
 	calls := 0
 	shell := &fakeMultiShell{
 		outputs: []string{
-			"No activity found",              // resolve-activity returns garbage
-			"",                                // dumpsys output empty
-			"Events injected: 1",              // monkey succeeds
+			"No activity found",  // resolve-activity returns garbage
+			"",                   // dumpsys output empty
+			"Events injected: 1", // monkey succeeds
 		},
 		errs:    []error{nil, nil, nil},
 		counter: &calls,
@@ -3018,5 +3107,220 @@ func TestEraseText_PartialErase(t *testing.T) {
 	}
 	if typed != "Hel" {
 		t.Errorf("expected re-input \"Hel\", got %q", typed)
+	}
+}
+
+// TestSwipeInvalidDirection verifies a direction typo fails the step instead
+// of silently swiping up (the pre-#114 default-case behavior).
+func TestSwipeInvalidDirection(t *testing.T) {
+	driver := &Driver{}
+
+	step := &flow.SwipeStep{Direction: "diagonal"}
+	result := driver.swipe(step)
+
+	if result.Success {
+		t.Error("expected failure for invalid swipe direction")
+	}
+}
+
+// TestInWebViewConnectBackoff verifies the WebView connect backoff: a socket
+// that failed recently is skipped, but a different socket, an elapsed backoff,
+// or no prior failure connects immediately (mirrors Maestro MA-4119 — a
+// stalled devtools endpoint must not add the connect timeout to every command).
+func TestInWebViewConnectBackoff(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name           string
+		socket, failSk string
+		lastFail       time.Time
+		want           bool
+	}{
+		{"no prior failure", "sockA", "", time.Time{}, false},
+		{"same socket, within backoff", "sockA", "sockA", now.Add(-1 * time.Second), true},
+		{"same socket, backoff elapsed", "sockA", "sockA", now.Add(-webViewConnectBackoff - time.Second), false},
+		{"different socket, recent failure", "sockB", "sockA", now.Add(-1 * time.Second), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := inWebViewConnectBackoff(c.socket, c.failSk, c.lastFail, now); got != c.want {
+				t.Errorf("inWebViewConnectBackoff = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSwipeWithAbsoluteCoords_PrefersAgent covers the #141 fix. `adb shell input
+// swipe` always lifts the pointer at speed, so the view flings and the distance
+// scrolled depends on momentum computed from timings that shift with load. The
+// agent's in-process injection primes the touch slop and holds the pointer
+// still before lifting, so swipes must go through it when it is reachable.
+func TestSwipeWithAbsoluteCoords_PrefersAgent(t *testing.T) {
+	shell := &mockShell{}
+	client := newTrackingClient()
+	driver := New(client, &core.PlatformInfo{}, shell)
+
+	res := driver.swipeWithAbsoluteCoords(100, 200, 300, 400, 500)
+	if !res.Success {
+		t.Fatalf("swipeWithAbsoluteCoords failed: %v", res.Error)
+	}
+	if got := client.swipeCoordsCalls; len(got) != 1 || got[0] != [5]int{100, 200, 300, 400, 500} {
+		t.Errorf("agent swipe calls = %v, want one call with (100,200,300,400,500)", got)
+	}
+	if len(shell.commands) != 0 {
+		t.Errorf("adb must not be used while the agent is reachable, got %v", shell.commands)
+	}
+}
+
+// TestSwipeWithAbsoluteCoords_FallsBackToAdb keeps swipes working on a device
+// where the agent RPC fails rather than failing the step outright.
+func TestSwipeWithAbsoluteCoords_FallsBackToAdb(t *testing.T) {
+	shell := &mockShell{}
+	driver := New(newAdbSwipeClient(), &core.PlatformInfo{}, shell)
+
+	res := driver.swipeWithAbsoluteCoords(1, 2, 3, 4, 0)
+	if !res.Success {
+		t.Fatalf("expected the adb fallback to succeed: %v", res.Error)
+	}
+	if len(shell.commands) != 1 || shell.commands[0] != "input swipe 1 2 3 4 300" {
+		t.Errorf("expected the adb fallback with the default duration, got %v", shell.commands)
+	}
+}
+
+// =============================================================================
+// #162 — the rect guard must run BEFORE the tap is injected
+// =============================================================================
+
+// TestTapOn_UntappableRect_AgentSkipsTap covers the reported failure: a
+// ScrollView still settling reports a clipped rect (top > bottom, so a
+// negative height) whose centre lands in the bottom tab bar. The tap used to
+// be injected first and validated afterwards, so the "rejected" tap switched
+// tabs and the flow desynced. The agent now declines to click and the driver
+// keeps polling.
+func TestTapOn_UntappableRect_AgentSkipsTap(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	// The clipped rect from the report: bounds=[42,2134][1038,2083].
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "", uiautomator2.ElementRect{X: 42, Y: 2134, Width: 996, Height: -51},
+	)
+	client.findAndClickSkip = true // agent reports clicked=false
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{
+		BaseStep: flow.BaseStep{TimeoutMs: 300},
+		Selector: flow.Selector{ID: "manage-portfolio-button"},
+	})
+	if res.Success {
+		t.Fatal("expected tapOn to fail rather than report success for an untappable rect")
+	}
+	if client.findAndClickCalls < 1 {
+		t.Errorf("expected the driver to keep polling, got %d calls", client.findAndClickCalls)
+	}
+}
+
+// TestTapOn_PassesScreenSizeToAgent pins that the dimensions actually reach
+// the agent. Without them the agent cannot validate and clicks unconditionally,
+// which is the pre-fix behaviour — so a silent regression here would restore
+// the bug while every other test still passed.
+func TestTapOn_PassesScreenSizeToAgent(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "Sign In", uiautomator2.ElementRect{X: 10, Y: 20, Width: 100, Height: 50},
+	)
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{Selector: flow.Selector{Text: "Sign In"}})
+	if !res.Success {
+		t.Fatalf("tapOn: %v", res.Error)
+	}
+	if client.findAndClickGuardW <= 0 || client.findAndClickGuardH <= 0 {
+		t.Errorf("expected a screen size to be passed to the agent, got %dx%d",
+			client.findAndClickGuardW, client.findAndClickGuardH)
+	}
+}
+
+// =============================================================================
+// #162 — the coordinate paths must not inject either
+// =============================================================================
+
+func TestTapPointInjectable(t *testing.T) {
+	const sw, sh = 1080, 2400
+	tests := []struct {
+		name string
+		b    core.Bounds
+		x, y int
+		want bool
+	}{
+		{"ordinary on-screen element", core.Bounds{X: 42, Y: 100, Width: 996, Height: 154}, 540, 177, true},
+		// The reported rect: bounds=[42,2134][1038,2083]. Its centre (540,2109)
+		// is ON screen, so an on-screen-only check would wave it through — the
+		// negative height is the only thing that gives it away.
+		{"clipped rect with on-screen centre", core.Bounds{X: 42, Y: 2134, Width: 996, Height: -51}, 540, 2109, false},
+		{"zero width", core.Bounds{X: 0, Y: 0, Width: 0, Height: 100}, 0, 50, false},
+		{"well-formed but scrolled below the fold", core.Bounds{X: 42, Y: 2500, Width: 996, Height: 154}, 540, 2577, false},
+		{"negative point", core.Bounds{X: -100, Y: 100, Width: 50, Height: 50}, -75, 125, false},
+		{"bottom edge is on screen", core.Bounds{X: 0, Y: 2340, Width: 100, Height: 58}, 50, 2369, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tapPointInjectable(tt.b, tt.x, tt.y, sw, sh); got != tt.want {
+				t.Errorf("tapPointInjectable(%+v, %d, %d) = %v, want %v", tt.b, tt.x, tt.y, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDoubleTapAndLongPress_RejectClippedRect covers the sibling commands.
+// They resolve the point host-side and call the coordinate RPCs, so the
+// agent-side guard never sees them — a clipped rect used to be double-tapped
+// or long-pressed at a point outside the element.
+func TestDoubleTapAndLongPress_RejectClippedRect(t *testing.T) {
+	clipped := uiautomator2.ElementRect{X: 42, Y: 2134, Width: 996, Height: -51}
+
+	t.Run("doubleTapOn", func(t *testing.T) {
+		client := &scriptedClient{trackingClient: newTrackingClient()}
+		client.findElementReturn = uiautomator2.NewCachedElement("elem", "Target", clipped)
+		driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+		res := driver.doubleTapOn(&flow.DoubleTapOnStep{Selector: flow.Selector{ID: "target"}})
+		if res.Success {
+			t.Error("expected doubleTapOn to refuse an untappable rect")
+		}
+	})
+
+	t.Run("longPressOn", func(t *testing.T) {
+		client := &scriptedClient{trackingClient: newTrackingClient()}
+		client.findElementReturn = uiautomator2.NewCachedElement("elem", "Target", clipped)
+		driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+		res := driver.longPressOn(&flow.LongPressOnStep{Selector: flow.Selector{ID: "target"}})
+		if res.Success {
+			t.Error("expected longPressOn to refuse an untappable rect")
+		}
+	})
+}
+
+// TestTapOn_BlockedByOverlay_ReportsCause pins that when the hit test refuses
+// a tap, the failure names what covered it. Diagnosis is the point: "element
+// not tappable" sends you looking at the element, when the real problem is the
+// keyboard on top of it.
+func TestTapOn_BlockedByOverlay_ReportsCause(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "Submit", uiautomator2.ElementRect{X: 100, Y: 1800, Width: 300, Height: 120},
+	)
+	client.findAndClickSkip = true
+	client.findAndClickBlockedBy = "keyboard window"
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{
+		BaseStep: flow.BaseStep{TimeoutMs: 300},
+		Selector: flow.Selector{Text: "Submit"},
+	})
+	if res.Success {
+		t.Fatal("expected tapOn to fail when the point is covered")
+	}
+	if !strings.Contains(res.Error.Error(), "keyboard window") {
+		t.Errorf("expected the failure to name the blocker, got %q", res.Error.Error())
+	}
+	if !client.findAndClickHitTest {
+		t.Error("expected the hit test to be requested by default")
 	}
 }

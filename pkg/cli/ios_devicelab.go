@@ -10,6 +10,7 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	dliosdriver "github.com/devicelab-dev/maestro-runner/pkg/driver/devicelab_ios"
+	"github.com/devicelab-dev/maestro-runner/pkg/flutter"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
@@ -108,6 +109,17 @@ func createDevicelabIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		}
 	}
 
+	// Read the app's version and build number the same way the wda path does.
+	// cfg.AppID can still be an unexpanded ${APP_ID} template here, in which
+	// case the lookup simply finds nothing and the report says so.
+	appVersion, appBuild := "", ""
+	if cfg.AppID != "" {
+		appVersion, appBuild = getIOSAppVersionAndBuild(udid, cfg.AppID)
+	}
+	if appVersion == "" && appBuild == "" && cfg.AppFile != "" {
+		appVersion, appBuild = readBundleVersionAndBuild(cfg.AppFile)
+	}
+
 	platformInfo := &core.PlatformInfo{
 		Platform:     "ios",
 		OSVersion:    deviceInfo.OSVersion,
@@ -117,6 +129,8 @@ func createDevicelabIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		ScreenWidth:  screenW,
 		ScreenHeight: screenH,
 		AppID:        cfg.AppID,
+		AppVersion:   appVersion,
+		AppBuild:     appBuild,
 	}
 
 	drv := dliosdriver.NewDriver(client, platformInfo, udid, runner)
@@ -133,7 +147,24 @@ func createDevicelabIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		_ = dliosdriver.GracefulShutdown(shutdownCtx, client, runner)
 	}
 
+	// Wrap with the Flutter VM Service fallback, same as the WDA path — this
+	// driver is simulator-only, so the wrap is unconditional apart from the
+	// flag. Without it, Flutter elements missing from the accessibility tree
+	// were findable on WDA but not here, which read as a devicelab tap bug.
+	var driver core.Driver = drv
+	if !cfg.NoFlutterFallback {
+		fw := flutter.WrapIOS(drv, nil, udid, cfg.AppID)
+		driver = fw
+		origCleanup := cleanup
+		cleanup = func() {
+			if fd, ok := fw.(*flutter.FlutterDriver); ok {
+				fd.Close()
+			}
+			origCleanup()
+		}
+	}
+
 	// Silence unused-import warnings if logger doesn't appear elsewhere.
 	_ = strings.ToLower
-	return drv, cleanup, nil
+	return driver, cleanup, nil
 }

@@ -103,6 +103,13 @@ func (w *FlowWriter) End(status Status, flowLevelError ...string) {
 		w.flow.Duration = &duration
 	}
 
+	// Summarise per-step latency now that every command has its duration, so
+	// the shape of a slow run is visible in the report rather than only its
+	// total. Omitted when nothing ran (a fully skipped flow has no data).
+	if latency := ComputeStepLatency(w.flow.Commands); latency.Count > 0 {
+		w.flow.StepLatency = &latency
+	}
+
 	w.flush()
 
 	var errMsg *string
@@ -200,6 +207,19 @@ func (w *FlowWriter) SaveViewHierarchy(cmdIndex int, data []byte) (string, error
 	}
 
 	return filepath.Join("assets", w.flow.ID, filename), nil
+}
+
+// RecordingTarget returns the absolute path a flow screen recording should be
+// written to. The file does not exist until a driver writes it.
+func (w *FlowWriter) RecordingTarget() string {
+	return filepath.Join(w.assetsDir, "recording.mp4")
+}
+
+// SetVideo records that a screen recording exists at RecordingTarget,
+// storing the report-relative path alongside the other flow artifacts.
+func (w *FlowWriter) SetVideo() {
+	w.flow.Artifacts.Video = filepath.Join("assets", w.flow.ID, "recording.mp4")
+	w.flush()
 }
 
 // SaveDeviceLog saves device log and returns the relative path.

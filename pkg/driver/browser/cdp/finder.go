@@ -13,6 +13,42 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 )
 
+// transientEvalErr reports whether a CDP Runtime.evaluate error is a transient
+// execution-context failure — typically a navigation destroying the JS context
+// mid-eval. These are safe to retry once (Maestro #3392).
+func transientEvalErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, s := range []string{
+		"context was destroyed",
+		"Cannot find context",
+		"Execution context was destroyed",
+		"uniqueContextId",
+		"Inspected target navigated or closed",
+		"Node with given id does not belong to the document",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// evalRetry runs page.Evaluate, retrying once after a short pause if the first
+// attempt fails with a transient execution-context error (a navigation racing
+// the eval). The injected JS helper persists across navigations via
+// EvalOnNewDocument, so the retry re-runs against the fresh context.
+func (d *Driver) evalRetry(opts *rod.EvalOptions) (*proto.RuntimeRemoteObject, error) {
+	obj, err := d.page.Evaluate(opts)
+	if err != nil && transientEvalErr(err) {
+		time.Sleep(50 * time.Millisecond)
+		return d.page.Evaluate(opts)
+	}
+	return obj, err
+}
+
 // findElement finds an element using the selector with polling until timeout.
 // Uses Rod's clone-based timeout: creates a new page object with deadline.
 func (d *Driver) findElement(sel flow.Selector, optional bool, stepTimeoutMs int) (*rod.Element, *core.ElementInfo, error) {
@@ -44,7 +80,7 @@ func (d *Driver) findElement(sel flow.Selector, optional bool, stepTimeoutMs int
 // traversal is automatic; cross-origin / OOPIF support requires CDP-level
 // frame enumeration which is not yet implemented (see issue #65).
 func (d *Driver) crossOriginHint() string {
-	obj, err := d.page.Evaluate(rod.Eval(`() => (window.__maestro && window.__maestro.getLastCrossOriginSkips && window.__maestro.getLastCrossOriginSkips()) || 0`))
+	obj, err := d.evalRetry(rod.Eval(`() => (window.__maestro && window.__maestro.getLastCrossOriginSkips && window.__maestro.getLastCrossOriginSkips()) || 0`))
 	if err != nil || obj == nil {
 		return ""
 	}
@@ -102,6 +138,55 @@ func (d *Driver) findElementOnce(sel flow.Selector) (*rod.Element, *core.Element
 	}
 }
 
+// cssScanLimit caps how many matches findCSSCandidate examines. A selector like
+// `a` can match thousands of nodes; visibility is one CDP round trip each, so
+// scanning them all would cost more than the miss it prevents.
+const cssScanLimit = 50
+
+// findCSSCandidate returns the first match that is visible, and separately the
+// first match of any kind.
+//
+// A CSS selector often matches a hidden node before the one the flow means —
+// a collapsed menu's copy of a button, a display:none template row. Taking
+// document.querySelector's first hit targets that hidden node, and the tap then
+// sits there until the deadline and fails with "context deadline exceeded",
+// which says nothing about what went wrong. The AX-tree path behind `text:`
+// never had this problem because hidden nodes are absent from the AX tree; this
+// brings `css:` in line with it.
+//
+// Polls until the deadline so an element that appears asynchronously is still
+// caught, matching the wait that page.Element() gave us before. `first` is
+// returned so callers can preserve the old behaviour when nothing is visible:
+// elementInfo reports Visible=false for it, so assertNotVisible still resolves
+// correctly rather than reporting the element as absent.
+func (d *Driver) findCSSCandidate(css string, sel flow.Selector, timeout time.Duration) (visible, first *rod.Element) {
+	deadline := time.Now().Add(timeout)
+	for {
+		elems, err := d.page.Sleeper(rod.NotFoundSleeper).Elements(css)
+		if err == nil && len(elems) > 0 {
+			if first == nil {
+				first = elems[0]
+			}
+			for i, elem := range elems {
+				if i >= cssScanLimit {
+					break
+				}
+				if ok, verr := elem.Visible(); verr != nil || !ok {
+					continue
+				}
+				if !d.matchesStateFilters(elem, sel) {
+					continue
+				}
+				return elem, first
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, first
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // findByCSS finds an element by CSS selector.
 // Falls back to a same-origin-iframe walk when the top-frame query misses.
 func (d *Driver) findByCSS(sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
@@ -122,14 +207,15 @@ func (d *Driver) findByCSS(sel flow.Selector) (*rod.Element, *core.ElementInfo, 
 		return elem, info, nil
 	}
 
-	p := d.page.Timeout(2 * time.Second)
-	elem, err := p.Element(sel.CSS)
-	if err == nil {
-		if !d.matchesStateFilters(elem, sel) {
+	visible, first := d.findCSSCandidate(sel.CSS, sel, 2*time.Second)
+	if visible != nil {
+		return visible, d.elementInfo(visible), nil
+	}
+	if first != nil {
+		if !d.matchesStateFilters(first, sel) {
 			return nil, nil, fmt.Errorf("CSS selector '%s' found but state filters don't match", sel.CSS)
 		}
-		info := d.elementInfo(elem)
-		return elem, info, nil
+		return first, d.elementInfo(first), nil
 	}
 
 	return d.findByCSSAcrossFrames(sel.CSS, sel, fmt.Sprintf("CSS selector '%s'", sel.CSS))
@@ -142,6 +228,10 @@ func (d *Driver) findByID(sel flow.Selector) (*rod.Element, *core.ElementInfo, e
 	selectors := []string{
 		"#" + cssEscape(sel.ID),
 		fmt.Sprintf("[data-testid=%q]", sel.ID),
+		// Flutter web renders a widget's Semantics `identifier` as the
+		// flt-semantics-identifier attribute, so a maestro `id:` should match
+		// it — this is how you target Flutter web widgets by test id.
+		fmt.Sprintf("[flt-semantics-identifier=%q]", sel.ID),
 		fmt.Sprintf("[id*=%q]", sel.ID),
 		fmt.Sprintf("[name=%q]", sel.ID),
 		fmt.Sprintf("[aria-label=%q]", sel.ID),
@@ -357,13 +447,15 @@ func (d *Driver) findByCSSWithNth(css string, sel flow.Selector, desc string) (*
 		return elem, info, nil
 	}
 
-	elem, err := p.Element(css)
-	if err == nil {
-		if !d.matchesStateFilters(elem, sel) {
+	visible, first := d.findCSSCandidate(css, sel, 2*time.Second)
+	if visible != nil {
+		return visible, d.elementInfo(visible), nil
+	}
+	if first != nil {
+		if !d.matchesStateFilters(first, sel) {
 			return nil, nil, fmt.Errorf("%s found but state filters don't match", desc)
 		}
-		info := d.elementInfo(elem)
-		return elem, info, nil
+		return first, d.elementInfo(first), nil
 	}
 
 	return d.findByCSSAcrossFrames(css, sel, desc)
@@ -411,7 +503,7 @@ func (d *Driver) findByJSTextContains(text string, sel flow.Selector) (*rod.Elem
 		}
 		return null;
 	}`
-	obj, err := d.page.Evaluate(rod.Eval(jsCode, text).ByObject())
+	obj, err := d.evalRetry(rod.Eval(jsCode, text).ByObject())
 	if err != nil {
 		return nil, nil, fmt.Errorf("JS textContains failed: %w", err)
 	}
@@ -439,7 +531,7 @@ func (d *Driver) findByJSTextRegex(pattern string, re *regexp.Regexp, sel flow.S
 		}
 		return null;
 	}`
-	obj, err := d.page.Evaluate(rod.Eval(jsCode, pattern).ByObject())
+	obj, err := d.evalRetry(rod.Eval(jsCode, pattern).ByObject())
 	if err != nil {
 		return nil, nil, fmt.Errorf("JS textRegex failed: %w", err)
 	}
@@ -581,7 +673,7 @@ func (d *Driver) findBySearch(text string, sel flow.Selector) (*rod.Element, *co
 
 // findByJS uses the injected JS helper as a last resort.
 func (d *Driver) findByJS(text string, sel flow.Selector) (*rod.Element, *core.ElementInfo, error) {
-	obj, err := d.page.Evaluate(rod.Eval(`(text) => window.__maestro.findByText(text)`, text).ByObject())
+	obj, err := d.evalRetry(rod.Eval(`(text) => window.__maestro.findByText(text)`, text).ByObject())
 	if err != nil {
 		return nil, nil, fmt.Errorf("JS findByText failed: %w", err)
 	}
@@ -603,7 +695,7 @@ func (d *Driver) findByJS(text string, sel flow.Selector) (*rod.Element, *core.E
 // reachable same-origin iframe. Used as a fallback when Rod's top-frame query
 // misses (e.g. Flutter Web rendered inside an iframe — see issue #65).
 func (d *Driver) findByCSSAcrossFrames(css string, sel flow.Selector, desc string) (*rod.Element, *core.ElementInfo, error) {
-	obj, err := d.page.Evaluate(rod.Eval(`(s) => window.__maestro.findByCSSAcrossFrames(s)`, css).ByObject())
+	obj, err := d.evalRetry(rod.Eval(`(s) => window.__maestro.findByCSSAcrossFrames(s)`, css).ByObject())
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s not found across frames: %w", desc, err)
 	}
@@ -632,7 +724,7 @@ func (d *Driver) findByTextAtAcrossRoots(text string, nth int, sel flow.Selector
 	// the index is in range. Avoids rod.Eval(...).ByObject() ever resolving
 	// against a JS null, which can stall the eval pipe (no remote objectId
 	// to track).
-	countRes, err := d.page.Evaluate(rod.Eval(`(t, n) => window.__maestro.findByTextAt_count(t, n)`, text, nth))
+	countRes, err := d.evalRetry(rod.Eval(`(t, n) => window.__maestro.findByTextAt_count(t, n)`, text, nth))
 	if err != nil {
 		return nil, nil, fmt.Errorf("text '%s' index %d: %w", text, nth, err)
 	}
@@ -643,7 +735,7 @@ func (d *Driver) findByTextAtAcrossRoots(text string, nth int, sel flow.Selector
 	if nth >= count {
 		return nil, nil, fmt.Errorf("text '%s' index %d: only %d match(es) found across same-origin roots", text, nth, count)
 	}
-	res, err := d.page.Evaluate(rod.Eval(`() => window.__maestro.findByTextAt_get()`).ByObject())
+	res, err := d.evalRetry(rod.Eval(`() => window.__maestro.findByTextAt_get()`).ByObject())
 	if err != nil {
 		return nil, nil, fmt.Errorf("text '%s' index %d: %w", text, nth, err)
 	}

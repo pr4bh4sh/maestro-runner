@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -409,10 +412,10 @@ func TestLaunchAppDumpsysFallbackWithArgs(t *testing.T) {
 		t.Errorf("expected success via dumpsys fallback, got: %v", result.Error)
 	}
 
-	// Verify am start includes the extra
+	// Verify am start includes the extra, shell-quoted
 	foundExtra := false
 	for _, cmd := range shell.commands {
-		if strings.Contains(cmd, "--es key1") {
+		if strings.Contains(cmd, "--es 'key1' 'value1'") {
 			foundExtra = true
 		}
 	}
@@ -903,9 +906,19 @@ func TestAddMediaNoFiles(t *testing.T) {
 }
 
 func TestAddMediaSuccess(t *testing.T) {
+	// addMedia stats + pushes real files, so create them on disk.
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "file.jpg")
+	f2 := filepath.Join(dir, "file2.png")
+	for _, f := range []string{f1, f2} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	mock := &MockShellExecutor{response: "Success"}
 	driver := &Driver{device: mock}
-	step := &flow.AddMediaStep{Files: []string{"/path/to/file.jpg", "/path/to/file2.png"}}
+	step := &flow.AddMediaStep{Files: []string{f1, f2}}
 
 	result := driver.addMedia(step)
 
@@ -913,8 +926,14 @@ func TestAddMediaSuccess(t *testing.T) {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
 
-	if len(mock.commands) != 2 {
-		t.Errorf("expected 2 commands, got %d", len(mock.commands))
+	// One push per file, each landing under the images media dir.
+	if len(mock.pushes) != 2 {
+		t.Fatalf("expected 2 pushes, got %d", len(mock.pushes))
+	}
+	for i, p := range mock.pushes {
+		if !strings.HasPrefix(p[1], "/sdcard/Pictures/MaestroRunner/") {
+			t.Errorf("push %d remote = %q, want under images dir", i, p[1])
+		}
 	}
 }
 
@@ -2720,7 +2739,7 @@ func TestApplyPermissionInvalidValue(t *testing.T) {
 	err := driver.applyPermission("com.example.app", "android.permission.CAMERA", "invalid")
 
 	if err == nil {
-		t.Error("expected error for invalid permission value")
+		t.Fatal("expected error for invalid permission value")
 	}
 	if !strings.Contains(err.Error(), "invalid permission value") {
 		t.Errorf("expected 'invalid permission value' in error, got: %v", err)
@@ -3456,6 +3475,21 @@ func TestSwipeWithSelectorDirection(t *testing.T) {
 	}
 }
 
+func TestSwipeInvalidDirection(t *testing.T) {
+	shell := &MockShellExecutor{}
+	driver := New(&MockUIA2Client{}, nil, shell)
+
+	step := &flow.SwipeStep{Direction: "diagonal"}
+	result := driver.swipe(step)
+
+	if result.Success {
+		t.Error("expected failure for invalid swipe direction")
+	}
+	if len(shell.commands) != 0 {
+		t.Errorf("expected no shell commands, got %v", shell.commands)
+	}
+}
+
 // ============================================================================
 // SetWaitForIdleTimeout via MockUIA2Client Tests
 // ============================================================================
@@ -3994,16 +4028,18 @@ func TestLaunchAppViaShellWithArgTypes(t *testing.T) {
 	for _, cmd := range shell.commands {
 		if strings.Contains(cmd, "am start-activity") {
 			foundAmStart = true
-			if !strings.Contains(cmd, "--es stringKey") {
+			// Extras are shell-quoted; the numeric and boolean forms render
+			// from typed Go values so only their keys are quoted.
+			if !strings.Contains(cmd, "--es 'stringKey' 'stringValue'") {
 				t.Error("missing --es stringKey in command")
 			}
-			if !strings.Contains(cmd, "--ei intKey 42") {
+			if !strings.Contains(cmd, "--ei 'intKey' 42") {
 				t.Error("missing --ei intKey in command")
 			}
-			if !strings.Contains(cmd, "--ef floatKey") {
+			if !strings.Contains(cmd, "--ef 'floatKey'") {
 				t.Error("missing --ef floatKey in command")
 			}
-			if !strings.Contains(cmd, "--ez boolKey true") {
+			if !strings.Contains(cmd, "--ez 'boolKey' true") {
 				t.Error("missing --ez boolKey in command")
 			}
 		}
@@ -4180,29 +4216,34 @@ var _ = &uiautomator2.DeviceInfo{}
 // Use fmt to avoid unused import error
 var _ = fmt.Sprintf
 
-// TestIsElementOnScreen covers the viewport-overlap guard used by
-// scrollUntilVisible to reject hierarchy-only matches.
-func TestIsElementOnScreen(t *testing.T) {
+// TestScrollStopCriterion covers scrollUntilVisible's stop check, which now
+// requires the flow's visibility percentage (default: fully inside the
+// viewport) rather than any 1px overlap — a match half-hidden behind a bottom
+// bar must keep scrolling.
+func TestScrollStopCriterion(t *testing.T) {
 	tests := []struct {
-		name   string
-		bounds core.Bounds
-		want   bool
+		name       string
+		bounds     core.Bounds
+		percentage int // 0 = flow didn't set one → fully visible required
+		want       bool
 	}{
-		{"fully on screen", core.Bounds{X: 100, Y: 100, Width: 200, Height: 200}, true},
-		{"partial overlap at bottom", core.Bounds{X: 100, Y: 2300, Width: 200, Height: 200}, true},
-		{"entirely below screen", core.Bounds{X: 100, Y: 2400, Width: 200, Height: 200}, false},
-		{"entirely above screen", core.Bounds{X: 100, Y: -300, Width: 200, Height: 200}, false},
-		{"zero width", core.Bounds{X: 100, Y: 100, Width: 0, Height: 200}, false},
-		{"zero height", core.Bounds{X: 100, Y: 100, Width: 200, Height: 0}, false},
-		{"negative width", core.Bounds{X: 100, Y: 100, Width: -50, Height: 200}, false},
+		{"fully on screen", core.Bounds{X: 100, Y: 100, Width: 200, Height: 200}, 0, true},
+		// The old any-overlap check accepted this — the #2411-class bug.
+		{"partial overlap at bottom", core.Bounds{X: 100, Y: 2300, Width: 200, Height: 200}, 0, false},
+		{"partial overlap accepted at 50%", core.Bounds{X: 100, Y: 2300, Width: 200, Height: 200}, 50, true},
+		{"entirely below screen", core.Bounds{X: 100, Y: 2400, Width: 200, Height: 200}, 0, false},
+		{"entirely above screen", core.Bounds{X: 100, Y: -300, Width: 200, Height: 200}, 0, false},
+		{"zero width", core.Bounds{X: 100, Y: 100, Width: 0, Height: 200}, 0, false},
+		{"zero height", core.Bounds{X: 100, Y: 100, Width: 200, Height: 0}, 0, false},
+		{"negative width", core.Bounds{X: 100, Y: 100, Width: -50, Height: 200}, 0, false},
 		// Malformed clipped rect (top>bottom → negative height): degenerate, must
 		// count as off-screen so scrollUntilVisible keeps scrolling.
-		{"negative height (clipped)", core.Bounds{X: 270, Y: 2300, Width: 810, Height: -26}, false},
+		{"negative height (clipped)", core.Bounds{X: 270, Y: 2300, Width: 810, Height: -26}, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isElementOnScreen(&core.ElementInfo{Bounds: tt.bounds}, 1080, 2400); got != tt.want {
-				t.Errorf("isElementOnScreen(%v) = %v, want %v", tt.bounds, got, tt.want)
+			if got := core.MeetsVisibility(tt.bounds, 1080, 2400, tt.percentage); got != tt.want {
+				t.Errorf("MeetsVisibility(%v, pct=%d) = %v, want %v", tt.bounds, tt.percentage, got, tt.want)
 			}
 		})
 	}
@@ -4295,5 +4336,155 @@ func TestScrollByAdbCoordinates(t *testing.T) {
 				t.Errorf("got %q, want %q", shell.commands, tt.wantCmd)
 			}
 		})
+	}
+}
+
+// ============================================================================
+// Shell quoting of flow-supplied text (agent-device #1645)
+// ============================================================================
+
+// shellArgv runs cmd through a real `sh` with the leading program replaced by a
+// function that prints its arguments one per line, so the result is exactly the
+// argv the device's shell would hand to `am` / `content`. Asserting on that
+// rather than on the command string is what catches a value that parses into
+// the wrong number of words.
+func shellArgv(t *testing.T, program, cmd string) []string {
+	t.Helper()
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh available")
+	}
+	script := program + `() { printf '%s\n' "$@"; }; ` + cmd
+	out, err := exec.Command(sh, "-c", script).Output()
+	if err != nil {
+		t.Fatalf("device shell would reject %q: %v", cmd, err)
+	}
+	return strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+}
+
+func containsArg(argv []string, want string) bool {
+	for _, a := range argv {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOpenBrowserQuotesURL covers the case that motivated the fix: an
+// apostrophe in a URL used to close the surrounding quote early, turning the
+// rest of the URL into shell syntax. The command was a parse error rather than
+// a failing step, so the flow reported a driver error for a perfectly valid URL.
+func TestOpenBrowserQuotesURL(t *testing.T) {
+	urls := []string{
+		"https://example.com/search?q=it's",
+		"https://example.com/a b/c",
+		"https://example.com/?q=$HOME&x=`id`",
+		"myapp://item?title=Bob's \"thing\"",
+	}
+	for _, url := range urls {
+		t.Run(url, func(t *testing.T) {
+			mock := &MockShellExecutor{response: ""}
+			driver := &Driver{device: mock}
+
+			if result := driver.openBrowser(&flow.OpenBrowserStep{URL: url}); !result.Success {
+				t.Fatalf("expected success, got %v", result.Error)
+			}
+			argv := shellArgv(t, "am", mock.commands[0])
+			if !containsArg(argv, url) {
+				t.Errorf("URL reached the device as %q, want it intact as one argument %q", argv, url)
+			}
+		})
+	}
+}
+
+func TestOpenLinkQuotesLink(t *testing.T) {
+	browser := true
+	for _, tt := range []struct {
+		name string
+		step *flow.OpenLinkStep
+	}{
+		{"default", &flow.OpenLinkStep{Link: "myapp://path?name=O'Brien"}},
+		{"browser", &flow.OpenLinkStep{Link: "myapp://path?name=O'Brien", Browser: &browser}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &MockShellExecutor{response: ""}
+			driver := &Driver{device: mock}
+
+			if result := driver.openLink(tt.step); !result.Success {
+				t.Fatalf("expected success, got %v", result.Error)
+			}
+			argv := shellArgv(t, "am", mock.commands[0])
+			if !containsArg(argv, tt.step.Link) {
+				t.Errorf("link reached the device as %q, want %q intact", argv, tt.step.Link)
+			}
+		})
+	}
+}
+
+// TestLaunchAppQuotesArguments checks that a launch argument survives the shell
+// with its spaces and quotes, and as a single word — an unquoted multi-word
+// value used to split, so `am` saw only its first word and silently dropped the
+// rest.
+func TestLaunchAppQuotesArguments(t *testing.T) {
+	shell := &shellMock{
+		responses: map[string]string{
+			"getprop ro.build.version.sdk": "30",
+			"resolve-activity":             "com.example.app/.MainActivity",
+		},
+		fallback: "Success",
+	}
+	driver := &Driver{device: shell}
+
+	want := "Bob's \"favourite\" item"
+	result := driver.launchAppViaShell("com.example.app", map[string]interface{}{"title": want})
+	if !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+
+	var amCmd string
+	for _, cmd := range shell.commands {
+		if strings.Contains(cmd, "am start-activity") {
+			amCmd = cmd
+		}
+	}
+	if amCmd == "" {
+		t.Fatal("expected an am start-activity command")
+	}
+	argv := shellArgv(t, "am", amCmd)
+	if !containsArg(argv, want) {
+		t.Errorf("argument reached the device as %q, want %q intact as one argument", argv, want)
+	}
+}
+
+// TestAddMediaQuotesRemotePath covers a filename with a space — the MediaStore
+// scan argument carried no quotes at all, so `my photo.jpg` arrived as two
+// arguments and the scan silently registered nothing.
+func TestAddMediaQuotesRemotePath(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "my holiday photo.jpg")
+	if err := os.WriteFile(media, []byte("jpeg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := &MockShellExecutor{response: ""}
+	driver := &Driver{device: mock}
+
+	if result := driver.addMedia(&flow.AddMediaStep{Files: []string{media}}); !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+
+	var scan string
+	for _, cmd := range mock.commands {
+		if strings.Contains(cmd, "scan_file") {
+			scan = cmd
+		}
+	}
+	if scan == "" {
+		t.Fatal("expected a scan_file command")
+	}
+	argv := shellArgv(t, "content", scan)
+	if !containsArg(argv, "/sdcard/Pictures/MaestroRunner/my holiday photo.jpg") {
+		t.Errorf("media path reached the device as %q, want it intact as one argument", argv)
 	}
 }

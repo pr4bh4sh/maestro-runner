@@ -6,6 +6,7 @@ import (
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
+	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
 
 // Driver implements core.Driver using the devicelab-ios-runner XCUITest
@@ -17,6 +18,9 @@ type Driver struct {
 	info   *core.PlatformInfo
 	udid   string
 	appID  string
+
+	// In-flight --record capture (simulators only)
+	recording *simulator.Recording
 
 	// Parent context for element-finding operations.
 	ctx context.Context
@@ -37,9 +41,13 @@ type Driver struct {
 	// some iOS sim configs. Result: typing into RN password fields stops
 	// silently dropping characters.
 	lastTappedIdentifier string
-	lastTappedX          float64
-	lastTappedY          float64
-	lastTapHasCoords     bool
+	// lastTappedText is the target's text at tap time, so a following
+	// inputText can tell whether typing actually changed it (#139-class
+	// silent misdirection, iOS side).
+	lastTappedText   string
+	lastTappedX      float64
+	lastTappedY      float64
+	lastTapHasCoords bool
 
 	// Snapshot cache. snapshotMatching reuses a recent snapshot when
 	// successive selector resolutions happen close together (tapOn →
@@ -155,11 +163,14 @@ func (d *Driver) parentContext() context.Context {
 
 func (d *Driver) currentBundleID() string { return d.appID } //nolint:unused
 
-// callTimeout returns a context with the find timeout applied (or a sane
-// default of 10s if unset).
+// callTimeout returns a context for a single runner HTTP call. The find
+// timeout raises it but never lowers it below 10s: the find timeout is a
+// polling budget, and callers like the Flutter fallback legitimately shrink
+// it to one second — which must shorten how long we keep looking, not cut
+// off an XCUITest snapshot or tap mid-flight.
 func (d *Driver) callTimeout() (context.Context, context.CancelFunc) {
 	ms := d.findTimeout
-	if ms <= 0 {
+	if ms < 10_000 {
 		ms = 10_000
 	}
 	return context.WithTimeout(d.parentContext(), time.Duration(ms)*time.Millisecond)

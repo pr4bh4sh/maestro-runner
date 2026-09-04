@@ -171,6 +171,34 @@ extension RunnerTests {
 #endif
   }
 
+  // Maps XCUIDevice's appearance enum onto the wire strings the host uses.
+  //
+  // `unspecified` means no style is being forced rather than "dark", and it
+  // renders light, so it reports as light. That matches the reading the Android
+  // side gives for the auto/custom night-mode schedules: the only honest answer
+  // from the current state alone is "not currently dark".
+  func appearanceName(_ appearance: XCUIDevice.Appearance) -> String {
+    switch appearance {
+    case .dark:
+      return "dark"
+    default:
+      return "light"
+    }
+  }
+
+  // Returns nil for anything that is not a recognised appearance, so an
+  // unsupported value fails loudly instead of silently landing on a default.
+  func appearanceValue(_ name: String) -> XCUIDevice.Appearance? {
+    switch name.lowercased() {
+    case "dark":
+      return .dark
+    case "light":
+      return .light
+    default:
+      return nil
+    }
+  }
+
   func findElement(app: XCUIApplication, text: String) -> XCUIElement? {
     let predicate = NSPredicate(format: "label CONTAINS[c] %@ OR identifier CONTAINS[c] %@ OR value CONTAINS[c] %@", text, text, text)
     let element = app.descendants(matching: .any).matching(predicate).firstMatch
@@ -1477,7 +1505,8 @@ extension RunnerTests {
     y: Double,
     x2: Double,
     y2: Double,
-    holdDuration: TimeInterval
+    holdDuration: TimeInterval,
+    moveDuration: TimeInterval? = nil
   ) -> RunnerInteractionOutcome {
     // tvOS has no coordinate drag. Preserve the direction as a focus move.
     let dx = x2 - x
@@ -1488,7 +1517,9 @@ extension RunnerTests {
     if pressTvRemote(button) {
       return .performed
     }
-    return performCoordinateDrag(app: app, x: x, y: y, x2: x2, y2: y2, holdDuration: holdDuration)
+    return performCoordinateDrag(
+      app: app, x: x, y: y, x2: x2, y2: y2,
+      holdDuration: holdDuration, moveDuration: moveDuration)
   }
 
   func keyboardAvoidingDragPoints(
@@ -1771,14 +1802,30 @@ extension RunnerTests {
     y: Double,
     x2: Double,
     y2: Double,
-    holdDuration: TimeInterval
+    holdDuration: TimeInterval,
+    moveDuration: TimeInterval? = nil
   ) -> RunnerInteractionOutcome {
 #if os(tvOS)
     return .unsupported("coordinate drag is not supported on tvOS")
 #else
     let start = interactionCoordinate(app: app, x: x, y: y)
     let end = interactionCoordinate(app: app, x: x2, y: y2)
-    start.press(forDuration: holdDuration, thenDragTo: end)
+    if let moveDuration, moveDuration > 0 {
+      // XCUITest exposes drag speed as velocity, so derive it from the
+      // requested movement time. The trailing hold lets the drop target
+      // register the finger before release — releasing mid-motion reads
+      // as a fling to reorder UIs.
+      let distance = (CGFloat(x2 - x) * CGFloat(x2 - x) + CGFloat(y2 - y) * CGFloat(y2 - y)).squareRoot()
+      let velocity = XCUIGestureVelocity(max(distance / CGFloat(moveDuration), 1))
+      start.press(
+        forDuration: holdDuration,
+        thenDragTo: end,
+        withVelocity: velocity,
+        thenHoldForDuration: 0.25
+      )
+    } else {
+      start.press(forDuration: holdDuration, thenDragTo: end)
+    }
     return .performed
 #endif
   }

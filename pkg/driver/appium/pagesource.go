@@ -19,6 +19,7 @@ type ParsedElement struct {
 	Enabled   bool
 	Displayed bool
 	Selected  bool
+	Checked   bool
 	Focused   bool
 	Clickable bool
 	Depth     int
@@ -99,6 +100,8 @@ func parseAndroidPageSource(xmlData string) ([]*ParsedElement, error) {
 						elem.Enabled = attr.Value == "true"
 					case "selected":
 						elem.Selected = attr.Value == "true"
+					case "checked":
+						elem.Checked = attr.Value == "true"
 					case "focused":
 						elem.Focused = attr.Value == "true"
 					case "displayed":
@@ -365,7 +368,7 @@ func matchesSelector(elem *ParsedElement, sel flow.Selector, platform string) bo
 	if sel.Focused != nil && elem.Focused != *sel.Focused {
 		return false
 	}
-	if sel.Checked != nil && elem.Selected != *sel.Checked {
+	if sel.Checked != nil && elem.Checked != *sel.Checked {
 		return false
 	}
 
@@ -392,7 +395,16 @@ func matchesID(pattern, id string) bool {
 
 func matchesText(pattern string, texts ...string) bool {
 	if looksLikeRegex(pattern) {
-		re, err := regexp.Compile("(?i)" + pattern)
+		// Case-sensitive, deliberately. Compiling with (?i) meant an anchored
+		// pattern could not distinguish what it was written to distinguish:
+		// `^SIGN OUT$` matched a "Sign out" row as readily as the "SIGN OUT"
+		// button, and whichever came first in the page source won (#151).
+		// Maestro matches regex selectors case-sensitively, and a flow written
+		// against it has to behave the same here.
+		//
+		// Plain text selectors are untouched — they are not regexes, and fall
+		// to the case-insensitive contains path below.
+		re, err := regexp.Compile(pattern)
 		if err != nil {
 			// Invalid regex - fall back to contains
 			for _, text := range texts {
@@ -434,6 +446,14 @@ func looksLikeRegex(text string) bool {
 		c := text[i]
 		// Check if it's escaped
 		if i > 0 && text[i-1] == '\\' {
+			// A backslash-escaped metacharacter is regex syntax (\. matches a
+			// literal dot, \$ a literal $), so the whole pattern is a regex.
+			// Classifying it as literal would match the backslash verbatim and
+			// never hit an element whose text has no backslash (#136).
+			switch c {
+			case '.', '*', '+', '?', '[', ']', '{', '}', '|', '(', ')', '^', '$', '\\':
+				return true
+			}
 			continue
 		}
 		switch c {

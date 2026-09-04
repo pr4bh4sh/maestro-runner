@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -154,6 +155,42 @@ func (fr *FlowRunner) Run() FlowResult {
 	// Mark flow as started
 	fr.flowWriter.Start()
 
+	// Declared before the recording defer below so that defer can read the
+	// outcome — a recording kept only on failure cannot know, at the time it
+	// starts, whether it will be wanted.
+	flowStatus := report.StatusPassed
+
+	// --record: capture the whole flow, onFlowComplete hooks included — this
+	// defer is registered before theirs, so it runs after them. Best-effort
+	// throughout: a driver that can't record must not fail the flow.
+	if fr.config.Record {
+		if recorder, ok := innerDriver.(core.ScreenRecorder); ok {
+			if err := recorder.StartScreenRecording(); err != nil {
+				logger.Warn("--record: %v — continuing without recording", err)
+			} else {
+				defer func() {
+					target := fr.flowWriter.RecordingTarget()
+					if err := recorder.StopScreenRecording(target); err != nil {
+						logger.Warn("--record: failed to save recording: %v", err)
+						return
+					}
+					// A recording can only be made while the flow runs, so
+					// on-failure retention is a decision taken afterwards:
+					// record everything, keep what turned out to matter.
+					if fr.config.RecordMode == "on-failure" && flowStatus == report.StatusPassed {
+						if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+							logger.Warn("--video on-failure: could not discard the recording: %v", err)
+						}
+						return
+					}
+					fr.flowWriter.SetVideo()
+				}()
+			}
+		} else {
+			logger.Warn("--record: the %s driver does not support screen recording", fr.config.DriverName)
+		}
+	}
+
 	// Reset any console / page-error noise captured before the first step
 	// ran. The CDP browser driver subscribes to Runtime events during
 	// construction and the initial navigation to cfg.URL fires events
@@ -163,7 +200,6 @@ func (fr *FlowRunner) Run() FlowResult {
 	resetConsoleLogs(fr.driver)
 
 	// Execute all steps
-	flowStatus := report.StatusPassed
 	var flowError string
 
 	// Execute onFlowComplete in defer (runs even on failure)
@@ -202,7 +238,16 @@ func (fr *FlowRunner) Run() FlowResult {
 		}
 	}
 
+	// Pause between top-level steps (--step-delay / flow stepDelay, flow wins).
+	stepDelay := fr.config.StepDelay
+	if fr.flow.Config.StepDelay != nil {
+		stepDelay = *fr.flow.Config.StepDelay
+	}
+
 	for i, step := range fr.flow.Steps {
+		if i > 0 && stepDelay > 0 {
+			time.Sleep(time.Duration(stepDelay) * time.Millisecond)
+		}
 		// Check context cancellation
 		if fr.ctx.Err() != nil {
 			fr.flowWriter.SkipRemainingCommands(i)
@@ -324,6 +369,16 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 	// Mark step as started
 	fr.flowWriter.CommandStart(idx)
 
+	// Step-level platform gate: a step with `platform: ios|android|web` runs
+	// only on that platform and is skipped elsewhere (Maestro #1353).
+	if gate := step.PlatformGate(); gate != "" {
+		if info := fr.driver.GetPlatformInfo(); info != nil && !strings.EqualFold(info.Platform, gate) {
+			logger.Debug("Skipping step %d: platform gate %q != driver platform %q", idx, gate, info.Platform)
+			fr.flowWriter.CommandEnd(idx, report.StatusSkipped, nil, nil, report.CommandArtifacts{})
+			return report.StatusSkipped, "", time.Since(stepStart).Milliseconds()
+		}
+	}
+
 	// Determine what artifacts to capture
 	captureAlways := fr.config.Artifacts == ArtifactAlways
 	captureOnFailure := fr.config.Artifacts == ArtifactOnFailure
@@ -351,6 +406,8 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 		result = fr.script.ExecuteDefineVariables(s)
 	case *flow.RunScriptStep:
 		result = fr.script.ExecuteRunScript(s)
+	case *flow.RunShellStep:
+		result = fr.executeRunShell(s)
 	case *flow.EvalScriptStep:
 		result = fr.script.ExecuteEvalScript(s)
 	case *flow.AssertTrueStep:
@@ -393,6 +450,15 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 		s.AppID = fr.script.ExpandVariables(s.AppID)
 		result = fr.driver.Execute(step)
 	case *flow.ClearStateStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		s.AppID = fr.script.ExpandVariables(s.AppID)
+		result = fr.driver.Execute(step)
+	case *flow.SetPermissionsStep:
+		// Same defaulting as the steps above. Without it a `setPermissions`
+		// that omits appId — the form the docs show, since the flow already
+		// declares one — reached the driver with an empty app and failed.
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
 		}
@@ -477,18 +543,14 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 
 	// TakeScreenshot - delegate to driver, then save the returned PNG data
 	case *flow.TakeScreenshotStep:
-		result = fr.driver.Execute(step)
-		if result.Success {
-			if data, ok := result.Data.([]byte); ok && len(data) > 0 {
-				path, saveErr := fr.flowWriter.SaveNamedScreenshot(idx, s.Path, data)
-				if saveErr != nil {
-					logger.Warn("Failed to save screenshot: %v", saveErr)
-				} else {
-					artifacts.ScreenshotAfter = path
-					result.Message = fmt.Sprintf("Screenshot saved: %s", filepath.Base(path))
-				}
-			}
+		var reportPath string
+		result, reportPath = fr.executeTakeScreenshot(s, idx)
+		if reportPath != "" {
+			artifacts.ScreenshotAfter = reportPath
 		}
+
+	case *flow.AssertScreenshotStep:
+		result = fr.executeAssertScreenshot(s)
 
 	// PasteText - use in-memory copiedText first, clipboard as fallback
 	case *flow.PasteTextStep:
@@ -577,6 +639,301 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 	}
 
 	return status, errorMsg, stepDuration
+}
+
+func (fr *FlowRunner) executeTakeScreenshot(
+	step *flow.TakeScreenshotStep,
+	commandIndex int,
+) (*core.CommandResult, string) {
+	result := fr.driver.Execute(step)
+	if !result.Success {
+		return result, ""
+	}
+
+	data, ok := result.Data.([]byte)
+	if !ok || len(data) == 0 {
+		return result, ""
+	}
+
+	requestedPath := ""
+	if step.Path != "" {
+		requestedPath = fr.script.ResolvePath(step.Path)
+		if filepath.Ext(requestedPath) == "" {
+			requestedPath += ".png"
+		}
+		if err := os.MkdirAll(filepath.Dir(requestedPath), 0o755); err != nil {
+			err = fmt.Errorf("create screenshot directory for %q: %w", requestedPath, err)
+			return &core.CommandResult{Success: false, Error: err, Message: err.Error()}, ""
+		}
+		if err := os.WriteFile(requestedPath, data, 0o644); err != nil {
+			err = fmt.Errorf("write screenshot %q: %w", requestedPath, err)
+			return &core.CommandResult{Success: false, Error: err, Message: err.Error()}, ""
+		}
+	}
+
+	reportName := ""
+	if step.Path != "" {
+		reportName = filepath.Base(step.Path)
+	}
+	reportPath, reportErr := fr.flowWriter.SaveNamedScreenshot(commandIndex, reportName, data)
+	if reportErr != nil {
+		logger.Warn("Failed to save screenshot report artifact: %v", reportErr)
+	}
+
+	if requestedPath != "" {
+		result.Message = fmt.Sprintf("Screenshot saved: %s", requestedPath)
+	} else if reportErr == nil {
+		result.Message = fmt.Sprintf("Screenshot saved: %s", filepath.Base(reportPath))
+	}
+	return result, reportPath
+}
+
+// screenshotSettleThreshold matches waitForAnimationToEnd: two frames within
+// 0.5% of each other count as the same frame.
+const screenshotSettleThreshold = 0.005
+
+// screenshotSettleTimeout bounds the wait. A screen that never settles — a
+// spinner, a video, a blinking caret — must not hang the step, so this falls
+// through to comparing whatever was captured last rather than failing.
+// A variable so tests can exercise the give-up path without a real wait.
+var screenshotSettleTimeout = 2 * time.Second
+
+// captureSettledScreenshot re-captures until two consecutive frames agree,
+// which is what makes a screenshot comparison reproducible: capturing mid
+// animation produces a baseline nothing will ever match again, and the
+// resulting failure looks like a real visual regression.
+//
+// The drivers already do this for waitForAnimationToEnd; assertScreenshot was
+// simply never wired to it. Doing it here covers every driver at once.
+func (fr *FlowRunner) captureSettledScreenshot(step *flow.AssertScreenshotStep) *core.CommandResult {
+	deadline := time.Now().Add(screenshotSettleTimeout)
+
+	result := fr.driver.Execute(step)
+	if !result.Success {
+		return result
+	}
+	prev, ok := result.Data.([]byte)
+	if !ok || len(prev) == 0 {
+		return result // let the caller report the empty-capture error
+	}
+
+	for time.Now().Before(deadline) {
+		next := fr.driver.Execute(step)
+		if !next.Success {
+			return result // a failed re-capture is not worse than the frame we hold
+		}
+		curr, ok := next.Data.([]byte)
+		if !ok || len(curr) == 0 {
+			return result
+		}
+		if core.ImageDifference(prev, curr) <= screenshotSettleThreshold {
+			return next
+		}
+		prev = curr
+		result = next
+	}
+	return result
+}
+
+func (fr *FlowRunner) executeAssertScreenshot(step *flow.AssertScreenshotStep) *core.CommandResult {
+	result := fr.captureSettledScreenshot(step)
+	if !result.Success {
+		return result
+	}
+
+	capturedData, ok := result.Data.([]byte)
+	if !ok || len(capturedData) == 0 {
+		err := fmt.Errorf("screenshot capture returned no image data")
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: err.Error(),
+		}
+	}
+
+	referencePath := fr.script.ResolvePath(step.Path)
+	if filepath.Ext(referencePath) == "" {
+		referencePath += ".png"
+	}
+
+	// Reject a reference path that escapes both the flow directory and the
+	// project root — a baseline/diff must not be written outside the workspace
+	// via `..` traversal (Maestro #3459).
+	if err := validateArtifactPath(referencePath, fr.script.FlowDir()); err != nil {
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: err.Error(),
+		}
+	}
+
+	referenceData, err := os.ReadFile(referencePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			err = fmt.Errorf("read reference screenshot %q: %w", referencePath, err)
+			return &core.CommandResult{
+				Success: false,
+				Error:   err,
+				Message: err.Error(),
+			}
+		}
+		if writeErr := writeScreenshotBaseline(referencePath, capturedData); writeErr != nil {
+			return &core.CommandResult{
+				Success: false,
+				Error:   writeErr,
+				Message: writeErr.Error(),
+			}
+		}
+		return &core.CommandResult{
+			Success: true,
+			Message: fmt.Sprintf("Baseline screenshot created: %s", referencePath),
+			Data:    capturedData,
+		}
+	}
+
+	if fr.config.UpdateScreenshots {
+		if writeErr := writeScreenshotBaseline(referencePath, capturedData); writeErr != nil {
+			return &core.CommandResult{
+				Success: false,
+				Error:   writeErr,
+				Message: writeErr.Error(),
+			}
+		}
+		return &core.CommandResult{
+			Success: true,
+			Message: fmt.Sprintf("Baseline screenshot updated: %s", referencePath),
+			Data:    capturedData,
+		}
+	}
+
+	stats, err := core.CompareImages(referenceData, capturedData)
+	if err != nil {
+		// A comparison that never ran writes no diff image, so any _diff.png
+		// left by an earlier run stays on disk — and it shows the *previous*
+		// failure, or none at all. Users following the "check the diff image"
+		// hint then see a picture that looks identical to the capture and
+		// conclude the runner is lying (#138). Clear it so the artifact can't
+		// contradict the error beside it.
+		diffPath := core.DiffScreenshotPath(referencePath)
+		if rmErr := os.Remove(diffPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			logger.Warn("Failed to remove stale screenshot diff %s: %v", diffPath, rmErr)
+		}
+		err = fmt.Errorf("compare screenshot with %q: %w", referencePath, err)
+		msg := err.Error()
+		if step.CropOn != nil {
+			// A cropped baseline is only ever as stable as the element's
+			// rendered size, so name that cause rather than leaving the user to
+			// guess why two runs of the same flow disagree on dimensions.
+			msg += " — the cropOn element rendered at a different size than when" +
+				" the baseline was captured; re-record it with --update-screenshots" +
+				" if the new size is correct"
+		}
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: msg,
+		}
+	}
+	matchPercentage := stats.MatchPercentage
+
+	if matchPercentage < step.ThresholdPercentage {
+		diffPath := core.DiffScreenshotPath(referencePath)
+		diffHint := ""
+		if writeErr := core.WriteScreenshotDiff(referenceData, capturedData, diffPath); writeErr != nil {
+			logger.Warn("Failed to write screenshot diff: %v", writeErr)
+		} else {
+			diffHint = fmt.Sprintf(". Check the diff image at %s", diffPath)
+		}
+		// Print enough decimals that a near-miss can't render as "100.00% is
+		// below threshold 100.00%", and name the differing pixel count so a
+		// sub-rounding difference is legible as a real one (#138).
+		decimals := core.MatchDecimals(matchPercentage, step.ThresholdPercentage)
+		pixels := fmt.Sprintf(
+			"%d of %d pixels differ",
+			stats.DifferingPixels,
+			stats.TotalPixels,
+		)
+		err = fmt.Errorf(
+			"screenshot match %.*f%% is below threshold %.*f%% (%s)",
+			decimals, matchPercentage,
+			decimals, step.ThresholdPercentage,
+			pixels,
+		)
+		return &core.CommandResult{
+			Success: false,
+			Error:   err,
+			Message: fmt.Sprintf(
+				"Screenshot mismatch: %.*f%% match (threshold: %.*f%%, %s)%s",
+				decimals, matchPercentage,
+				decimals, step.ThresholdPercentage,
+				pixels,
+				diffHint,
+			),
+		}
+	}
+
+	return &core.CommandResult{
+		Success: true,
+		Message: fmt.Sprintf(
+			"Screenshot matches: %.2f%% (threshold: %.2f%%)",
+			matchPercentage,
+			step.ThresholdPercentage,
+		),
+		Data: capturedData,
+	}
+}
+
+// validateArtifactPath rejects a screenshot baseline/diff path that escapes
+// the workspace via `..` traversal. It is permitted to live under the flow
+// directory or under the project root (cwd) — so a shared `../baselines`
+// layout still works — but not above both (Maestro #3459). A path is only
+// rejected when it demonstrably escapes; if neither root can be resolved the
+// path is allowed (fail-open, since this is defense-in-depth for local YAML).
+func validateArtifactPath(path, flowDir string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	abs = filepath.Clean(abs)
+
+	within := func(root string) bool {
+		if root == "" {
+			return false
+		}
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			return false
+		}
+		rel, err := filepath.Rel(absRoot, abs)
+		if err != nil {
+			return false
+		}
+		return rel == "." || !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
+	}
+
+	if within(flowDir) {
+		return nil
+	}
+	if cwd, err := os.Getwd(); err == nil && within(cwd) {
+		return nil
+	}
+	// If we couldn't establish any root to compare against, don't block.
+	if flowDir == "" {
+		if _, err := os.Getwd(); err != nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("screenshot path %q escapes the workspace (path traversal not allowed)", path)
+}
+
+func writeScreenshotBaseline(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create screenshot baseline directory for %q: %w", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write screenshot baseline %q: %w", path, err)
+	}
+	return nil
 }
 
 // maxPrepareScanDepth bounds runFlow expansion during pre-session scanning so a
@@ -1060,6 +1417,12 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 		}
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)
+	case *flow.SetPermissionsStep:
+		if s.AppID == "" {
+			s.AppID = fr.flow.Config.EffectiveAppID()
+		}
+		fr.script.ExpandStep(step)
+		result = fr.driver.Execute(step)
 	case *flow.ClearStateStep:
 		if s.AppID == "" {
 			s.AppID = fr.flow.Config.EffectiveAppID()
@@ -1068,18 +1431,10 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 		result = fr.driver.Execute(step)
 	case *flow.TakeScreenshotStep:
 		fr.script.ExpandStep(step)
-		result = fr.driver.Execute(step)
-		if result.Success {
-			if data, ok := result.Data.([]byte); ok && len(data) > 0 {
-				subIdx := len(fr.subCommands)
-				path, saveErr := fr.flowWriter.SaveNamedScreenshot(subIdx, s.Path, data)
-				if saveErr != nil {
-					logger.Warn("Failed to save nested screenshot: %v", saveErr)
-				} else {
-					result.Message = fmt.Sprintf("Screenshot saved: %s", filepath.Base(path))
-				}
-			}
-		}
+		result, _ = fr.executeTakeScreenshot(s, len(fr.subCommands))
+	case *flow.AssertScreenshotStep:
+		fr.script.ExpandStep(step)
+		result = fr.executeAssertScreenshot(s)
 	case *flow.EvalBrowserScriptStep:
 		fr.script.ExpandStep(step)
 		result = fr.driver.Execute(step)

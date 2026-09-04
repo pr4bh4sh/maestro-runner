@@ -7,6 +7,347 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.26] - 2026-09-02
+
+This release is mostly about **taps and selectors landing where the flow says they should**. A tap used to be injected first and validated afterwards, so a rejected tap had already hit whatever sat under the fold — usually a bottom tab, which navigated away and left every later step running on the wrong screen. `scrollUntilVisible` would stop on a 9-pixel sliver of a button because the hierarchy handed us a rect it had already clipped. Two selector semantics move closer to Maestro's, and **both can change what an existing flow matches** — see the note below. Reaching the runner got easier too: it is on npm, it compiles on Windows, and it reads flow files with Windows line endings.
+
+### ⚠️ Two behaviour changes
+
+Both make selectors stricter. A flow that relied on the looser behaviour will start failing, and that is the point — the looser behaviour was matching things the flow did not ask for.
+
+**Regex selectors are case-sensitive.** Every regex was previously compiled with `(?i)`, so an anchored pattern could not distinguish what it was written to distinguish: `^SIGN OUT$` matched a "Sign out" row as readily as the "SIGN OUT" button, and page-source order decided which one was tapped. Plain text is not a regex and stays case-insensitive; add `(?i)` explicitly if you want an insensitive regex ([#151](https://github.com/devicelab-dev/maestro-runner/issues/151)).
+
+```yaml
+- tapOn: "^SIGN OUT$"          # now matches only the uppercase button
+- tapOn: "(?i)^sign out$"      # opt back in to insensitivity
+- tapOn: "sign out"            # plain text — unchanged, still insensitive
+```
+
+**A selector naming both `id:` and `text:` must match one element carrying both.** The two were emitted as separate queries, so the finder returned on whichever hit first — an AND written by the author behaving as an OR, matching an element that had the right id and completely different text ([#157](https://github.com/devicelab-dev/maestro-runner/issues/157), [#158](https://github.com/devicelab-dev/maestro-runner/pull/158)).
+
+```yaml
+- assertVisible:
+    id: "cart-button"
+    text: "Checkout"          # now both must be true of the same element
+```
+
+### Added
+- **npm distribution** — `npx maestro-runner test flows/`, or `npm install --save-dev maestro-runner` to pin it alongside a React Native or Expo project. There is no postinstall and nothing is downloaded at install time: the binary arrives as an ordinary optional dependency npm selects by `os` and `cpu`, so installs work offline, behind a proxy, and in CI that blocks postinstall network access.
+- **`--window-size <WxH>`** (env `MAESTRO_WINDOW_SIZE`) — sets the browser viewport, so one suite can run against phone, tablet and desktop breakpoints. Defaults to 1280x800. A value that cannot be read falls back to the default rather than failing the run, since a wrong separator is a typo and refusing to start over it helps nobody.
+  ```bash
+  maestro-runner --platform web --window-size 390x844 test flows/
+  ```
+- **`--new-command-timeout <seconds>`** (env `MAESTRO_NEW_COMMAND_TIMEOUT`) — sets `appium:newCommandTimeout` on the Appium session when the caps file does not already specify it; an explicit value in `--caps` stays authoritative. Raising it matters on cloud `--parallel` runs, where the earliest sessions sit idle through the serial pre-creation phase and would otherwise be reaped at the server default, failing the first flow with `invalid session id`. Off by default. Contributed by [@JSap0914](https://github.com/JSap0914), requested by [@devrchoi](https://github.com/devrchoi) ([#124](https://github.com/devicelab-dev/maestro-runner/issues/124)).
+- **Windows builds** — the runner compiles for Windows. `syscall.SysProcAttr.Setpgid` is Unix-only and was referenced unguarded, so the package would not build at all ([#159](https://github.com/devicelab-dev/maestro-runner/issues/159)).
+
+### Fixed
+- **A tap was injected before it was validated** — `tapOn` on the DeviceLab Android driver found and clicked in one agent call, then read the rect and applied the off-screen guard, so the guard ran on a tap that had already landed. A clipped rect (top > bottom, so a negative height) puts its centre outside the element, and on a screen with a bottom tab bar that centre is a tab: the "rejected" tap switched tabs and the flow desynced. The check now runs on the agent, on the bounds it is about to click, and declines to click at all. Five host-side coordinate paths that never reached the agent guard — `tapOn` with `point:`, with `duration:`/`longPress`, its centre fallback, `doubleTapOn` and `longPressOn` — validate the resolved point too, as does the lazy-retry path, which previously had no check whatever and fires exactly when a clipped rect is most likely ([#162](https://github.com/devicelab-dev/maestro-runner/issues/162)).
+- **A tap is refused when a window above the target covers the point**, naming what covered it — a keyboard, a system or permission dialog. Geometry cannot tell you a tap will reach its target; a window's layer can.
+- **Chained `UiSelector` predicates were first-match-wins** — the DeviceLab agent evaluated a selector chain by returning on whichever predicate it tested first, so `.resourceId(…).textContains(…)` matched on text alone and ignored the id. Every predicate now has to hold ([#160](https://github.com/devicelab-dev/maestro-runner/issues/160)).
+- **`scrollUntilVisible` accepted a container-clipped sliver as fully visible** — Android reports bounds already clipped to the scroll container, so a 9-pixel sliver of a 126-pixel button arrived as a 9-pixel rect wholly inside the screen and scored 100%. Only clipping by the screen edge was ever detectable. A rect flush with its scrollable ancestor's leading edge now gets one confirming scroll: a sliver grows, an element resting at the end of a list does not ([#164](https://github.com/devicelab-dev/maestro-runner/issues/164)).
+- **"Driver not installed" was reported for any adb failure** — the installed-check swallowed the error, so a transport or permission problem surfaced as a missing package and sent people to reinstall something already there. The real error is now named. Matching also compares whole entries rather than substrings, since `pm list packages …server` also returns `…server.test`, and retries with `--user 0` for a device whose shell user cannot see a package installed for user 0 ([#163](https://github.com/devicelab-dev/maestro-runner/issues/163)).
+- **A CSS selector tapped the first DOM match even when it was hidden** — `document.querySelector`'s first hit might be a collapsed menu's copy of a button or a `display:none` template row, and the tap then sat there until the deadline and failed with `context deadline exceeded`. The visible match is chosen instead, which is what the `text:` path already did via the accessibility tree.
+- **`setPermissions` was missing on most drivers** — implemented everywhere, with the permission tables shared rather than copied per driver. iOS honours location's own vocabulary (`always`, `inuse`, `never`, `unset`), and a value a permission does not accept is reported instead of silently resetting it to "not determined", which asked the user at run time — the opposite of what the flow said ([#147](https://github.com/devicelab-dev/maestro-runner/issues/147)). `notifications` and `faceid` have no simctl service and say so rather than being sent to a tool that rejects them.
+- **A permission the app never declared failed the step** on Android; it is now skipped, as Maestro does.
+- **A nil-pointer panic in the WebView manager killed the whole run** — `browser.Timeout(...).Connect()` connected a clone of the browser object, leaving the original's event channel nil. One bad flow can no longer take down a parallel run either ([#149](https://github.com/devicelab-dev/maestro-runner/issues/149)).
+- **A step's `label:` is used in the HTML report** instead of being overridden by its selector ([#150](https://github.com/devicelab-dev/maestro-runner/issues/150)).
+- **Flow files with Windows line endings failed to parse** — every flow, not just some ([#159](https://github.com/devicelab-dev/maestro-runner/issues/159)).
+- **`${VAR}` is expanded in every step's `env:` block.**
+- **`checked:` reads the checked state on the native Android drivers too**, not just Appium ([#154](https://github.com/devicelab-dev/maestro-runner/issues/154)).
+- **Appium Android `checked:` selectors used the unrelated `selected` state** — the page-source parser now retains the XML `checked` attribute and state filtering reads it directly, so checked and unchecked switches match correctly even when `selected` differs ([#153](https://github.com/devicelab-dev/maestro-runner/issues/153)).
+- **Directional relative selectors pick the nearest element** rather than the deepest ([#16](https://github.com/devicelab-dev/maestro-runner/issues/16)).
+- **DeviceLab Android falls back to key events when send-keys is rejected.**
+- **The DeviceLab page-source parser read the wrong hint attribute** — the agent writes `hint-text`, the parser matched only `hint`, so `HintText` was always empty on that driver. Invisible on the common path, since the agent matches hints itself, but it cost hint matching on the host-side path used by `index:`, `width`/`height:`, regex `id:`, relative selectors and `count:`.
+
+### Changed
+- **Flutter widget trees are no longer re-serialised on every poll** ([#152](https://github.com/devicelab-dev/maestro-runner/issues/152)).
+- **Binaries are built with `-trimpath`**, so build-machine paths are not baked into them.
+
+## [1.1.25] - 2026-08-25
+
+This release is about **the first five minutes and the oldest complaints**: a `doctor` that says exactly what your machine is missing, a `devices` listing, a `screenshot` command, `runShell` for the one adb call every suite eventually needs, and an `inputText` that checks what actually landed in the field. It is also about **gestures that behave like a user's finger**: a real `dragAndDrop` on every driver — press, hold until the item lifts, move slowly, settle, release — and a `scrollUntilVisible` that stops when the element is actually visible instead of one pixel in. Flutter apps go from barely drivable to ahead of WDA on the DeviceLab iOS driver, `--step-delay` slows any flow down for demos and animation-heavy apps, and JUnit reports carry test-tracking properties and failure artifacts into CI.
+
+### Added
+- **`doctor`** — checks the toolchain and says what to do about each gap, with `--json` for CI. A missing platform is a warning rather than an error, so it gates a Linux runner without failing it for having no Xcode; only a broken install or a team ID Xcode does not have exits non-zero. Three checks earn their place: Command-Line-Tools-instead-of-full-Xcode, which otherwise surfaces far from its cause; an AVD naming a system image that is not installed, which nothing reports at run time and which shows up only as a driver polling for a device that will never boot; and `--team-id` checked against the signing certificates in the login keychain, which is the entire content of `error: No Account for Team "..."` at WDA build time.
+  ```
+  ✗ Signing identity for team abcd123456 — no certificate belongs to team abcd123456;
+    this Mac has: A3RCAA2YAX
+      Pass one of the team IDs listed above as --team-id, or add that team's account in Xcode.
+  ```
+- **`devices`** — Android devices and emulators, iOS simulators and connected phones in one listing, with `--json` and `--all` for the shut-down simulators. A phone that answers usbmux but refuses the lockdown handshake is listed as not-ready with the reason, instead of looking identical to a working one.
+- **`screenshot`** — capture the current screen with the same device and driver flags a run takes. Writes a file, or `-` for stdout.
+- **`runShell`** — run a host command from a flow, for the adb, simctl or xcrun call every suite eventually needs.
+  ```yaml
+  - runShell:
+      command: adb -s $MAESTRO_DEVICE_ID shell getprop ro.build.version.sdk
+      output: SDK
+  ```
+  `output:` binds the command's trimmed output to a flow variable for later steps. The environment carries the flow's variables, the step's own `env:`, and `MAESTRO_DEVICE_ID` / `MAESTRO_PLATFORM` / `MAESTRO_APP_ID` — the device id being the one that matters, since a bare `adb shell` fails outright when `--parallel` has two devices attached. Bounded at 30s by default (`timeout:` to change it), output capped at 64KB keeping the tail, and a non-zero exit fails the step unless it is `optional: true`.
+- **`scrollUntilVisible` can scroll inside a container** — `from:` names the scrollable element, for a screen whose scrolling part is an inner list or a horizontal carousel rather than the screen itself. The gesture is centred in the container and inset at each end, so a swipe starting on its edge is not claimed by the parent list instead. UIAutomator2 for now; the other drivers refuse `from:` by name rather than silently scrolling the screen.
+  ```yaml
+  - scrollUntilVisible:
+      element:
+        id: "product-item-Playwright"
+      from:
+        id: "products-list"
+  ```
+- **`--video never|always|on-failure`** — keep screen recordings only for the runs worth watching. `--record` still means `always`. A recording cannot be started retroactively, so `on-failure` records every flow and discards the passing ones at the end. The vocabulary matches `--artifacts` rather than inventing a second spelling for the same idea.
+- **`lint --json`** — `{checked, failed, results[]}` on stdout, for editors, CI and anything generating flows that wants to check its own output before it costs a device.
+- **`dragAndDrop`** — long-press an element (or point) and drag it to another, the way reorder UIs expect. `from:`/`to:` each take a selector or a `point:`; `holdDuration` (ms, default 1000) is the press before movement, `duration` (ms, default 1000) the movement itself. Works on every driver: UIAutomator2 (W3C actions with precise hold and paced moves), DeviceLab Android (`input draganddrop`, Android 12+ — hold length comes from the system long-press timeout), WDA (`press(forDuration:thenDragTo:)` — XCUITest paces the move itself), DeviceLab iOS (runner drag with a new backward-compatible `moveDurationMs` field), web (paced CDP mouse sequence), and Appium (W3C actions).
+  ```yaml
+  - dragAndDrop:
+      from:
+        id: "item-3"
+      to:
+        point: "50%, 20%"
+      holdDuration: 800
+  ```
+  Heads-up for web: pages using native HTML5 `draggable` ignore synthetic mouse events by design — mouse/touch/pointer-event drag implementations work.
+- **`--step-delay <ms>`** — pace a pause between top-level steps, for demos and for apps whose animations outrun the assertions. Also `MAESTRO_STEP_DELAY` in the environment, and per-flow override with `stepDelay:` in the flow config.
+- **Flow `properties:` in JUnit reports** — a flow's `properties:` map (Maestro-compatible syntax) now lands as `<property>` entries on its JUnit testcase, next to the standard file and device properties — so flows can carry test-tracking ids into CI ([#84](https://github.com/devicelab-dev/maestro-runner/issues/84)).
+  ```yaml
+  properties:
+    testID: Test-1234
+  ```
+- **Faster parallel runs** — the work queue is filled longest-flow-first using durations from the previous run, instead of file order. A run cannot finish before its longest remaining flow does, so one slow flow late in the alphabet used to set the wall clock for every worker. Flows with no recorded time are weighted as the median. Best-effort: no previous run, or an unreadable report, falls back to file order.
+- **A mid-flow app death is explained rather than blamed on the selector (Android)** — when the app under test dies, the runner now asks the platform why instead of reporting a bare "element not found". That covers the two cases logcat cannot see: a low-memory kill writes nothing at all, and a system resource kill writes nothing useful. The DeviceLab driver had no crash detection whatsoever and is now level with UIAutomator2.
+- **Failure artifacts in JUnit reports** — failed testcases attach the failing step's screenshot, and any `--record` video, via the `[[ATTACHMENT|path]]` convention Jenkins-style tooling reads; paths are relative to the report directory. A green run attaches only the video.
+- **Negation globs in `config.yaml`** — a `flows:` pattern prefixed with `!` subtracts the files it would otherwise have selected, so a workspace can take everything and carve out the fixtures. Exclusions reuse the inclusion matcher, so `!a/**` excludes exactly what `a/**` would have included.
+  ```yaml
+  flows:
+    - "**"
+    - "!fixtures/**"
+  ```
+- **DeviceLab iOS targets the app that's actually on screen** — a command with no `appId` used to activate the runner's own placeholder host app, hijacking whatever you were looking at with a blank screen, because XCUITest's public API can't address "the app in front". It now resolves the frontmost application through the active-application PIDs and targets it with no activation at all, falling back to the host app (and logging which guard missed) when any step is unavailable.
+- **The DeviceLab iOS runner source ships inside the Go module** — library consumers previously built the runner from whatever was in `~/.maestro-runner/drivers/ios`, a hidden runtime dependency and a protocol-skew hazard where a pinned Go client could drive runner sources from a different version. The runner a consumer runs is now version-locked to the module it compiled against, with no maestro-runner installation needed. The CLI keeps using the installed directory — identical content, shared build cache.
+
+### Fixed
+- **`inputText` reported success without checking that the text arrived** — nothing read the field back, so a character lost to a janky frame was indistinguishable from a clean run, and the flow failed several steps later on an assertion that had nothing to do with the cause. Every Android path now reads the field after typing and, when characters are missing, clears and types once more; a dropped keystroke is a timing accident, and the second attempt almost always succeeds. Three rules keep it from causing more harm than it prevents: the check is a suffix rather than an equality, because mobile text entry appends to whatever the field held; a reading that did not change is treated as telling us nothing, because some drivers report an empty field's hint, so "Username" comes back whether or not a name was typed; and a value at least as long as what was typed has been reformatted by the app — a phone mask, an autocomplete, a secure field reporting bullets — so those are recognised and left alone. A field that still disagrees after the retry is reported in the step result rather than failed. Measured on a Pixel 4a at roughly 75ms per field. Not yet wired on WDA or DeviceLab iOS.
+- **Two device errors described something other than what had happened** — on iOS, with nothing booted and no device named, an empty device list was reported as a code-signing error demanding `--team-id`, because the "is this a simulator?" check correctly answers no when there is no simulator. An empty device list now says so, before signing is considered at all. On Android, the parallel path reported "no available Android devices found" whether nothing was attached or every attached device was already being driven by another maestro-runner; those have completely different fixes, and offline or unauthorized devices are now counted separately again. Both point at `maestro-runner devices` for what the machine can actually see.
+- **`scrollUntilVisible` stopped on elements it shouldn't have** — every driver accepted any 1px viewport overlap (or mere presence) as "visible", and the documented `visibilityPercentage` knob was parsed but wired to nothing. The stop criterion is now a real visibility check on every driver: fully visible by default, honoring `visibilityPercentage` when set. Heads-up: flows that relied on a sliver of the element counting as visible may scroll one step further now. On DeviceLab iOS, frames that arrive pre-clipped to the viewport (Flutter semantics especially) additionally need to hold still across one extra scroll before being accepted, so a 12pt sliver of an 80pt row can't masquerade as fully visible.
+- **Flutter apps were undrivable on the DeviceLab iOS driver** — four stacked causes, each fixed: the Flutter VM fallback was wired only into the WDA path; the driver implemented neither the coordinate-tap step the fallback delivers taps through nor `tapOn: point:`; the fallback's short find windows leaked into the runner's HTTP timeout and cut XCUITest calls off mid-flight; and scroll gestures released mid-motion, so iOS spent the next tap cancelling residual deceleration instead of activating anything — a silent no-op. Scrolls now hold still 250ms before lifting, the same dead-stop lesson the Android agent swipes learned. On the Flutter issue-repro suite the driver goes from 9/19 to 17/19 — ahead of WDA-with-fallback at 14/19; the two remaining failures reproduce open Flutter framework bugs and fail on every driver.
+
+- **`assertVisible` on the Appium driver asserted presence, not visibility** — it returned success as soon as the element was findable, and `assertNotVisible` required it to be unfindable, so a present-but-hidden element passed the first and failed the second. Both now check the displayed state, which was already being fetched and discarded. **Heads-up: a flow that passed on a hidden element will now fail** — that is the intent, but it is a behaviour change. Android only: XCUITest reports elements as not displayed that are plainly on screen, so the check is not applied there.
+- **The Appium driver granted 32 permissions the app never asked for** — `launchApp` walked a hardcoded list and issued one `pm grant` shell call per entry, ignoring the failures that most of them produced, since granting an undeclared permission raises a SecurityException. It now reads what the manifest declares and grants that list in a single call. On a Pixel 4a that is 33 requests and 2.0s down to 3 requests and 0.3s per launch, and it works on hosts that disable the `adb_shell` insecure feature, which the old approach silently did not.
+- **The Appium driver ran every selector strategy against elements that were not there** — finding by text tried six UiAutomator strategies in order, and while polling for an element that had not appeared yet all six missed, every cycle. Measured on a device, 22 of 30 finds in one flow were misses costing more than the successful finds. The case-insensitive forms are supersets of the rest, so two probes now decide whether anything matches before the specific strategies run.
+- **The Appium driver fetched element properties nothing read** — describing an element cost five round trips, of which `enabled` was never consumed and the accessibility description was wanted by one command out of nineteen. Now three, with the description fetched on demand.
+- **`point:` was silently ignored on `doubleTapOn` and `longPressOn`** by the Appium and web drivers, which tapped the element centre instead. Every driver now honours it, so a knob that worked on four drivers and was quietly dropped by two behaves the same everywhere. Fixing the web path surfaced a second dead option: web long press hardcoded a one-second hold and dropped `duration:` entirely.
+- **`assertScreenshot` compared whatever frame arrived** — capturing mid-animation seeds a baseline nothing will match again, and the failure that follows looks exactly like a real visual regression. It now re-captures until two consecutive frames agree, the same settle the drivers already used for `waitForAnimationToEnd`. A screen that never settles (a spinner, a video, a caret) falls through to the last frame rather than hanging.
+- **DeviceLab iOS rejected clipped frames by scrolling again** — iOS clamps a descendant's frame to its scroll container's visible bounds, so a sliver of a row far past the fold reads as fully visible and the tap that follows does nothing. Rather than spending an extra scroll to see whether a suspicious rect moves, the driver now checks the parent chain: a descendant claiming to be on screen beneath an ancestor that is wholly off it is a contradiction, found in one pass.
+- **Web flow-header variables reached the browser unexpanded** — a flow declaring `url: ${BASE_URL}` sent the literal `${BASE_URL}` to Chromium, which rejected it as an invalid URL, so `--platform web` could not be driven from the environment at all. The header is now expanded through the same script engine, in the same precedence order, that expands steps — so `-e`, `--env-file` and workspace config all reach the initial navigation ([#145](https://github.com/devicelab-dev/maestro-runner/issues/145)). The header is now expanded once centrally, so Android and iOS stop silently dropping the app version from reports when a flow uses `appId: ${VAR}`, and an unset variable is named at startup instead of surfacing later as a bare "no URL specified".
+- **A dead DeviceLab iOS runner left no trail** — mid-session runner deaths surfaced only as `connection refused`: `runner.log` was truncated on every start, the runner exited on the first listener failure, and nothing distinguished a requested shutdown from a spontaneous one. The listener now rebinds on failure (5 retries, 1s backoff) rather than exiting, since simulator network daemons crash-loop on some Xcode/runtime combinations; every deliberate exit logs its reason; `runner.log` rotates through three generations so the log explaining a death survives the burst of failed restarts that follows it; and an `xcodebuild` that exits mid-session without a Stop being requested now says so on stderr.
+
+### Contributors
+
+[@humuhimi](https://github.com/humuhimi)
+1. Reported and fixed web flow-header variables not being expanded before browser launch ([#145](https://github.com/devicelab-dev/maestro-runner/issues/145), [#146](https://github.com/devicelab-dev/maestro-runner/pull/146))
+
+[@eyalcohen](https://github.com/eyalcohen)
+1. Asked why `assertVisible` needed five element requests, which led to the Appium driver making roughly 38% fewer calls per flow
+
+[@zcsteele](https://github.com/zcsteele)
+1. Requested custom properties in JUnit report files ([#84](https://github.com/devicelab-dev/maestro-runner/issues/84))
+
+## [1.1.24] - 2026-08-16
+
+This release is about **the loop after a failed run**: re-run only what failed with `--retry-failed`, watch what happened with `--record`, and assert list contents exactly with `assertVisible: count:`. Dark mode now works everywhere — web pages and physical iOS devices included — and reports identify the exact CI build they ran against.
+
+### Added
+- **`--retry-failed`** — re-run only the flows that failed in the previous run. Reads the last report under the same `--output` directory (flattened or timestamped layout); a run cut short counts its unfinished flows as failed, so nothing is silently dropped. A clean previous run exits 0 without touching a device; if none of the previous failures are in the current selection, the run errors instead of silently running nothing.
+  ```bash
+  maestro-runner test --output ./reports flows/                 # 2 of 40 fail
+  maestro-runner test --output ./reports --retry-failed flows/  # runs just those 2
+  ```
+- **`--record`** — save a screen recording of every flow into its report assets, played inline in the HTML report. Android devices/emulators record on-device via `screenrecord` (3-minute clip cap per flow) and the file is pulled to the host; iOS simulators record host-side via `simctl`. Unsupported platforms (physical iOS, web, Appium) warn once and run without recording.
+- **`assertVisible` with `count:`** — assert that a selector matches exactly N visible elements; fewer or more both fail, and the error reports the count actually observed. Counts through the same multi-match machinery `index:` selection uses on every driver, so count semantics never diverge from single-element matching. Supports `${VAR}`; rejects `0` (use `assertNotVisible`) and combining with `index:`.
+  ```yaml
+  - assertVisible:
+      css: .cart-item
+      count: 3
+  ```
+- **Dark mode on web** — `setDarkMode`/`toggleDarkMode`/`assertDarkMode`/`assertLightMode` now work on the browser driver by emulating `prefers-color-scheme` over CDP. Heads-up: headless Chromium defaults to dark, so set an explicit mode before asserting.
+- **Dark mode on physical iOS devices** — `--driver devicelab_ios` now sets appearance through `XCUIDevice.appearance` (iOS 15+), which works on real hardware, replacing the simulator-only `simctl` path. The set is read back and the step fails if it didn't take effect.
+- **App build number in reports** — reports now show the build behind the version (Android `versionCode`, iOS `CFBundleVersion`): `v1.16.0 (10009107)` in `report.json`, the HTML header and title, and Allure's environment. The devicelab_ios and local-Appium paths report the app version too, where they previously reported none ([#144](https://github.com/devicelab-dev/maestro-runner/issues/144)).
+
+### Fixed
+- **Flow text reaching the device shell is now shell-quoted** — an apostrophe in a URL (`openBrowser: "https://example.com/s?q=it's"`) was a device-side shell parse error, and `addMedia` paths carried no quoting at all, so a filename with a space silently registered nothing. Applied at all six sites across the Android drivers (`openBrowser`, `openLink`, `launchApp` arguments, `addMedia`).
+- **WDA `inputText` rejected React Native fields that are accessibility-merged** — the 1.1.23 focus gate required an active element, but iOS collapses a `TextInput` inside an accessible container and publishes only the parent, so nothing reports keyboard focus even though typing works. The gate now also accepts a visible keyboard as evidence (iOS doesn't raise it unless something holds first responder), a failed element send-keys falls through to tap-and-type, and the failure message now says exactly what was observed ([#143](https://github.com/devicelab-dev/maestro-runner/issues/143)).
+- **iOS text-entry verification now polls for the keystrokes to commit** — the type command can return before the app has applied the keys, so the 1.1.23 one-shot re-read could land on a field that had taken nothing yet and report misdirection that never happened.
+- **`startRecording` never survived on real Android devices** — a backgrounded `screenrecord` inheriting the adb shell's stdio dies with the session, so recordings silently skipped. Both the new `--record` flag and the standalone `startRecording` step now detach correctly and verify the recorder is actually running.
+- **Web runs were reported as driver `uiautomator2`** in reports — the `--driver` flag's Android default was leaking through; web reports now say `cdp`.
+
+### Contributors
+
+[@georgetarazi-swipejobs](https://github.com/georgetarazi-swipejobs)
+1. Reported the WDA `inputText` focus-gate regression on accessibility-merged React Native fields ([#143](https://github.com/devicelab-dev/maestro-runner/issues/143))
+
+[@whalemare](https://github.com/whalemare)
+1. Requested the app build number alongside the version in reports ([#144](https://github.com/devicelab-dev/maestro-runner/issues/144))
+
+## [1.1.23] - 2026-08-11
+
+This release is about **silent failures** — steps that reported success while doing nothing, or while acting on the wrong element. Four separate commands were quietly discarding a parameter, taps could land on the soft keyboard and report success, and text could be typed into a field the flow never named. Alongside those: dark-mode control, a device-free `lint` command, and per-step latency in the report.
+
+### Added
+- **Dark mode control** — `setDarkMode`, `toggleDarkMode`, `assertDarkMode` and `assertLightMode`. Dark-mode bugs are visual and pair naturally with `assertScreenshot`, but there was no way to put a device into a known appearance or assert the one it is in. Android uses `cmd uimode night`; iOS simulators use `simctl ui appearance` on both the WDA and DeviceLab iOS drivers.
+  ```yaml
+  - setDarkMode: dark      # or: light, or {enabled: true}
+  - assertDarkMode
+  - toggleDarkMode
+  - assertLightMode
+  ```
+  Physical iOS devices and web return an explicit error rather than a silent no-op — iOS exposes no appearance hook outside the simulator, and web dark mode is a different mechanism (CDP `prefers-color-scheme`).
+- **`lint` subcommand** — parse flow files with the runner's own parser and report syntax errors without a device. Anything that would abort a run at startup is caught in milliseconds. Non-zero exit on failure, so it drops straight into a CI step.
+  ```bash
+  maestro-runner lint flows/
+  ```
+- **`hierarchy --screenshot <path>`** — capture a screenshot from the same session that produced the tree. Two separate invocations pay driver startup twice and can straddle a UI change, leaving a tree and an image that disagree about what was on screen.
+- **Per-step latency in `report.json`** — each flow now carries `stepLatency` with `p50`/`p95`/`max`/`mean` and the slowest command type. A wall-clock total hides the shape of a slowdown; percentiles separate "one command became pathological" from "everything drifted", and CI can gate on them.
+- **`point:` on `swipe: from:`** — choose where inside a scrollable the gesture starts. Independent of `distance:`, so a point re-aims a swipe without lengthening it.
+  ```yaml
+  - swipe:
+      from: {id: editor-input, point: "20%, 50%"}
+      direction: DOWN
+      distance: 0.4
+  ```
+
+### Fixed
+- **`assertScreenshot` reported "100.00% match is below threshold 100.00%"** — `%.2f` rounded 99.9967% up, so a genuine few-pixel difference read like a runner bug. The message now reports the differing/total pixel counts and widens precision until match and threshold no longer print identically: `99.997% match (threshold: 100.000%, 1 of 30000 pixels differ)`. No epsilon was added — `thresholdPercentage: 100` means zero differing pixels, matching Maestro, and exact matches already returned exactly 100 ([#138](https://github.com/devicelab-dev/maestro-runner/issues/138)).
+- **`cropOn` crops changed size between runs** — origin and size were truncated independently, so with a driver that halves the screenshot an element of height 131 cropped to 65 at y=100 and 66 at y=101. The comparison then rejected the pair on size before looking at a pixel. Rounding origin and size separately makes crop dimensions depend only on the element's size. Stale `_diff.png` files are also removed on a size mismatch — previously the "check the diff image" hint pointed at an artifact from an earlier run that looked identical to the capture ([#138](https://github.com/devicelab-dev/maestro-runner/issues/138)).
+- **Taps could land on the soft keyboard and report success** — the occlusion guard only ran when the *previous* step was an input step, so a keyboard raised by an `autoFocus` field or left up across navigation was never checked. DeviceLab also allowed a 50px margin below the reported keyboard top, but the IME consumes touches across its whole touchable region — the suggestion strip included. Measured on a Pixel 4a: the region starts at y=1428, a tap at y=1439 was swallowed while one at y=1414 focused the field. uiautomator2 never had that margin, which is why the failure was DeviceLab-only. Such taps now fail with the actionable `hideKeyboard` hint ([#139](https://github.com/devicelab-dev/maestro-runner/issues/139)).
+- **`point:` was silently ignored on `doubleTapOn` and `longPressOn`** — the parser filled it, then every driver tapped the element's centre and discarded it. It matters most on a text editor: the centre is often blank space past the end of the content, and double-tapping blank space selects no word and opens no context menu. Fixed on all four drivers — Android verified on RNTester (a field whose text ends before the centre failed 3/3 and passes 3/3 aimed at `point: "10%, 50%"`), iOS verified on a simulator ([#140](https://github.com/devicelab-dev/maestro-runner/issues/140)).
+- **`distance:` was ignored on `swipe: from:`** — honoured only for screen swipes, while the element branch always travelled the anchor's own size. Scrolling from a small anchor moved almost nothing: a 77px input produced a ~76px drag and no scroll at all ([#141](https://github.com/devicelab-dev/maestro-runner/issues/141)).
+- **DeviceLab swipes scrolled a different distance on every run** — `adb shell input swipe` always lifts the pointer at speed, so the view flings, and fling momentum comes from event timings that shift with machine load. Measured spread over identical runs: 114px at the 300ms default, 22px at `duration: 1200`, still 14px at 6000ms. Swipes now go through the on-device agent, which spends the touch slop up front and holds the pointer still before lifting. Measured over 4 runs: 1053/991/1029/1055 via adb (64px spread) against 870 every time via the agent. ADB remains the fallback when the agent is unreachable ([#141](https://github.com/devicelab-dev/maestro-runner/issues/141)).
+- **iOS `inputText` could type into the wrong element and report success** — the drivers tapped to focus and typed immediately with nothing checking the text arrived, the iOS shape of the keyPress misdirection above. Verifying focus up front is impossible — the iOS runner never populates `focused` in its snapshot (confirmed on a simulator). devicelab_ios now re-reads the target and checks its value moved; WDA now fails when nothing ever takes keyboard focus instead of sending keys anyway. Both are best-effort: with no target to re-read, verification stays silent rather than inventing a failure.
+- **`copyTextFrom` returned empty for DeviceLab cached elements** — `Element.Attribute()` dereferenced a nil HTTP client for elements resolved from a hierarchy snapshot, which could crash the runner, and there was no fallback to the accessibility label the snapshot already carries.
+- **CI had been red since 2026-07-21** — two `ineffassign` findings failed every lint run, gating Build and Release the whole time. golangci-lint is now pinned rather than tracking `latest`, which would have turned the build red on 61 pre-existing findings the moment it rolled to v2.
+
+### Changed
+- **Taps on keyboard-covered elements now fail** instead of landing on the keyboard. This is the intended fix, but it can surface new failures in flows that were quietly tapping the wrong thing — add `- hideKeyboard` or scroll the field into view.
+- **DeviceLab swipes scroll further** than before, because less travel is lost to touch slop and the pacing is accurate. Re-record screenshot baselines taken after a swipe.
+- **The bundled Android agent APK changed.** A runner-only update will not deliver the deterministic-swipe fix.
+
+### Contributors
+
+[@kacperzolkiewski](https://github.com/kacperzolkiewski)
+1. `assertScreenshot` reporting "100.00% match is below threshold 100.00%", and `cropOn` crops differing by a pixel between runs ([#138](https://github.com/devicelab-dev/maestro-runner/issues/138))
+2. `inputText` with `keyPress: true` entering partial or wrong text on Android ([#139](https://github.com/devicelab-dev/maestro-runner/issues/139))
+3. `doubleTapOn` not opening the text-selection context menu ([#140](https://github.com/devicelab-dev/maestro-runner/issues/140))
+4. `swipe` not scrolling reliably in a React Native input, especially on CI ([#141](https://github.com/devicelab-dev/maestro-runner/issues/141))
+
+## [1.1.22] - 2026-07-31
+
+The headline is the community-contributed **`hierarchy` subcommand** — dump the on-device view hierarchy, normalized to one JSON tree across every driver — and **`addMedia` working on all platforms**, including real iOS devices via on-device PhotoKit (a capability beyond stock Maestro). Alongside them: a `swipe` distance parameter, deeper iOS snapshots for React Native trees, and a batch of correctness fixes — escaped-metacharacter `text:` selectors, `${VAR}` expansion in device-control steps, `#`/Shift typing on DeviceLab Android, DeviceLab iOS `clearState`, and transient WebView/CDP retries.
+
+### Added
+- **`hierarchy` subcommand** — dump the current on-device view hierarchy for selector discovery and debugging. Drivers return platform-specific formats (Android UIAutomator XML, iOS WDA XML, DeviceLab flat-JSON); the command normalizes all of them to one consistent JSON tree, so output is stable and diffable across drivers. `--compact` prints a flat, greppable one-line-per-element listing; `--find <substr>` filters to elements whose type/id/text match; element states surface as `[disabled]`/`[checked]`/`[selected]`/`[focused]`. Stdout carries only the hierarchy (driver setup goes to stderr), so it pipes cleanly into `jq` or a file.
+  ```bash
+  maestro-runner --device <id> hierarchy --compact --find login
+  ```
+  Contributed by [@zcsteele](https://github.com/zcsteele) ([#134](https://github.com/devicelab-dev/maestro-runner/pull/134)).
+- **`addMedia` on every platform** — inject photos/videos into the device gallery before a flow. Reimplemented per platform, each device-validated: Android DeviceLab (on-device agent MediaStore insert, `IS_PENDING` scoped-storage flow), Android UIAutomator2 (adb push + `content scan_file` registration), iOS Simulator (`xcrun simctl addmedia`), and **iOS real device** (on-device PhotoKit `PHAssetCreationRequest`). Real-device iOS is not available in stock Maestro. The previous implementation fired a deprecated `MEDIA_SCANNER_SCAN_FILE` broadcast on a host path and reported success without adding anything.
+  ```yaml
+  - addMedia:
+      - assets/photo.png
+      - assets/clip.mp4
+  ```
+- **`swipe` distance parameter** — a direction swipe accepts `distance:` for a centered, fixed-length gesture instead of the default edge-to-edge travel. Mirrors Maestro #949.
+  ```yaml
+  - swipe:
+      direction: UP
+      distance: 0.4   # fraction of the screen (0-1), centered; default 0.5
+  ```
+- **Deeper iOS snapshots** — override XCTest's clipped snapshot request params (`maxDepth`/`maxChildren`, `snapshotKeyHonorModalViews=0`) so deep React Native trees and modal-obscured content are captured, fixing missing elements on RN-heavy screens.
+
+### Fixed
+- **Android: a `text:` selector escaping only metacharacters never matched** — `looksLikeRegex` skipped any backslash-escaped character when classifying a pattern, so an escape-only regex like `example\.com` or `\$0.00` was treated as a literal string and the backslashes were matched verbatim — it could only hit an element whose text literally contained a backslash. Upstream Maestro treats `text:` as always-regex, where `\.` / `\$` is the normal way to match a literal `.` / `$`. An escaped metacharacter now classifies the whole pattern as a regex (`textMatches`), fixed across all four matcher paths (UIAutomator2, DeviceLab, Appium, WDA). Reported by [@nixit28](https://github.com/nixit28) ([#136](https://github.com/devicelab-dev/maestro-runner/issues/136)).
+- **`${VAR}` was not expanded in several device-control steps** — variable expansion runs off a per-step allowlist, and `setOrientation`, `setLocation`, `setClipboard`, `swipe`, `scroll`, and `openBrowser` were missing from it, so `setOrientation: ${ORIENT}` reached the driver as the literal `${ORIENT}` and failed with `invalid orientation`. Those steps now expand their value fields (both shorthand and long form, top-level and inside `runFlow`). Reported by [@nixit28](https://github.com/nixit28) ([#137](https://github.com/devicelab-dev/maestro-runner/issues/137)).
+- **`addMedia:` bare-sequence lists failed to parse** — a `addMedia:` given a plain YAML sequence of paths failed to unmarshal. Reported by [@kacperzolkiewski](https://github.com/kacperzolkiewski) ([#131](https://github.com/devicelab-dev/maestro-runner/issues/131)).
+- **DeviceLab Android: `#` and other Shift characters were dropped when typing** — `inputText` synthesized key events without honoring the shifted layout, so characters requiring Shift (`#`, `$`, `@`, …) never landed. Typing now goes through `KeyCharacterMap`, turning each character into the correct key-event sequence. Reported by [@kacperzolkiewski](https://github.com/kacperzolkiewski) ([#132](https://github.com/devicelab-dev/maestro-runner/issues/132), also [#135](https://github.com/devicelab-dev/maestro-runner/issues/135)).
+- **DeviceLab iOS: `clearState` was a silent no-op** — `clearState` (and `launchApp` with `clearState: true`) claimed success without resetting the app. It now stages the app container, uninstalls, and reinstalls on the simulator so state is genuinely cleared.
+- **Web: transient CDP execution-context errors during element finding are retried** — a Chrome DevTools "execution context was destroyed" error thrown mid-navigation no longer fails the step; the finder retries once the context settles.
+- **`${VAR}` in `assertScreenshot` threshold and permission values** — `thresholdPercentage` and `launchApp` / `setPermissions` permission entries now expand variables, and `assertScreenshot` baseline/diff paths that escape the workspace are rejected.
+
+### Contributors
+
+[@zcsteele](https://github.com/zcsteele)
+1. Contributed the `hierarchy` subcommand ([#134](https://github.com/devicelab-dev/maestro-runner/pull/134))
+
+[@kacperzolkiewski](https://github.com/kacperzolkiewski)
+1. Reported the `addMedia` parse error ([#131](https://github.com/devicelab-dev/maestro-runner/issues/131))
+2. Reported `#`/Shift characters being dropped on DeviceLab Android ([#132](https://github.com/devicelab-dev/maestro-runner/issues/132))
+
+[@nixit28](https://github.com/nixit28)
+1. Reported escaped-metacharacter `text:` selectors never matching ([#136](https://github.com/devicelab-dev/maestro-runner/issues/136))
+2. Reported `${VAR}` not expanding in `setOrientation` ([#137](https://github.com/devicelab-dev/maestro-runner/issues/137))
+
+## [1.1.21] - 2026-07-28
+
+The headline is **`assertScreenshot`** — visual regression testing with a highlighted diff image — contributed by the community. Alongside it: two regressions from v1.1.20 fixed (the keyboard-blocking guard on both Android drivers), a correctness fix where iOS `id:` + `text:` silently degraded to an OR, clearer failures when an app crashes mid-flow, correct WDA ports for legacy iOS UDIDs in parallel runs, and step-level `platform:` conditions.
+
+### Added
+- **`assertScreenshot` — visual regression testing** — compare the screen (or a cropped element) against a reference PNG, failing when the match falls below a threshold. On mismatch it writes a `*__diff.png` with the changed regions boxed in red. The reference is created automatically on first run, and `--update-screenshots` re-baselines intentionally. Built entirely on the Go standard library — no new dependencies.
+  ```yaml
+  - assertScreenshot:
+      path: screenshots/login
+      thresholdPercentage: 95
+      cropOn:
+        id: login-form
+  ```
+  Contributed by [@kacperzolkiewski](https://github.com/kacperzolkiewski) ([#126](https://github.com/devicelab-dev/maestro-runner/pull/126)).
+- **Step-level `platform:` conditions** — a step can be restricted to one platform and is skipped (not failed) elsewhere, so a single flow can carry platform-specific steps.
+  ```yaml
+  - tapOn:
+      text: "Allow"
+      platform: ios
+  ```
+- **App crash / termination is reported as such** — on Android, when the app-under-test dies mid-flow (crash, native SIGSEGV/SIGABRT, ANR, or kill), a following step now fails with `app '<pkg>' is no longer running (crashed or was terminated during the flow)` — with the crash cause pulled from logcat when available — instead of a misleading `element not found: context deadline exceeded`. UIAutomator2 driver.
+- **Flutter web `id:` selectors** — `findByID` now also matches `flt-semantics-identifier`, so a Maestro `id:` targets Flutter web widgets (Flutter renders a widget's `Semantics` identifier as that attribute). Mirrors Maestro #3323.
+
+### Fixed
+- **iOS: `id:` + `text:` together silently degraded to an OR** — `assertVisible`/`tapOn` given both an `id` and `text` did not require them on the same element: the WDA finder returned as soon as it found an element with the given id (never checking text), and only if the id matched nothing did it fall back to a text-contains-anywhere query that ignored the id. So a wrong `text:` value passed green against the right id'd element (masking wrong displayed values), and a substring text could match a different element entirely. A combined `id` + `text` selector now requires both on one element (the DeviceLab iOS driver already did this; the bug was WDA-only). Reported by [@ahabshamaa](https://github.com/ahabshamaa) ([#130](https://github.com/devicelab-dev/maestro-runner/issues/130)).
+- **Regression (v1.1.20): keyboard-blocking guard falsely rejected a tappable element** — the guard added in v1.1.20 sampled element and keyboard geometry once, immediately after an input step. Windows using `SOFT_INPUT_ADJUST_RESIZE` (e.g. a plain `AlertDialog` whose body scrolls) relayout a few frames after the IME appears: the target reports covered bounds on the first frame, then the window shrinks and it rises above the keyboard. The single-shot check read the stale first frame and failed a perfectly tappable element (e.g. submitting a dialog via `tapOn: android:id/button1` right after `inputText`). The check now re-samples every 50 ms for up to 2 s and fails only on a *persistent* overlap, returning immediately once the element clears — no latency on the happy path. Fixed on the DeviceLab driver by [@MarioRial22](https://github.com/MarioRial22) ([#127](https://github.com/devicelab-dev/maestro-runner/pull/127)) and extended to the default UIAutomator2 driver, with the settle loop shared in `pkg/core` so the two can't drift.
+- **iOS: `id:` matched by substring, resolving to the wrong element** — a literal `id:` selector matched an accessibility id by substring, so `id: enriched-text` could resolve to `set-enriched-text-button` (a superset) purely by match order. Both iOS drivers now prefer an exact `id` match, falling back to substring only when no exact match exists — preserving lenient partial-id matching while fixing the ambiguous case. Surfaced through `assertScreenshot`'s `cropOn`. Reported by [@kacperzolkiewski](https://github.com/kacperzolkiewski) ([#128](https://github.com/devicelab-dev/maestro-runner/issues/128)).
+- **iOS: legacy 40-character UDIDs all collided on WDA port 8100** — `PortFromUDID` parsed the whole segment after the last hyphen as a `uint64`. A legacy 40-character UDID has no hyphen, so all 40 hex chars were parsed, overflowed `uint64`, and fell back to port 8100 for *every* such device — so two of them in parallel both forwarded 8100 and the second failed with "address already in use". The port is now derived from the last 12 hex characters; a standard UUID's final group is already 12 chars, so UUID-derived ports are unchanged. Reported by [@eatbob](https://github.com/eatbob) ([#129](https://github.com/devicelab-dev/maestro-runner/issues/129)).
+- **DeviceLab: a stalled WebView devtools socket slowed every command** — `ensureWebViewConnection` runs on every command while the WebView isn't connected, and a connect against a stalled/unreachable devtools endpoint spends its full timeout (~20 s). A single flaky WebView therefore added ~20 s to every step. A failed connect now backs off (5 s per socket) so it can't keep re-slowing commands; the command falls through to native finding meanwhile. Mirrors Maestro MA-4119.
+- **WDA: recover from a transient `kAXErrorInvalidUIElement`** — a page-source snapshot taken while the accessibility tree is mutating can fail with a transient `kAXErrorInvalidUIElement` (-25202) that clears on the next attempt. `Source()` now retries once before surfacing it, so assertions and diagnostics don't fail on a momentary tree mutation. Mirrors Maestro #3430.
+
+### Contributors
+Thanks to everyone who shaped this release.
+
+**Code contributions:**
+- [@kacperzolkiewski](https://github.com/kacperzolkiewski) — `assertScreenshot` visual regression command ([#126](https://github.com/devicelab-dev/maestro-runner/pull/126)), and reported the iOS substring-id bug ([#128](https://github.com/devicelab-dev/maestro-runner/issues/128))
+- [@MarioRial22](https://github.com/MarioRial22) — keyboard-blocking settle fix on the DeviceLab driver ([#127](https://github.com/devicelab-dev/maestro-runner/pull/127))
+
+**Reported by:**
+- [@ahabshamaa](https://github.com/ahabshamaa) — iOS `id:` + `text:` OR-instead-of-AND ([#130](https://github.com/devicelab-dev/maestro-runner/issues/130))
+- [@eatbob](https://github.com/eatbob) — legacy 40-char UDID WDA port collision ([#129](https://github.com/devicelab-dev/maestro-runner/issues/129))
+
+## [1.1.20] - 2026-07-16
+
+A reporter-driven correctness release with two themes. First, **`swipe` with a `from:`/selector anchor now works consistently across every driver** — it targets the element's bounds and honours `duration:` on Android (uiautomator2, DeviceLab), iOS (WDA, DeviceLab), Appium, and the browser, so slider/drag-handle gestures land instead of registering as a fast flick. Second, a batch of environment and cloud fixes from real-world runs: iOS builds work on Intel Macs, the flow parser stops choking on arrow-comment headers and bare `scroll`, Android WebView form fields actually receive typed text, and `--parallel` Appium sessions survive on cloud device farms.
+
+### Fixed
+- **`swipe: from: <selector>` ignored the anchor element and `duration:`** — a direction swipe anchored on an element routed through a fixed-speed helper that neither derived coordinates from the element's bounds nor threaded `duration:`, producing a fast flick that native drag targets (sliders, drag handles) discard. Selector-anchored swipes now derive start/end from the element bounds and honour `duration:` across all drivers: uiautomator2 and DeviceLab (Android), WDA and DeviceLab (iOS), Appium, and the browser (CDP). The Android drivers share one `pkg/core` helper (with screen-edge clamping), the browser interpolates the drag over the requested duration so JS drag handlers track the pointer, and an invalid `direction:` now fails the step instead of silently swiping up. Reported and fixed for uiautomator2 by [@jsonITP](https://github.com/jsonITP) ([#114](https://github.com/devicelab-dev/maestro-runner/issues/114), [#115](https://github.com/devicelab-dev/maestro-runner/pull/115)).
+- **`**` was only recursive at the start of a flow pattern** — `matchPattern` treated `**` as recursive only when the pattern was exactly `**` or began `**/`; anything else (`tests/**/*.yaml`, `auth/**`) fell through to `filepath.Glob`, which matches `**` like a single `*`, so each extra `**` matched exactly one more directory level and flows nested deeper were silently skipped. `**` is now recursive anywhere in a pattern (matching bash `globstar`, `doublestar`, `minimatch`), with a wildcard prefix (`flows-*/**/*.yaml`) expanded via glob and a missing prefix directory treated as a silent no-match. Reported and fixed by [@jsonITP](https://github.com/jsonITP) ([#116](https://github.com/devicelab-dev/maestro-runner/pull/116)).
+- **iOS: every WDA build and start failed on Intel Macs** — the `xcodebuild -destination` specifier interpolated Go's `runtime.GOARCH` (`amd64`), but xcodebuild's vocabulary for Intel is `x86_64`, so no simulator ever matched and both the WDA build and start failed with "Unable to find a device matching the provided destination specifier". Apple Silicon was unaffected only because `arm64` is spelled the same in both vocabularies. The arch name is now translated (`amd64` → `x86_64`) on both the WDA and DeviceLab iOS paths; the explicit `arch=` pin stays (it prevents an Xcode 26 dual-destination stall). Reported by [@porluz](https://github.com/porluz) ([#117](https://github.com/devicelab-dev/maestro-runner/issues/117)).
+- **iOS: a fast-failing WDA start was misreported as "stalled" and blindly retried** — the WDA/DeviceLab startup watcher only monitored the log file for growth, so a process that printed an error and exited looked identical to a hang: it reported "xcodebuild stalled (no log output for 1m0s)" 60s later and retried 4 times (~7 minutes) while the real one-line error sat in the log from the first second. Startup now watches the process itself, surfaces the actual error and log tail immediately on a fast exit, recognizes deterministic `xcodebuild: error:` failures and skips the retry loop, and includes a log tail in genuine stall messages. Reported by [@porluz](https://github.com/porluz) ([#118](https://github.com/devicelab-dev/maestro-runner/issues/118)).
+- **Flow header comment ending in `->` failed to parse** — the YAML document splitter treated any line ending in `|` or `>` as the start of a block scalar, including comments, so a header comment like `# navigation: Library ->` flipped the splitter into multiline mode, swallowed the `---` separator, and failed with `cannot unmarshal !!map into []yaml.Node`. The block-scalar heuristic now fires only when the line's last token is a bare block indicator, so comments and plain values ending in `>` parse fine. Reported by [@porluz](https://github.com/porluz) ([#119](https://github.com/devicelab-dev/maestro-runner/issues/119)).
+- **Bare `- scroll` (no arguments) was rejected on iOS** — Maestro's `scroll` with no direction scrolls down, and the Android drivers defaulted accordingly, but the WDA and DeviceLab iOS drivers hit their `default:` case and failed with "Invalid scroll direction". The default is now normalized to `down` at parse time, so every driver sees a concrete direction. Reported by [@porluz](https://github.com/porluz) ([#120](https://github.com/devicelab-dev/maestro-runner/issues/120)).
+- **`--parallel` device-shortage hint listed Android AVDs for iOS runs** — when `--platform ios --parallel N` couldn't find enough devices, the remediation hint suggested Android AVDs and `emulator`/`avdmanager` commands. iOS runs now get simulator guidance instead: available shut-down simulators, the `--auto-start-emulator` variant of the command, and per-simulator `xcrun simctl boot` commands. Reported by [@porluz](https://github.com/porluz) ([#121](https://github.com/devicelab-dev/maestro-runner/issues/121)).
+- **Android: `inputText` silently no-op'd into WebView form fields** — on the Android drivers, `inputText` with no selector sent blind key events to whatever the OS considered focused; for a WebView DOM input the keystrokes never reached the page, but the step still reported success, so forms submitted blank. All three Android drivers (Appium, uiautomator2, DeviceLab) now prefer element-scoped typing into the focused element — which routes through accessibility `ACTION_SET_TEXT` and reaches the DOM input — and fall back to key events only when nothing has focus. The Appium driver additionally honours an inline selector on `inputText`. Reported by [@devrchoi](https://github.com/devrchoi) ([#122](https://github.com/devicelab-dev/maestro-runner/issues/122)).
+- **Appium `--parallel`: cloud farms reaped pre-created sessions before their flow ran** — in `--parallel N` all N sessions are created serially before any flow runs, so the first session idled ~(N−1)×creation_time before its first command; on cloud farms (e.g. SauceLabs RDC, ~35–40s/session) that idle exceeded the server's `newCommandTimeout` at N≥3–4 and the session was reaped, failing the first flow with "invalid session id". Each already-created session is now kept warm with a lightweight ping (a session-scoped GET that resets `newCommandTimeout`) on a 20s ticker until session creation finishes and execution begins. (maestro-runner forwards the caps file's `newCommandTimeout` verbatim; the effective ceiling is the farm's, so removing the pre-creation idle is the real fix.) Reported by [@devrchoi](https://github.com/devrchoi) ([#124](https://github.com/devicelab-dev/maestro-runner/issues/124)).
+
+### Contributors
+Thanks to everyone who shaped this release.
+
+**Code contributions:**
+- [@jsonITP](https://github.com/jsonITP) — selector-anchored swipe on uiautomator2 ([#115](https://github.com/devicelab-dev/maestro-runner/pull/115), reported in [#114](https://github.com/devicelab-dev/maestro-runner/issues/114)) and recursive `**` glob anywhere in flow patterns ([#116](https://github.com/devicelab-dev/maestro-runner/pull/116))
+
+**Reported by:**
+- [@porluz](https://github.com/porluz) — Intel-Mac iOS destination arch ([#117](https://github.com/devicelab-dev/maestro-runner/issues/117)), blind WDA stall retries ([#118](https://github.com/devicelab-dev/maestro-runner/issues/118)), arrow-comment header parsing ([#119](https://github.com/devicelab-dev/maestro-runner/issues/119)), bare `scroll` default ([#120](https://github.com/devicelab-dev/maestro-runner/issues/120)), iOS `--parallel` hints ([#121](https://github.com/devicelab-dev/maestro-runner/issues/121))
+- [@devrchoi](https://github.com/devrchoi) — Android WebView `inputText` ([#122](https://github.com/devicelab-dev/maestro-runner/issues/122)), Appium `--parallel` session keepalive ([#124](https://github.com/devicelab-dev/maestro-runner/issues/124))
+
 ## [1.1.19] - 2026-07-01
 
 A reporter-driven follow-up focused on executor/`runScript` parity with Maestro and iOS simulator ergonomics. Headlines: `runScript`'s JavaScript environment now matches Maestro (env vars are scoped per script and undeclared variables read as `undefined` instead of throwing), `when:`/`while:` condition checks resolve **fast by default** instead of blocking on the 7s optional-find timeout, and `--auto-start-emulator` finally works for iOS simulators. Plus an iOS runner build-cache correctness fix.
