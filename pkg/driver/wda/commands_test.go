@@ -1,12 +1,7 @@
 package wda
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
-	"image"
-	"image/color"
-	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"

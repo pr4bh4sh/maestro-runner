@@ -527,13 +527,13 @@ func (d *Driver) eraseText(step *flow.EraseTextStep) *core.CommandResult {
 }
 
 func (d *Driver) hideKeyboard(step *flow.HideKeyboardStep) *core.CommandResult {
-	if !d.isInputShown() {
-		return successResult("Keyboard not visible, skipped", nil)
-	}
-
 	strategy := strings.ToLower(strings.TrimSpace(step.Strategy))
 
-	// If a specific strategy is requested, use only that one.
+	// Explicit strategy overrides preserve HEAD's feature (appium/escape/back).
+	// Default (empty) uses upstream's verified Appium + BACK fallback (#42):
+	// verify via dumpsys and fall back to KEYCODE_BACK while keyboard shown,
+	// so Samsung no-op hide_keyboard can't leave the keyboard covering taps,
+	// and no stray BACK occurs when Appium already hid it.
 	switch strategy {
 	case "appium":
 		return d.hideKeyboardAppium()
@@ -542,19 +542,32 @@ func (d *Driver) hideKeyboard(step *flow.HideKeyboardStep) *core.CommandResult {
 	case "back":
 		return d.hideKeyboardBack()
 	case "":
-		// Try all strategies in order.
+		// Default upstream logic below.
 	default:
 		return errorResult(nil, fmt.Sprintf("Unknown hideKeyboard strategy: %q (valid: appium, escape/esc, back)", step.Strategy))
 	}
 
-	// Try all strategies: Appium → ESCAPE → BACK
-	if r := d.hideKeyboardAppium(); r.Success {
-		return r
+	// If we can confirm the keyboard isn't shown, there's nothing to do.
+	if d.device != nil && !d.isKeyboardVisible() {
+		return successResult("Keyboard not visible", nil)
 	}
-	if r := d.hideKeyboardEscape(); r.Success {
-		return r
+
+	_ = d.client.HideKeyboard()
+	if d.waitKeyboardHidden() {
+		return successResult("Keyboard hidden", nil)
 	}
-	return d.hideKeyboardBack()
+
+	// Appium's call didn't take. Fall back to BACK, but only while the keyboard
+	// is still shown so we can't trigger a stray back-navigation.
+	if d.isKeyboardVisible() {
+		if err := d.client.PressKeyCode(uiautomator2.KeyCodeBack); err == nil && d.waitKeyboardHidden() {
+			return successResult("Keyboard hidden (via back key)", nil)
+		}
+	}
+
+	// Couldn't confirm dismissal — don't fail the step (the keyboard may already
+	// be gone on a device we can't inspect).
+	return successResult("Hide keyboard (dismissal not confirmed)", nil)
 }
 
 func (d *Driver) hideKeyboardAppium() *core.CommandResult {
