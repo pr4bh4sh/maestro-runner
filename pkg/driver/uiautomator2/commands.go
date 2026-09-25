@@ -401,7 +401,7 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 		// Resolve and read the focused field first: after typing, "unchanged"
 		// is the only thing that separates a hint from a lost keystroke.
 		target, before := d.focusedFieldBefore()
-		if err := d.client.SendKeyActions(text); err != nil {
+		if err := d.client.SendKeyActionsWithDelay(text, d.typingDelayMs); err != nil {
 			return errorResult(err, "Failed to input text via key press")
 		}
 		// Per-character key events are the path that loses characters when the
@@ -642,11 +642,48 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 		return errorResult(err, "Failed to get screen size")
 	}
 
-	if err := d.performScroll(direction, width, height, step.Engine, 0.5); err != nil {
+	if err := d.performScroll(direction, width, height, step.Engine, 0.5, core.ScrollDurationOrDefault(step.Speed, scrollDurationMs)); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to scroll: %v", err))
 	}
 	return successResult(fmt.Sprintf("Scrolled %s", direction), nil)
 }
+
+// atScrollContainerEdge reports whether the element occupying b ends exactly on
+// its nearest scrollable ancestor's leading edge — the shape of a rect the
+// hierarchy clipped rather than a whole element that happens to be visible
+// (#164).
+//
+// Costs one page-source fetch, and is only consulted once the geometry check
+// has already passed, so a scroll that stops on an unambiguous match pays
+// nothing. Any failure to establish the ancestry answers false: an
+// unverifiable tree must not block a match that the geometry accepted.
+func (d *Driver) atScrollContainerEdge(b core.Bounds, direction string) bool {
+	src, err := d.client.Source()
+	if err != nil {
+		return false
+	}
+	elems, err := ParsePageSource(src)
+	if err != nil {
+		return false
+	}
+	for _, e := range elems {
+		if e.Bounds != b {
+			continue
+		}
+		for p := e.Parent; p != nil; p = p.Parent {
+			if !p.Scrollable {
+				continue
+			}
+			return core.ClippedAtScrollEdge(b, p.Bounds, direction, scrollEdgeTolerancePx)
+		}
+	}
+	return false
+}
+
+// How far from the container edge still counts as flush. Rounding between the
+// hierarchy's integer bounds and the container's own edge leaves a pixel or
+// two; anything larger is a real gap.
+const scrollEdgeTolerancePx = 2
 
 func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.CommandResult {
 	direction := strings.ToLower(step.Direction)
@@ -663,6 +700,11 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		timeout = time.Duration(step.TimeoutMs) * time.Millisecond
 	}
 	deadline := time.Now().Add(timeout)
+
+	// `speed:` is a Maestro speed, not a duration — invert it once here.
+	// It used to be parsed and dropped, so a flow asking to scroll slowly
+	// scrolled at whatever the constant happened to be (#165).
+	scrollMs := core.ScrollDurationOrDefault(step.Speed, scrollDurationMs)
 
 	width, height, err := d.screenSize()
 	if err != nil {
@@ -683,6 +725,13 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		container = &bounds
 	}
 
+	// Height of a flush candidate awaiting confirmation, or -1 for none.
+	pendingHeight := -1
+
+	// Stop early when the surface stops moving — a target that is not in the
+	// list should not cost every scroll the step allows.
+	var progress core.ScrollProgress
+
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		// Try to find element (short timeout - includes page source fallback)
 		_, info, err := d.findElement(step.Element, true, 1000)
@@ -693,18 +742,33 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 			// Stop only when the element meets the flow's visibility
 			// requirement (default: fully inside the viewport).
 			if core.MeetsVisibility(info.Bounds, width, height, step.VisibilityPercentage) {
-				return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+				// Computed from a rect the hierarchy may already have clipped
+				// to the scroll container, where a sliver at the fold scores
+				// 100% (#164). A rect flush with the container's leading edge
+				// gets one confirming scroll: a sliver grows, an element
+				// resting at the end of the list does not.
+				if pendingHeight >= 0 && info.Bounds.Height <= pendingHeight {
+					return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+				}
+				if !d.atScrollContainerEdge(info.Bounds, direction) {
+					return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+				}
+				pendingHeight = info.Bounds.Height
 			}
 		} else if err != nil && !isElementNotFoundError(err) {
 			// Real infrastructure failure — bail rather than silently looping.
 			return errorResult(err, "Failed to find element")
 		}
 
+		if sig, ok := d.scrollSurfaceSignature(); ok && progress.Observe(sig) {
+			return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found: scrolling %s made no progress after %d scrolls (end of content?)", direction, i))
+		}
+
 		scrollErr := error(nil)
 		if container != nil {
-			scrollErr = d.performScrollInRect(direction, *container, step.Engine, 0.3)
+			scrollErr = d.performScrollInRect(direction, *container, step.Engine, 0.3, scrollMs)
 		} else {
-			scrollErr = d.performScroll(direction, width, height, step.Engine, 0.3)
+			scrollErr = d.performScroll(direction, width, height, step.Engine, 0.3, scrollMs)
 		}
 		if scrollErr != nil {
 			return errorResult(scrollErr, fmt.Sprintf("Failed to scroll: %v", scrollErr))
@@ -714,6 +778,17 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found after %d scrolls", maxScrolls))
+}
+
+// scrollSurfaceSignature reduces the current page source to a key for
+// core.ScrollProgress. A capture that cannot be read reports ok=false and is
+// not observed, so a hiccup never passes for the end of the content.
+func (d *Driver) scrollSurfaceSignature() (string, bool) {
+	source, err := d.client.Source()
+	if err != nil || source == "" {
+		return "", false
+	}
+	return core.ScrollSignature(source), true
 }
 
 // scrollDurationMs is the swipe duration (in ms) used for adb input swipe.
@@ -734,22 +809,22 @@ const (
 // percent controls the swipe distance as a fraction of screen dimension —
 // callers use ~0.5 for plain scroll and ~0.3 for scrollUntilVisible (which
 // wants smaller steps to avoid overshooting the target).
-func (d *Driver) performScroll(direction string, width, height int, engine string, percent float64) error {
+func (d *Driver) performScroll(direction string, width, height int, engine string, percent float64, durationMs int) error {
 	useAgent := strings.EqualFold(engine, "agent")
 	if !useAgent {
 		if d.device != nil {
-			return d.scrollByAdb(direction, width, height, percent)
+			return d.scrollByAdb(direction, width, height, percent, durationMs)
 		}
 		logger.Warn("scroll: ADB shell unavailable, falling back to Appium gesture (may be unreliable on some Android skins)")
 	}
 	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
-	return d.client.ScrollInArea(area, direction, percent, 0)
+	return d.client.ScrollInArea(area, direction, percent, durationMs)
 }
 
 // performScrollInRect scrolls inside one container rather than the screen. The
 // inset keeps the gesture off the container's own edges, where a swipe is as
 // likely to be read by the parent list as by the container itself.
-func (d *Driver) performScrollInRect(direction string, bounds core.Bounds, engine string, percent float64) error {
+func (d *Driver) performScrollInRect(direction string, bounds core.Bounds, engine string, percent float64, durationMs int) error {
 	inset := bounds.Height / 8
 	x, y := bounds.X, bounds.Y+inset
 	w, h := bounds.Width, bounds.Height-2*inset
@@ -759,25 +834,25 @@ func (d *Driver) performScrollInRect(direction string, bounds core.Bounds, engin
 
 	useAgent := strings.EqualFold(engine, "agent")
 	if !useAgent && d.device != nil {
-		return d.scrollByAdbInRect(direction, x, y, w, h, percent)
+		return d.scrollByAdbInRect(direction, x, y, w, h, percent, durationMs)
 	}
-	return d.client.ScrollInArea(uiautomator2.NewRect(x, y, w, h), direction, percent, 0)
+	return d.client.ScrollInArea(uiautomator2.NewRect(x, y, w, h), direction, percent, durationMs)
 }
 
 // scrollByAdb issues `adb shell input swipe` over the local shell executor.
 // percent is the swipe distance as a fraction of the screen dimension along
 // the scroll axis. Direction uses Maestro scroll semantics (what becomes
 // visible — "down" reveals content below by swiping the finger UP).
-func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, percent float64) error {
-	return d.scrollByAdbInRect(direction, 0, 0, screenWidth, screenHeight, percent)
+func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, percent float64, durationMs int) error {
+	return d.scrollByAdbInRect(direction, 0, 0, screenWidth, screenHeight, percent, durationMs)
 }
 
 // scrollByAdbInRect is scrollByAdb over an arbitrary rectangle, so a scroll can
 // be confined to one container rather than the whole screen. The gesture is
 // centred in the rectangle and spans `percent` of its height or width.
-func (d *Driver) scrollByAdbInRect(direction string, rectX, rectY, rectW, rectH int, percent float64) error {
+func (d *Driver) scrollByAdbInRect(direction string, rectX, rectY, rectW, rectH int, percent float64, durationMs int) error {
 	fromX, fromY, toX, toY := scrollPointsInRect(direction, rectX, rectY, rectW, rectH, percent)
-	cmd := fmt.Sprintf("input swipe %d %d %d %d %d", fromX, fromY, toX, toY, scrollDurationMs)
+	cmd := fmt.Sprintf("input swipe %d %d %d %d %d", fromX, fromY, toX, toY, durationMs)
 	_, err := d.device.Shell(cmd)
 	return err
 }
@@ -1633,8 +1708,25 @@ func (d *Driver) setOrientation(step *flow.SetOrientationStep) *core.CommandResu
 		return errorResult(err, fmt.Sprintf("Failed to set orientation: %v", err))
 	}
 
+	// The setting is written before the display has turned; the next step's
+	// hierarchy read would otherwise land mid-rotation. Wait for the display
+	// to report the rotation. Not reporting it is not a failure — a
+	// portrait-locked app ignores user_rotation and always has — but it is
+	// worth saying.
+	want, _ := strconv.Atoi(rotation)
+	if err := core.WaitForDisplayRotation(d.device.Shell, want, rotationSettleTimeout, rotationPollInterval); err != nil {
+		return successResult(fmt.Sprintf("Set orientation to %s (%v)", step.Orientation, err), nil)
+	}
+
 	return successResult(fmt.Sprintf("Set orientation to %s", step.Orientation), nil)
 }
+
+// How long setOrientation waits for the display to report the new rotation
+// before moving on, and how often it looks.
+const (
+	rotationSettleTimeout = 5 * time.Second
+	rotationPollInterval  = 250 * time.Millisecond
+)
 
 func (d *Driver) openLink(step *flow.OpenLinkStep) *core.CommandResult {
 	link := step.Link
@@ -1731,9 +1823,7 @@ func (d *Driver) addMedia(step *flow.AddMediaStep) *core.CommandResult {
 	if d.device == nil {
 		return errorResult(fmt.Errorf("device not configured"), "addMedia requires device access")
 	}
-	pusher, ok := d.device.(interface {
-		Push(local, remote string) error
-	})
+	pusher, ok := d.device.(core.AndroidFilePusher)
 	if !ok {
 		return errorResult(fmt.Errorf("device does not support file push"), "addMedia requires adb push support")
 	}
@@ -1741,6 +1831,14 @@ func (d *Driver) addMedia(step *flow.AddMediaStep) *core.CommandResult {
 	for _, file := range step.Files {
 		if _, err := os.Stat(file); err != nil {
 			return errorResult(err, fmt.Sprintf("Media file not found: %s", file))
+		}
+		// Documents go to Downloads, where the system file picker looks;
+		// the photo-picker directories below would hide them (#167).
+		if core.IsDocumentMedia(file) {
+			if _, err := core.PushAndroidDocument(pusher, file); err != nil {
+				return errorResult(err, fmt.Sprintf("Failed to add document %s: %v", filepath.Base(file), err))
+			}
+			continue
 		}
 		destDir := "/sdcard/Pictures/MaestroRunner"
 		if core.IsVideoMedia(file) {
@@ -1823,13 +1921,15 @@ func (d *Driver) stopRecording(_ *flow.StopRecordingStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("device not configured"), "stopRecording requires device access")
 	}
 
-	// Kill screenrecord process (may have already stopped)
 	if _, err := d.device.Shell("pkill -INT screenrecord"); err != nil {
 		logger.Warn("failed to stop screenrecord process: %v", err)
 	}
 
-	// Wait for file to be written
-	time.Sleep(500 * time.Millisecond)
+	// screenrecord writes the MP4 index as it exits. A fixed sleep was long
+	// enough on short clips and not on long ones, and a file read before the
+	// index lands is unplayable — the same race --record already guards
+	// against by waiting for the process, so do that here too.
+	core.WaitForProcessExit(d.device.Shell, "screenrecord", 5*time.Second, 200*time.Millisecond)
 
 	return successResult("Stopped recording", nil)
 }

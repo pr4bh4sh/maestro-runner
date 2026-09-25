@@ -37,3 +37,121 @@ func MeetsVisibility(b Bounds, screenW, screenH, percentage int) bool {
 	// Compare in integer percent to avoid 0.999999… missing 100 on floats.
 	return int(VisibleFraction(b, screenW, screenH)*100+0.5) >= percentage
 }
+
+// ClippedAtScrollEdge reports whether b's leading edge in the scroll direction
+// sits on container's matching edge, within tolerance pixels.
+//
+// VisibleFraction cannot see clipping by a scroll container. Android hands us
+// bounds the hierarchy has already clipped, so a 9px sliver of a 126px button
+// peeking over the fold arrives as a 9px rect wholly inside the screen and
+// scores 100% — scrollUntilVisible stops, and the tap that follows lands on
+// whatever sits under the fold. Only clipping by the screen edge is visible to
+// the arithmetic, because there the reported rect still extends past the
+// viewport.
+//
+// The shared edge is the signal: a rect the container truncated ends exactly
+// where the container's visible area ends.
+//
+// Only the leading edge counts — the bottom when scrolling down, the top when
+// scrolling up. Both edges would be far too eager: in a vertical list the first
+// visible row is routinely flush with the container's top, and treating that as
+// clipped would spend a scroll moving a perfectly visible element away, or off
+// screen entirely. New content enters at the leading edge, so that is the only
+// edge where a sliver can appear.
+//
+// Being flush does not prove truncation — the last row of a fully scrolled list
+// is flush too. It only marks the rect as worth a second look; the caller
+// decides by scrolling once and seeing whether the element grows.
+func ClippedAtScrollEdge(b, container Bounds, direction string, tolerance int) bool {
+	if b.Width <= 0 || b.Height <= 0 || container.Width <= 0 || container.Height <= 0 {
+		return false
+	}
+	near := func(a, c int) bool {
+		d := a - c
+		if d < 0 {
+			d = -d
+		}
+		return d <= tolerance
+	}
+	switch direction {
+	case "down":
+		return near(b.Y+b.Height, container.Y+container.Height)
+	case "up":
+		return near(b.Y, container.Y)
+	case "right":
+		return near(b.X+b.Width, container.X+container.Width)
+	case "left":
+		return near(b.X, container.X)
+	default:
+		return false
+	}
+}
+
+// ScrollSpeedToDurationMs converts a Maestro `speed:` value into the swipe
+// duration one scroll gesture should take.
+//
+// Maestro's number is inverted — it is a speed, and the gesture is expressed as
+// a duration — so it computes (Commands.kt, speedToDuration):
+//
+//	duration = 1000 * (100 - speed) / 100 + 1
+//
+// speed 1 → 991ms (a slow, deliberate drag), the default 40 → 601ms, speed 100
+// → 1ms. The formula is reproduced rather than approximated because a flow
+// written against Maestro has to scroll the same distance per swipe here; an
+// "equivalent" curve would make the same flow behave differently, which is the
+// whole thing we promise not to do.
+//
+// Out-of-range values fall back to the default rather than failing: upstream
+// clamps a negative duration to its default, and a flow should not die over a
+// speed of 250.
+//
+// The result is floored at MinSwipeDurationMs. Upstream hands speed 100's 1ms
+// straight to `input swipe`, and Android emits no MOVE events for a swipe that
+// short — just a DOWN and an UP at different points. A React Native list read
+// that as a press on the row under the finger and opened it, on every run, on
+// both native drivers (Pixel 4a, TestHive). Nothing is lost by the floor:
+// Android caps fling velocity, and 20ms, 50ms and 100ms swipes over the same
+// 1000px all landed on the same row, while 300ms landed two rows short. So
+// speeds 96-100 behave like 95 here, and scroll instead of tapping.
+func ScrollSpeedToDurationMs(speed int) int {
+	const defaultDurationMs = 601 // upstream's DEFAULT_SCROLL_DURATION, speed 40
+	if speed < 0 || speed > 100 {
+		return defaultDurationMs
+	}
+	if speed == 0 {
+		// Unset. Callers must not substitute upstream's default here: each
+		// driver already had its own scroll duration (300ms, 500ms, 0.3s), and
+		// swipe duration sets fling velocity on Android — a longer swipe over
+		// the same distance flings less far. Silently moving every existing
+		// flow to 601ms would change how far every scroll travels, which is the
+		// complaint in #141. ScrollDurationOrDefault keeps the driver's value.
+		return 0
+	}
+	d := 1000*(100-speed)/100 + 1
+	if d < 0 {
+		return defaultDurationMs
+	}
+	if d < MinSwipeDurationMs {
+		return MinSwipeDurationMs
+	}
+	return d
+}
+
+// MinSwipeDurationMs is the shortest swipe a `speed:` can ask for. Below it
+// Android injects no intermediate MOVE events and a touch-handling framework
+// may take the gesture for a tap; see ScrollSpeedToDurationMs.
+const MinSwipeDurationMs = 50
+
+// ScrollDurationOrDefault returns the duration a `speed:` asks for, or
+// driverDefaultMs when the field is absent.
+//
+// Deliberately not upstream's 601ms default: adopting that would change the
+// swipe duration of every existing scroll, and on Android duration sets fling
+// velocity, so the distance each scroll travels would move too. A flow that
+// never mentions speed keeps behaving exactly as it did.
+func ScrollDurationOrDefault(speed, driverDefaultMs int) int {
+	if d := ScrollSpeedToDurationMs(speed); d > 0 {
+		return d
+	}
+	return driverDefaultMs
+}

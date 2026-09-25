@@ -31,6 +31,13 @@ type DeviceLabClient interface {
 	// Element finding
 	FindElement(strategy, selector string) (*uiautomator2.Element, error)
 	FindAndClick(strategy, selector string) (*uiautomator2.Element, error)
+	// FindAndClickGuarded also passes the screen size so the agent can reject
+	// an untappable rect before injecting the tap. The bool reports whether
+	// the tap actually fired (#162).
+	FindAndClickGuarded(strategy, selector string, screenW, screenH int) (*uiautomator2.Element, bool, error)
+	// FindAndClickChecked additionally hit-tests the tap point when hitTest is
+	// set, returning what covered it when a tap is refused.
+	FindAndClickChecked(strategy, selector string, screenW, screenH int, hitTest bool) (*uiautomator2.Element, bool, string, error)
 	ActiveElement() (*uiautomator2.Element, error)
 
 	// Timeouts
@@ -109,6 +116,12 @@ type Driver struct {
 
 	// Keyboard auto-dismiss: set after inputText/inputRandom, checked on next tap/assert
 	lastStepWasInput bool
+
+	// Text of the last WebView label a tap targeted, used to find and drive the
+	// matching cross-origin iframe input over CDP when the following inputText
+	// can't reach it natively (Shopify checkout's hosted card fields). Persists
+	// across the multi-part inputTexts of one field until the next tap.
+	lastWebTapText string
 
 	// Cached values to avoid repeated ADB shell calls
 	cachedAPILevel   int
@@ -316,12 +329,22 @@ func (d *Driver) maybeLazyRetryTap() bool {
 
 	// Re-issue the tap via FindAndClick. Reset the timer so further probes
 	// keep counting from this re-attempt, not the original.
+	// Guard the re-issued tap the same way tapOn does. This path had no rect
+	// check at all, and it fires exactly when a tap "had no effect" — which
+	// is when a clipped rect is most likely (#162).
+	sw, sh, _ := d.tappableScreenSize()
 	for _, s := range buildClickableOrAllStrategies(d.lastTapSelector) {
-		if _, err := d.client.FindAndClick(s.Strategy, s.Value); err == nil {
-			d.lastTapRetries++
-			d.lastTapTime = time.Now()
-			return true
+		_, clicked, err := d.client.FindAndClickGuarded(s.Strategy, s.Value, sw, sh)
+		if err != nil {
+			continue
 		}
+		if !clicked {
+			logger.Info("[devicelab] lazy retry: agent skipped the tap for %s (untappable rect) — not counting a retry", d.lastTapSelector.Describe())
+			continue
+		}
+		d.lastTapRetries++
+		d.lastTapTime = time.Now()
+		return true
 	}
 	return false
 }
@@ -602,8 +625,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	default:
 		result = &core.CommandResult{
 			Success: false,
-			Error:   fmt.Errorf("unknown step type: %T", step),
-			Message: fmt.Sprintf("Step type '%T' is not supported", step),
+			Error:   fmt.Errorf("unknown step type: %s", step.Type()),
+			Message: fmt.Sprintf("Step type '%s' is not supported", step.Type()),
 		}
 	}
 
@@ -737,7 +760,8 @@ func (d *Driver) getCDPInfo() *core.CDPInfo {
 	if d.cdpStateFunc != nil {
 		if info := d.cdpStateFunc(); info != nil {
 			logger.Info("[cdp:2-source] detected via push event: socket=%s", info.Socket)
-			return info		}
+			return info
+		}
 	}
 
 	// Fallback: scan /proc/net/unix via ADB shell
@@ -842,6 +866,7 @@ func (d *Driver) isBrowserForeground() bool {
 	}
 	return false
 }
+
 // findFocused returns the currently focused element as a core.Element.
 // Tries Rod first (`:focus` selector), then native ActiveElement().
 func (d *Driver) findFocused() (core.Element, error) {
@@ -878,6 +903,7 @@ func (d *Driver) findFocused() (core.Element, error) {
 func (d *Driver) isBrowserMode() bool {
 	return d.knownCDPType == "browser"
 }
+
 // ============================================================================
 // Element Finding
 // ============================================================================
@@ -1083,7 +1109,7 @@ func buildClickableOnlyStrategies(sel flow.Selector) ([]LocatorStrategy, error) 
 		// the literal string ".*For You.*" instead of "anything around For You".
 		if looksLikeRegex(sel.Text) {
 			regexEscaped := escapeUIAutomatorString(sel.Text)
-			pattern := "(?is)" + regexEscaped
+			pattern := "(?s)" + regexEscaped
 			strategies = append(strategies, LocatorStrategy{
 				Strategy: uiautomator2.StrategyUIAutomator,
 				Value:    `new UiSelector().textMatches("` + pattern + `").clickable(true)` + stateFilters,
@@ -1239,7 +1265,8 @@ func (d *Driver) findElementOnce(sel flow.Selector) (*uiautomator2.Element, *cor
 
 	// Browser mode: skip all native strategies — all content is web
 	if d.isBrowserMode() {
-		return nil, nil, fmt.Errorf("element '%s' not found via CDP", sel.Describe())	}
+		return nil, nil, fmt.Errorf("element '%s' not found via CDP", sel.Describe())
+	}
 
 	// Handle relative selectors with single page source fetch
 	if sel.HasRelativeSelector() {
@@ -1794,7 +1821,7 @@ func buildSelectorsWithOptions(sel flow.Selector, timeoutMs int, preferClickable
 		// escape Java-string quotes. Escaping regex metachars here would defeat
 		// the regex (turns `.*` into `\.\*`, matching the literal ".*").
 		if looksLikeRegex(sel.Text) {
-			pattern := "(?is)" + escapeUIAutomatorString(sel.Text)
+			pattern := "(?s)" + escapeUIAutomatorString(sel.Text)
 			textTiers = append(textTiers, []string{
 				`.textMatches("` + pattern + `")`,
 				`.descriptionMatches("` + pattern + `")`,

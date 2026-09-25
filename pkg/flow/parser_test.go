@@ -188,6 +188,7 @@ func TestParse_AllStepTypes(t *testing.T) {
 		{"addMedia", `- addMedia: {files: ["img.png"]}`, StepAddMedia},
 		{"pressKey", `- pressKey: ENTER`, StepPressKey},
 		{"waitForAnimationToEnd", `- waitForAnimationToEnd: {}`, StepWaitForAnimationToEnd},
+		{"wait", `- wait: 2000`, StepWait},
 		{"defineVariables", `- defineVariables: {VAR1: value1}`, StepDefineVariables},
 	}
 
@@ -2422,4 +2423,189 @@ func TestParseCRLFKeepsBlockScalarSeparatorsAsContent(t *testing.T) {
 	if len(f.Steps) != 2 {
 		t.Errorf("got %d steps, want 2 — a --- inside a block scalar split the document", len(f.Steps))
 	}
+}
+
+// `text:` on inputText is the value to type, never a selector predicate.
+// InputTextStep.Text and the inlined Selector.Text share the yaml key, and
+// before #166 the map form left the typed value in Selector.Text, where it
+// became a hint constraint that no target field could satisfy.
+func TestParse_InputTextWithIDDoesNotLeakTextIntoSelector(t *testing.T) {
+	yaml := `
+- inputText:
+    text: "client@example.com"
+    id: "login.email-input"
+`
+	flow, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := flow.Steps[0].(*InputTextStep)
+	if step.Text != "client@example.com" {
+		t.Errorf("Text=%q, want client@example.com", step.Text)
+	}
+	if step.Selector.ID != "login.email-input" {
+		t.Errorf("Selector.ID=%q, want login.email-input", step.Selector.ID)
+	}
+	if step.Selector.Text != "" {
+		t.Errorf("Selector.Text=%q, want empty — typed value leaked into the selector", step.Selector.Text)
+	}
+}
+
+// Map form with only `text:` means "type into the focused element": the
+// selector must come out empty so every driver takes that path.
+func TestParse_InputTextMapWithoutSelectorIsEmptySelector(t *testing.T) {
+	yaml := `
+- inputText:
+    text: "hello"
+`
+	flow, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := flow.Steps[0].(*InputTextStep)
+	if step.Text != "hello" {
+		t.Errorf("Text=%q, want hello", step.Text)
+	}
+	if !step.Selector.IsEmpty() {
+		t.Errorf("Selector=%+v, want empty", step.Selector)
+	}
+}
+
+// Other fields on the step and the selector survive the custom unmarshal.
+func TestParse_InputTextMapKeepsSiblingFields(t *testing.T) {
+	yaml := `
+- inputText:
+    text: "1234"
+    keyPress: true
+    optional: true
+    label: "enter pin"
+    css: "#pin"
+    index: 1
+`
+	flow, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	step := flow.Steps[0].(*InputTextStep)
+	if !step.KeyPress {
+		t.Error("KeyPress=false, want true")
+	}
+	if !step.IsOptional() {
+		t.Error("optional=false, want true")
+	}
+	if step.Label() != "enter pin" {
+		t.Errorf("Label=%q, want 'enter pin'", step.Label())
+	}
+	if step.Selector.CSS != "#pin" {
+		t.Errorf("Selector.CSS=%q, want #pin", step.Selector.CSS)
+	}
+	if step.Selector.Text != "" {
+		t.Errorf("Selector.Text=%q, want empty", step.Selector.Text)
+	}
+}
+
+// Upstream Maestro's map form is `{value: enabled|disabled, label:, optional:}`.
+// Ours only knew `enabled:`, so `value: enabled` decoded to Enabled=false and
+// a flow written for Maestro switched the setting the wrong way, silently.
+func TestParse_SetAirplaneModeValueKey(t *testing.T) {
+	cases := []struct {
+		yaml string
+		want bool
+	}{
+		{`- setAirplaneMode: {value: enabled}`, true},
+		{`- setAirplaneMode: {value: disabled, label: "offline"}`, false},
+		{`- setAirplaneMode: {enabled: true}`, true}, // our spelling still works
+	}
+	for _, c := range cases {
+		f, err := Parse([]byte(c.yaml), "t.yaml")
+		if err != nil {
+			t.Fatalf("%s: %v", c.yaml, err)
+		}
+		if got := f.Steps[0].(*SetAirplaneModeStep).Enabled; got != c.want {
+			t.Errorf("%s: Enabled=%v, want %v", c.yaml, got, c.want)
+		}
+	}
+	if _, err := Parse([]byte(`- setAirplaneMode: {value: sideways}`), "t.yaml"); err == nil {
+		t.Error("an unknown value: should be a parse error, not a silent disable")
+	}
+	// A variable is left for the expand pass, as `enabled: "${X}"` is.
+	f, err := Parse([]byte(`- setAirplaneMode: {value: "${OFFLINE}"}`), "t.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := f.Steps[0].(*SetAirplaneModeStep).EnabledRaw.(string); raw != "${OFFLINE}" {
+		t.Errorf("variable value should be deferred to expansion, got EnabledRaw=%v", f.Steps[0].(*SetAirplaneModeStep).EnabledRaw)
+	}
+}
+
+func TestParse_SetDarkModeValueKey(t *testing.T) {
+	cases := []struct {
+		yaml string
+		want bool
+	}{
+		{`- setDarkMode: {value: enabled}`, true},
+		{`- setDarkMode: {value: dark, optional: true}`, true},
+		{`- setDarkMode: {value: light}`, false},
+		{`- setDarkMode: {value: disabled}`, false},
+	}
+	for _, c := range cases {
+		f, err := Parse([]byte(c.yaml), "t.yaml")
+		if err != nil {
+			t.Fatalf("%s: %v", c.yaml, err)
+		}
+		if got := f.Steps[0].(*SetDarkModeStep).Enabled; got != c.want {
+			t.Errorf("%s: Enabled=%v, want %v", c.yaml, got, c.want)
+		}
+	}
+	if _, err := Parse([]byte(`- setDarkMode: {value: dim}`), "t.yaml"); err == nil {
+		t.Error("an unknown value: should be a parse error")
+	}
+}
+
+func TestParse_WaitStep(t *testing.T) {
+	t.Run("scalar milliseconds", func(t *testing.T) {
+		f, err := Parse([]byte(`- wait: 2000`), "test.yaml")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		w, ok := f.Steps[0].(*WaitStep)
+		if !ok {
+			t.Fatalf("expected *WaitStep, got %T", f.Steps[0])
+		}
+		if w.DurationMs != 2000 {
+			t.Errorf("DurationMs = %d, want 2000", w.DurationMs)
+		}
+		if got := w.Describe(); got != "wait: 2000ms" {
+			t.Errorf("Describe = %q, want %q", got, "wait: 2000ms")
+		}
+	})
+
+	t.Run("mapping form with options", func(t *testing.T) {
+		f, err := Parse([]byte(`- wait: {duration: 500, optional: true, label: settle}`), "test.yaml")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		w := f.Steps[0].(*WaitStep)
+		if w.DurationMs != 500 {
+			t.Errorf("DurationMs = %d, want 500", w.DurationMs)
+		}
+		if !w.IsOptional() {
+			t.Error("expected optional")
+		}
+		if w.Label() != "settle" {
+			t.Errorf("Label = %q, want settle", w.Label())
+		}
+	})
+
+	t.Run("non-numeric scalar is a parse error", func(t *testing.T) {
+		if _, err := Parse([]byte(`- wait: soon`), "test.yaml"); err == nil {
+			t.Error("expected a parse error for a non-numeric duration")
+		}
+	})
+
+	t.Run("negative duration is a parse error", func(t *testing.T) {
+		if _, err := Parse([]byte(`- wait: -100`), "test.yaml"); err == nil {
+			t.Error("expected a parse error for a negative duration")
+		}
+	})
 }

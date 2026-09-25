@@ -22,16 +22,26 @@ type ParsedElement struct {
 	Checked   bool
 	Focused   bool
 	Clickable bool
-	Depth     int
-	Children  []*ParsedElement
-	Parent    *ParsedElement // parent element for clickable lookup
+	// Scrollable marks a scroll container. Android reports a child's bounds
+	// already clipped to it, so a sliver at the container's leading edge
+	// looks fully visible; scrollUntilVisible walks up to the nearest
+	// scrollable ancestor to notice (#164).
+	Scrollable bool
+	Depth      int
+	Children   []*ParsedElement
+	Parent     *ParsedElement // parent element for clickable lookup
 
 	// Android
 	Text        string
 	ResourceID  string
 	ContentDesc string
 	HintText    string
-	ClassName   string
+	// ErrorText is the field's validation error (AccessibilityNodeInfo.getError),
+	// the `error` attribute the uiautomator2 server writes for every node —
+	// empty for most. A Compose field whose only content is its error
+	// semantics is found by that text, as in Maestro since 2.9.
+	ErrorText string
+	ClassName string
 
 	// iOS
 	Type             string // XCUIElementType
@@ -92,6 +102,8 @@ func parseAndroidPageSource(xmlData string) ([]*ParsedElement, error) {
 						elem.ContentDesc = attr.Value
 					case "hint":
 						elem.HintText = attr.Value
+					case "error":
+						elem.ErrorText = attr.Value
 					case "class":
 						elem.ClassName = attr.Value
 					case "bounds":
@@ -108,6 +120,8 @@ func parseAndroidPageSource(xmlData string) ([]*ParsedElement, error) {
 						elem.Displayed = attr.Value != "false"
 					case "clickable":
 						elem.Clickable = attr.Value == "true"
+					case "scrollable":
+						elem.Scrollable = attr.Value == "true"
 					}
 				}
 
@@ -325,7 +339,7 @@ func matchesSelector(elem *ParsedElement, sel flow.Selector, platform string) bo
 				return false
 			}
 		} else {
-			if !matchesText(sel.Text, elem.Text, elem.ContentDesc, elem.HintText) {
+			if !matchesText(sel.Text, elem.Text, elem.ContentDesc, elem.HintText) && !matchesErrorText(sel.Text, elem.ErrorText) {
 				return false
 			}
 		}
@@ -752,4 +766,14 @@ func sortByDistanceXReverse(elements []*ParsedElement, refX int) {
 			}
 		}
 	}
+}
+
+// matchesErrorText matches a text selector against a field's validation
+// error (Android only). The attribute is written for every node and is usually empty, and
+// an empty string must never satisfy a selector — `.*` would.
+func matchesErrorText(pattern, errorText string) bool {
+	if errorText == "" {
+		return false
+	}
+	return matchesText(pattern, errorText, "", "")
 }

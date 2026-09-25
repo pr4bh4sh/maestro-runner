@@ -174,12 +174,10 @@ func TestRunner_Port(t *testing.T) {
 }
 
 func TestRunner_Destination(t *testing.T) {
-	// Fake UDID — isSimulator() runs `simctl get_app_container` which won't
-	// match → we get the real-device branch ("platform=iOS,id=<udid>").
-	// Pinning platform explicitly is the workaround for the Xcode 26 / iOS 26
-	// destination-ambiguity bug that stalls test-without-building (the
-	// resolver returns both arm64 and x86_64 entries for a sim UDID, picks
-	// the wrong one, and testmanagerd never spawns the test bundle).
+	// Fake UDID — isSimulator() won't match it, so this is the real-device
+	// branch. A physical device is selected by its id alone; xcodebuild rejects
+	// arch= on a device destination ("Please supply only supported device
+	// specifier options", #172), so there must be no arch here.
 	runner := &Runner{deviceUDID: "my-device-udid"}
 	dest := runner.destination()
 	expected := "platform=iOS,id=my-device-udid"
@@ -300,5 +298,44 @@ func TestPortFromUDID_UUIDPortUnchanged(t *testing.T) {
 	want := wdaBasePort + uint16(val%uint64(wdaPortRange))
 	if got := PortFromUDID(udid); got != want {
 		t.Errorf("UUID port changed: got %d, want %d", got, want)
+	}
+}
+
+// TestDestinationHasNoArchOnPhysicalDevices covers #172: xcodebuild rejects
+// arch= (and OS=) on a physical-device destination, so the default device
+// destination must be the plain "platform=iOS,id=<udid>" — the id alone
+// selects the device.
+func TestDestinationHasNoArchOnPhysicalDevices(t *testing.T) {
+	r := &Runner{deviceUDID: "00008101-001C0C660A13001E"}
+
+	got := r.destination()
+	if strings.Contains(got, "arch=") {
+		t.Errorf("a physical-device destination must not carry arch=, got %q", got)
+	}
+	if !strings.Contains(got, "platform=iOS,") || strings.Contains(got, "Simulator") {
+		t.Errorf("expected a physical-device platform, got %q", got)
+	}
+	if !strings.Contains(got, r.deviceUDID) {
+		t.Errorf("expected the UDID in the destination, got %q", got)
+	}
+}
+
+func TestDestinationArchOverride(t *testing.T) {
+	r := &Runner{deviceUDID: "UDID"}
+
+	t.Setenv("MAESTRO_WDA_DEST_ARCH", "arm64e")
+	if got := r.destination(); !strings.Contains(got, "arch=arm64e") {
+		t.Errorf("expected the override to be honoured, got %q", got)
+	}
+
+	// "any" is the escape hatch for a device whose resolver disagrees with the
+	// default — it must drop the pin rather than pass arch=any to xcodebuild.
+	t.Setenv("MAESTRO_WDA_DEST_ARCH", "any")
+	got := r.destination()
+	if strings.Contains(got, "arch=") {
+		t.Errorf(`expected "any" to drop the pin, got %q`, got)
+	}
+	if got != "platform=iOS,id=UDID" {
+		t.Errorf("expected the unpinned destination, got %q", got)
 	}
 }

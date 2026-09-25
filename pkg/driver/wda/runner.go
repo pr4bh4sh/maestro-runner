@@ -16,14 +16,15 @@ import (
 
 	goios "github.com/danielpaulus/go-ios/ios"
 	"github.com/danielpaulus/go-ios/ios/forward"
+	"github.com/danielpaulus/go-ios/ios/instruments"
 	"github.com/devicelab-dev/maestro-runner/pkg/config"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 	"github.com/devicelab-dev/maestro-runner/pkg/simulator"
 )
 
 const (
-	wdaBasePort    = uint16(8100)
-	wdaPortRange   = uint16(1000)
+	wdaBasePort  = uint16(8100)
+	wdaPortRange = uint16(1000)
 	buildTimeout = 10 * time.Minute
 	// startupTimeout covers the full window from invoking
 	// `xcodebuild test-without-building` to WDA's FBWebServer printing
@@ -232,6 +233,12 @@ func (r *Runner) Start(ctx context.Context) error {
 				if rerr := resetSimulator(ctx, r.deviceUDID); rerr != nil {
 					fmt.Fprintf(os.Stderr, "  ⚠ simctl reset failed: %v (continuing anyway)\n", rerr)
 				}
+			} else {
+				// A device had no recovery step at all, on the assumption it
+				// could not get wedged. A WebDriverAgentRunner left running
+				// from the previous attempt still owns the device, so every
+				// retry raced the session it needed to replace.
+				terminateDeviceWDA(r.deviceUDID)
 			}
 		}
 
@@ -442,8 +449,14 @@ func (r *Runner) Cleanup() {
 // getBuildCacheDir returns the cache directory path for this specific configuration.
 // Format: ~/.maestro-runner/cache/wda-builds/{config-name}/
 // Examples:
-//   - Simulator: sim-ios18.5-iphone/
-//   - Real device: device-ios18.0-teamABC123/
+//   - Simulator: sim-ios18.5-iphone-wda16.12.8/
+//   - Real device: device-ios18.0-teamABC123-wda16.12.8/
+//
+// The bundled WebDriverAgent version is part of the name: the cache is
+// accepted on the presence of an xctestrun alone, so without it a WDA
+// upgrade (a release, or `wda update`) kept launching the build products of
+// the previous version for as long as the simulator's iOS version stayed
+// the same.
 func (r *Runner) getBuildCacheDir() (string, error) {
 	// Get device info
 	isSimulator, err := r.isSimulator()
@@ -471,6 +484,9 @@ func (r *Runner) getBuildCacheDir() (string, error) {
 	}
 	if r.wdaBundleID != "" {
 		configName += "-bundle" + r.wdaBundleID
+	}
+	if wdaVersion, verr := GetLocalWDAVersion(); verr == nil && wdaVersion != "" {
+		configName += "-wda" + wdaVersion
 	}
 
 	cacheDir := filepath.Join(config.GetCacheDir(), "wda-builds", configName)
@@ -601,7 +617,73 @@ func (r *Runner) destination() string {
 	if isSim {
 		return fmt.Sprintf("platform=iOS Simulator,arch=%s,id=%s", simulator.XcodebuildArch(runtime.GOARCH), r.deviceUDID)
 	}
-	return fmt.Sprintf("platform=iOS,id=%s", r.deviceUDID)
+	// A physical device is selected by its unique id alone. xcodebuild rejects
+	// arch= (and OS=) on a device destination — "Please supply only supported
+	// device specifier options" (#172) — so, unlike a simulator, the device
+	// destination must NOT carry an arch. Which slice the runner is built as is
+	// a build-settings concern (ARCHS), not a destination one.
+	//
+	// MAESTRO_WDA_DEST_ARCH is kept as an explicit opt-in for a host that has a
+	// reason to force an arch into the specifier anyway; "any" and the empty
+	// default both mean the plain, always-accepted device destination.
+	arch := os.Getenv("MAESTRO_WDA_DEST_ARCH")
+	if arch == "" || strings.EqualFold(arch, "any") {
+		return fmt.Sprintf("platform=iOS,id=%s", r.deviceUDID)
+	}
+	return fmt.Sprintf("platform=iOS,arch=%s,id=%s", arch, r.deviceUDID)
+}
+
+// terminateDeviceWDA kills a WebDriverAgentRunner left running on a physical
+// device.
+//
+// Killing xcodebuild on the host does not end the XCTest session on the phone:
+// the runner app stays resident holding the port, and the next
+// `test-without-building` attempts to start a second session while the first
+// still owns the device. That is the shape of "a few runs succeed, then every
+// run stalls" — nothing is cleaned up between them, so the failure is
+// cumulative rather than transient, and retrying without clearing it hits the
+// same wall every time.
+//
+// Best-effort by design: every failure here is logged and swallowed. This runs
+// on the recovery path, where the run is already failing, and a device that
+// will not answer the instruments channel must not turn a retryable stall into
+// a hard error.
+func terminateDeviceWDA(udid string) {
+	device, err := goios.GetDevice(udid)
+	if err != nil {
+		logger.Debug("device WDA cleanup: no device %s: %v", udid, err)
+		return
+	}
+	info, err := instruments.NewDeviceInfoService(device)
+	if err != nil {
+		logger.Debug("device WDA cleanup: device info service: %v", err)
+		return
+	}
+	defer info.Close()
+
+	procs, err := info.ProcessList()
+	if err != nil {
+		logger.Debug("device WDA cleanup: process list: %v", err)
+		return
+	}
+
+	pc, err := instruments.NewProcessControl(device)
+	if err != nil {
+		logger.Debug("device WDA cleanup: process control: %v", err)
+		return
+	}
+	defer func() { _ = pc.Close() }()
+
+	for _, proc := range procs {
+		if !strings.Contains(proc.Name, "WebDriverAgentRunner") {
+			continue
+		}
+		if err := pc.KillProcess(proc.Pid); err != nil {
+			logger.Debug("device WDA cleanup: kill %s (pid %d): %v", proc.Name, proc.Pid, err)
+			continue
+		}
+		logger.Info("[wda] terminated leftover %s (pid %d) on device", proc.Name, proc.Pid)
+	}
 }
 
 func (r *Runner) derivedDataPath() string {

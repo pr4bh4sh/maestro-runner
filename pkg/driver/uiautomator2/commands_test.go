@@ -691,12 +691,17 @@ func TestSetOrientationLandscapeLeft(t *testing.T) {
 	if !result.Success {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
-	// Should have 2 shell commands: disable accelerometer, set rotation
-	if len(shell.commands) != 2 {
-		t.Errorf("expected 2 shell commands, got %d", len(shell.commands))
+	// Three shell commands: disable accelerometer, set rotation, then one
+	// look at the display (the mock's empty dumpsys is unobservable, so the
+	// settle wait stops after a single read).
+	if len(shell.commands) != 3 {
+		t.Fatalf("expected 3 shell commands, got %d: %v", len(shell.commands), shell.commands)
 	}
 	if shell.commands[1] != "settings put system user_rotation 1" {
 		t.Errorf("expected user_rotation 1, got %s", shell.commands[1])
+	}
+	if shell.commands[2] != "dumpsys display" {
+		t.Errorf("expected the display to be read after rotating, got %s", shell.commands[2])
 	}
 }
 
@@ -4099,15 +4104,11 @@ func TestLaunchAppViaShellAmStartErrorWithArgs(t *testing.T) {
 func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 	t.Parallel()
 	scrollCount := 0
+	captures := 0
 	client := &MockUIA2Client{
 		sourceFunc: func() (string, error) {
 			// Element never found
-			return `<?xml version="1.0" encoding="UTF-8"?>
-<hierarchy rotation="0">
-  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
-    <android.widget.TextView text="Other" bounds="[100,100][300,150]"/>
-  </android.widget.FrameLayout>
-</hierarchy>`, nil
+			return movingList(&captures), nil
 		},
 		scrollErr: nil,
 	}
@@ -4172,14 +4173,10 @@ func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
 
 func TestScrollUntilVisibleDefaultMaxScrolls(t *testing.T) {
 	t.Parallel()
+	captures := 0
 	client := &MockUIA2Client{
 		sourceFunc: func() (string, error) {
-			return `<?xml version="1.0" encoding="UTF-8"?>
-<hierarchy rotation="0">
-  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
-    <android.widget.TextView text="Other" bounds="[100,100][300,150]"/>
-  </android.widget.FrameLayout>
-</hierarchy>`, nil
+			return movingList(&captures), nil
 		},
 	}
 
@@ -4329,7 +4326,7 @@ func TestScrollByAdbCoordinates(t *testing.T) {
 		t.Run(tt.direction, func(t *testing.T) {
 			shell := &MockShellExecutor{}
 			driver := &Driver{device: shell}
-			if err := driver.scrollByAdb(tt.direction, W, H, 0.3); err != nil {
+			if err := driver.scrollByAdb(tt.direction, W, H, 0.3, scrollDurationMs); err != nil {
 				t.Fatalf("scrollByAdb error: %v", err)
 			}
 			if len(shell.commands) != 1 || shell.commands[0] != tt.wantCmd {
@@ -4486,5 +4483,80 @@ func TestAddMediaQuotesRemotePath(t *testing.T) {
 	argv := shellArgv(t, "content", scan)
 	if !containsArg(argv, "/sdcard/Pictures/MaestroRunner/my holiday photo.jpg") {
 		t.Errorf("media path reached the device as %q, want it intact as one argument", argv)
+	}
+}
+
+// A document is pushed to Downloads, where the system file picker lists it;
+// the photo-picker directories would hide it (#167).
+func TestAddMediaDocumentGoesToDownloads(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "report.pdf")
+	jpg := filepath.Join(dir, "photo.jpg")
+	for _, f := range []string{pdf, jpg} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mock := &MockShellExecutor{response: "Success"}
+	driver := &Driver{device: mock}
+
+	result := driver.addMedia(&flow.AddMediaStep{Files: []string{pdf, jpg}})
+	if !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+	if len(mock.pushes) != 2 {
+		t.Fatalf("expected 2 pushes, got %d", len(mock.pushes))
+	}
+	if mock.pushes[0][1] != "/sdcard/Download/report.pdf" {
+		t.Errorf("document pushed to %q, want /sdcard/Download/report.pdf", mock.pushes[0][1])
+	}
+	if !strings.HasPrefix(mock.pushes[1][1], "/sdcard/Pictures/MaestroRunner/") {
+		t.Errorf("photo pushed to %q, want the images dir", mock.pushes[1][1])
+	}
+}
+
+// movingList is a page source whose one row shifts up on every capture — a
+// list that keeps advancing — so a test about maxScrolls or timeouts is not
+// cut short by the no-progress stop.
+func movingList(captures *int) string {
+	*captures++
+	y := 100 + *captures
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
+    <android.widget.TextView text="Other" bounds="[100,%d][300,%d]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`, y, y+50)
+}
+
+func TestScrollUntilVisibleStopsWhenScreenStopsMoving(t *testing.T) {
+	// The same capture on every read: a list at its end. Two scrolls that
+	// change nothing are proof enough — the loop must not spend the other 18.
+	client := &MockUIA2Client{
+		sourceFunc: func() (string, error) {
+			return `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2400]">
+    <android.widget.TextView text="Last row" bounds="[100,2300][300,2350]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`, nil
+		},
+	}
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, nil)
+
+	result := driver.scrollUntilVisible(&flow.ScrollUntilVisibleStep{
+		Element:   flow.Selector{Text: "NonExistent"},
+		Direction: "down",
+		BaseStep:  flow.BaseStep{TimeoutMs: 60000},
+	})
+
+	if result.Success {
+		t.Fatal("expected failure when the element is not in the list")
+	}
+	if got := len(client.scrollCalls); got != 2 {
+		t.Errorf("expected 2 scrolls before the no-progress stop, got %d", got)
+	}
+	if !strings.Contains(result.Message, "made no progress") {
+		t.Errorf("message should name the reason, got %q", result.Message)
 	}
 }

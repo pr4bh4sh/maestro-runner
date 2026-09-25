@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -57,15 +58,76 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		if err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to build selectors: %v", err))
 		}
-		strategies := append(clickableStrategies, allStrategies...)
+		// Clickable-first promotes a text/label match to its nearest clickable
+		// ancestor, which is right for native buttons whose label sits on a
+		// non-clickable child. But inside a WebView that ancestor is often a
+		// large container whose centre misses the real input: a hosted form
+		// field (e.g. Shopify checkout's card iframe) then never receives focus
+		// and the key events that follow go nowhere. When a WebView is present,
+		// tap the matched element's OWN centre first — the same
+		// coordinate-tap-at-element-centre upstream Maestro uses, which lands on
+		// the field and focuses it. Clickable strategies stay as a fallback.
+		var strategies []LocatorStrategy
+		if d.webView != nil && d.webView.isConnected() {
+			strategies = append(allStrategies, clickableStrategies...)
+			// Remember the label so a following inputText can find+focus the
+			// matching cross-origin iframe input over CDP if the native tap
+			// didn't reach it (hosted card fields). The label may arrive as a
+			// plain text, a regex ("^Card number$"), or a substring — the CDP
+			// side normalises to alphanumerics, so pass whichever is set.
+			switch {
+			case step.Selector.Text != "":
+				d.lastWebTapText = step.Selector.Text
+			case step.Selector.TextRegex != "":
+				d.lastWebTapText = step.Selector.TextRegex
+			case step.Selector.TextContains != "":
+				d.lastWebTapText = step.Selector.TextContains
+			}
+		} else {
+			strategies = append(clickableStrategies, allStrategies...)
+		}
+
 		timeout := d.calculateTimeout(step.IsOptional(), step.TimeoutMs)
 		ctx, cancel := context.WithTimeout(d.parentContext(), timeout)
 		defer cancel()
+
+		// Read once: cached after the first call, and the agent needs it on
+		// every attempt. Zero on failure, which tells the agent to click
+		// unconditionally — the pre-#162 behaviour.
+		guardW, guardH, guardErr := d.tappableScreenSize()
+		if guardErr != nil {
+			guardW, guardH = 0, 0
+		}
+		// Hit-testing costs one tree walk per attempt and only ever turns a
+		// tap that would have been swallowed into a re-poll. Off switch for a
+		// tree pathological enough that the walk is not worth it.
+		hitTest := os.Getenv("MAESTRO_DISABLE_HIT_TEST") == ""
+
+		// The system file picker ignores the agent's injected tap: DocumentsUI
+		// acknowledges the DOWN/UP and never opens the row, while the same tap
+		// through `input tap` does (#87, and again on the #167 picker flow —
+		// uiautomator2 selects the file, devicelab does not). The foreground
+		// check costs ~120ms, so it only runs when the selector reads like a
+		// file name, which is what a picker flow taps.
+		if d.device != nil && looksLikeFileName(step.Selector.Text) && d.isDocumentsUIForeground() {
+			return d.tapViaInputTap(ctx, step, strategies)
+		}
 
 		var lastErr error
 		for {
 			select {
 			case <-ctx.Done():
+				// WebView control the native tap can't reach (e.g. Shopify checkout's
+				// "Review order" / "Pay now" — a11y exposes the label on a non-clickable
+				// node, so no clickable node matches). Fall back to a CDP click of the
+				// element whose text matches, in the WebView's own context.
+				if os.Getenv("MAESTRO_CDP_IFRAME_FILL") != "" && d.webView != nil && d.webView.isConnected() {
+					if p := webTextPattern(step.Selector); p != "" {
+						if ok, _ := d.webView.clickIframeElementByText(p, false); ok {
+							return successResult(fmt.Sprintf("Tapped on: %s (CDP)", step.Selector.Describe()), nil)
+						}
+					}
+				}
 				if lastErr != nil {
 					return errorResult(fmt.Errorf("%s: %w", ctx.Err(), lastErr), fmt.Sprintf("Element not found: %v", lastErr))
 				}
@@ -83,7 +145,13 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 					// assertion can detect "tap had no effect" and retry.
 					d.recordTap(step.Selector)
 
-					elem, err := d.client.FindAndClick(s.Strategy, s.Value)
+					// Hand the agent the screen size so it can reject an
+					// untappable rect BEFORE injecting the tap. Previously the
+					// check below ran on a tap that had already landed: a
+					// clipped rect's centre sits outside the element, and with
+					// a bottom tab bar that centre is a tab, so the "rejected"
+					// tap navigated and desynced the flow (#162).
+					elem, clicked, blockedBy, err := d.client.FindAndClickChecked(s.Strategy, s.Value, guardW, guardH, hitTest)
 					if err == nil {
 						info := &core.ElementInfo{
 							Visible: true,
@@ -112,6 +180,29 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 						// injects the tap off-screen — a no-op that leaves the flow
 						// desynced. A settled frame a moment later taps the real
 						// target. (Mirrors the assert-side viewport check from #39.)
+						// The agent declined to tap. Nothing was injected,
+						// so just keep polling for a settled frame.
+						if !clicked {
+							// blockedBy is set when the hit test found something
+							// over the point; otherwise the rect itself was bad.
+							if blockedBy != "" {
+								logger.Info("[devicelab] tap skipped before injection for %s: point covered by %s — re-polling",
+									step.Selector.Describe(), blockedBy)
+								lastErr = fmt.Errorf("tap point is covered by %s", blockedBy)
+							} else {
+								logger.Info("[devicelab] tap skipped before injection (untappable rect) for %s: w=%d h=%d center=(%d,%d) screen=%dx%d — re-polling",
+									step.Selector.Describe(), info.Bounds.Width, info.Bounds.Height,
+									info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2, guardW, guardH)
+								lastErr = fmt.Errorf("element rect not tappable (w=%d h=%d center=(%d,%d) screen=%dx%d)",
+									info.Bounds.Width, info.Bounds.Height,
+									info.Bounds.X+info.Bounds.Width/2, info.Bounds.Y+info.Bounds.Height/2, guardW, guardH)
+							}
+							time.Sleep(50 * time.Millisecond)
+							break
+						}
+
+						// Fallback for an agent predating the guard above: it
+						// has already clicked, so this only stops a second tap.
 						if rectOK {
 							// Validate against the FULL physical display (same coordinate
 							// space as info.Bounds, which come from the accessibility
@@ -174,6 +265,9 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		}
 		x += info.Bounds.X
 		y += info.Bounds.Y
+		if bad := d.guardTapInjection(step.Selector.Describe(), info.Bounds, x, y); bad != nil {
+			return bad
+		}
 		if err := d.client.Click(x, y); err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to tap at relative point: %v", err))
 		}
@@ -181,6 +275,9 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	}
 
 	x, y := info.Bounds.Center()
+	if bad := d.guardTapInjection(step.Selector.Describe(), info.Bounds, x, y); bad != nil {
+		return bad
+	}
 
 	// If duration is set (or longPress: true), hold the press for that long.
 	if step.DurationMs > 0 || step.LongPress {
@@ -202,6 +299,54 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	}
 
 	return successResult("Tapped on element", info)
+}
+
+// tapPointInjectable reports whether a resolved tap point may be injected: the
+// element must be a real rectangle, and the point must land on the display.
+//
+// Both halves matter and catch different things. The centre of a clipped rect
+// (top > bottom, so a negative height) can still be on-screen — in #162 it was
+// (540,2109) on a 1080x2400 display — so the on-screen test alone would pass
+// it; only the malformed-rect test rejects it. Conversely a well-formed rect
+// scrolled off the bottom needs the on-screen test.
+func tapPointInjectable(b core.Bounds, x, y, screenW, screenH int) bool {
+	if b.Width <= 0 || b.Height <= 0 {
+		return false
+	}
+	return x >= 0 && x < screenW && y >= 0 && y < screenH
+}
+
+// guardTapInjection returns a failing result when a tap must not be injected,
+// or nil to proceed.
+//
+// The coordinate paths resolve (x, y) here and inject them directly, so the
+// agent-side guard in findAndClick never sees them — the check has to happen
+// here or nowhere. Injecting anyway is worse than failing: a clipped rect's
+// point lands outside the element, and on a screen with a bottom tab bar that
+// is a tab, so the tap navigates and every later step runs on the wrong
+// screen (#162).
+//
+// Unlike the findAndClick path this does not re-poll for a settled frame: the
+// element has already been resolved by a find that polls, and these paths
+// (point:, relative, index, duration) have no surrounding retry loop to hook
+// into. Failing with the rect in the message is the honest outcome — the flow
+// stops where the problem is instead of drifting.
+//
+// A screen size we cannot read disables the check rather than blocking a tap
+// that would otherwise have worked.
+func (d *Driver) guardTapInjection(desc string, b core.Bounds, x, y int) *core.CommandResult {
+	sw, sh, err := d.tappableScreenSize()
+	if err != nil || sw <= 0 || sh <= 0 {
+		return nil
+	}
+	if tapPointInjectable(b, x, y, sw, sh) {
+		return nil
+	}
+	logger.Info("[devicelab] tap skipped before injection for %s: bounds w=%d h=%d point=(%d,%d) screen=%dx%d",
+		desc, b.Width, b.Height, x, y, sw, sh)
+	e := fmt.Errorf("element rect not tappable (w=%d h=%d point=(%d,%d) screen=%dx%d)",
+		b.Width, b.Height, x, y, sw, sh)
+	return errorResult(e, fmt.Sprintf("Element not tappable: %v", e))
 }
 
 // boundsTappable reports whether b is a real on-screen rectangle whose centre
@@ -331,6 +476,9 @@ func (d *Driver) doubleTapOn(step *flow.DoubleTapOnStep) *core.CommandResult {
 	if perr != nil {
 		return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
 	}
+	if bad := d.guardTapInjection(step.Selector.Describe(), info.Bounds, x, y); bad != nil {
+		return bad
+	}
 	if err := d.client.DoubleClick(x, y); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to double tap at coordinates: %v", err))
 	}
@@ -359,6 +507,9 @@ func (d *Driver) longPressOn(step *flow.LongPressOnStep) *core.CommandResult {
 	x, y, perr := core.PointInBounds(step.Selector.Point, info.Bounds)
 	if perr != nil {
 		return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+	}
+	if bad := d.guardTapInjection(step.Selector.Describe(), info.Bounds, x, y); bad != nil {
+		return bad
 	}
 	if err := d.client.LongClick(x, y, duration); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to long press at coordinates: %v", err))
@@ -434,6 +585,15 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 		return d.assertVisibleCount(step)
 	}
 
+	// Hosted WebView content — Shopify checkout's card-field values and the
+	// order-confirmation text — isn't in the a11y tree and the JS helper can't
+	// reach cross-origin frames, so a plain `visible: text` assert can't see it
+	// even though it's on screen. When enabled and a WebView is connected, poll
+	// native and a direct CDP text search together.
+	if os.Getenv("MAESTRO_CDP_IFRAME_FILL") != "" && d.webView != nil && d.webView.isConnected() && webTextPattern(step.Selector) != "" {
+		return d.assertVisibleWithWebViewText(step)
+	}
+
 	_, info, err := d.findElementFastWithLazyRetry(step.Selector, step.IsOptional(), step.TimeoutMs)
 	if err != nil {
 		err = d.notFoundOrCrash(err)
@@ -445,6 +605,55 @@ func (d *Driver) assertVisible(step *flow.AssertVisibleStep) *core.CommandResult
 	}
 
 	return errorResult(fmt.Errorf("element not visible"), "Element exists but is not visible")
+}
+
+// webTextPattern returns a JS regex source for the selector's text, or "" if the
+// selector isn't text-based. A regex selector is used verbatim; a plain text /
+// substring selector is matched literally.
+func webTextPattern(sel flow.Selector) string {
+	switch {
+	case sel.TextRegex != "":
+		return sel.TextRegex
+	case sel.Text != "":
+		return sel.Text
+	case sel.TextContains != "":
+		return regexp.QuoteMeta(sel.TextContains)
+	}
+	return ""
+}
+
+// assertVisibleWithWebViewText polls, each round, a fast native find and a direct
+// CDP text search of the WebView (main frame + iframes) — so hosted values and
+// the order-confirmation text that the a11y tree can't expose still satisfy a
+// `visible: text` assert once they're on screen.
+func (d *Driver) assertVisibleWithWebViewText(step *flow.AssertVisibleStep) *core.CommandResult {
+	timeout := step.TimeoutMs
+	if timeout <= 0 {
+		timeout = 5000
+	}
+	pattern := webTextPattern(step.Selector)
+	deadline := time.Now().Add(time.Duration(timeout) * time.Millisecond)
+	for {
+		cdpMatch := d.webView != nil && d.webView.isConnected() && d.webView.webViewMatchesText(pattern)
+		_, info, ferr := d.findElementFast(step.Selector, true, 400)
+		nativeMatch := ferr == nil && info != nil && info.Visible
+		if cdpMatch {
+			return successResult("Element is visible (webview text)", nil)
+		}
+		if nativeMatch {
+			return successResult("Element is visible", info)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	// Not visible. Return a failure even when the step is optional — matching the
+	// non-WebView assertVisible path, whose caller (the executor) makes an optional
+	// miss non-fatal. Returning success here instead would make a `when: visible`
+	// condition (which reads result.Success) treat a missing element as present,
+	// running the wrong branch (e.g. tapping a nonexistent "Review order" button).
+	return errorResult(fmt.Errorf("element not visible"), "Element not visible")
 }
 
 // assertVisibleCount asserts that the selector matches exactly the requested
@@ -624,6 +833,7 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 		if err := d.client.SendKeyActions(text); err != nil {
 			return errorResult(err, "Failed to input text via key press")
 		}
+		invalidateText(target)
 		// Per-character key events are the path that loses characters when the
 		// app janks — the reason this verification exists at all.
 		note := core.ConfirmTypedText(target, text, before, logger.Warn)
@@ -662,6 +872,27 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 			}
 		}
 	} else {
+		// Cross-origin WebView iframe inputs — e.g. Shopify checkout's hosted PCI
+		// card fields (checkout.pci.shopifyinc.com) — live in their own execution
+		// context that the main-frame JS helper and native key events can't reach,
+		// so setText fails and blind keys go nowhere. When enabled, fill the input
+		// matching the last tapped label inside a cross-origin iframe directly over
+		// CDP, appending so a field typed in parts (expiry MM/YY) accumulates.
+		//
+		// Opt-in: proven to fill and read hosted card fields in isolation, but
+		// mid-journey the shared CDP connection is congested by the helper-refresh
+		// loop and the evals stall, so it is gated behind a flag until that
+		// connection-health issue is fixed (see fillIframeInput).
+		if os.Getenv("MAESTRO_CDP_IFRAME_FILL") != "" && d.webView != nil && d.webView.isConnected() {
+			// Focus the iframe input over CDP, then type with REAL hardware key events.
+			// Setting .value programmatically bypasses the checkout's own formatter (the
+			// expiry field inserts " / " only on genuine keystrokes), so we drive the keys
+			// and let the page format. The flow chunks input (expiry as "1","2","3","0"),
+			// so the formatter runs between chunks.
+			if ok, _ := d.webView.typeIntoIframeInput(d.lastWebTapText, text); ok {
+				return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), nil)
+			}
+		}
 		// No selector — type into whatever has focus. findFocused prefers
 		// the WebView's DOM activeElement over the native ActiveElement,
 		// which matters after a CDP tap: the DOM input has focus but blind
@@ -693,6 +924,17 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Entered text: %s%s%s", text, unicodeWarning, note), nil)
 }
 
+// textInvalidator is a field whose cached text can be marked stale.
+type textInvalidator interface{ InvalidateText() }
+
+// invalidateText tells field its cached text is out of date after it was typed
+// into by a route it did not see. Fields that always read live need nothing.
+func invalidateText(field core.TextField) {
+	if f, ok := field.(textInvalidator); ok {
+		f.InvalidateText()
+	}
+}
+
 // focusedFieldBefore resolves the element that key events will reach and reads
 // it, so the value can be compared once typing is done.
 func (d *Driver) focusedFieldBefore() (core.TextField, string) {
@@ -705,19 +947,11 @@ func (d *Driver) focusedFieldBefore() (core.TextField, string) {
 }
 
 // inputTextBrowser handles inputText entirely via CDP for Chrome browser mode.
-// In browser mode, Selector.Text may be populated as a YAML parsing artifact
-// (InputTextStep.Text and Selector.Text share the yaml:"text" key via inline embedding).
-// We detect this and route to the focused-element path.
+// A non-empty selector means "find the element and type into it"; an empty
+// one means "type into the focused element". The parser has already stripped
+// the `text:` value from the selector (flow.InputTextStep.UnmarshalYAML).
 func (d *Driver) inputTextBrowser(step *flow.InputTextStep, text, unicodeWarning string) *core.CommandResult {
-	// Detect YAML parsing artifact: Selector.Text == Text with no other selector fields.
-	// This means "type into focused element", not "find element by text then type".
-	hasSelectorArtifact := step.Selector.Text == step.Text &&
-		step.Selector.ID == "" && step.Selector.CSS == "" &&
-		step.Selector.TestID == "" && step.Selector.Name == "" &&
-		step.Selector.Placeholder == ""
-	selectorIsReal := !step.Selector.IsEmpty() && !hasSelectorArtifact
-
-	if selectorIsReal {
+	if !step.Selector.IsEmpty() {
 		// Real selector: find element via CDP and type into it
 		timeout := d.calculateTimeout(step.IsOptional(), step.TimeoutMs)
 		deadline := time.Now().Add(timeout)
@@ -843,8 +1077,12 @@ func (d *Driver) eraseTextBrowser(chars int) *core.CommandResult {
 }
 
 func (d *Driver) hideKeyboard(_ *flow.HideKeyboardStep) *core.CommandResult {
-	// Retry up to 3 times — the on-device agent tries KEYCODE_ESCAPE first
-	// (keyboard-only, no navigation side-effects), then falls back to KEYCODE_BACK.
+	// Retry up to 3 times. The on-device agent sends KEYCODE_ESCAPE, which is
+	// keyboard-only, and deliberately never KEYCODE_BACK — Back navigates away
+	// when the IME is not actually up. It also guards on a real IME window
+	// (AccessibilityWindowInfo.TYPE_INPUT_METHOD) rather than guessing from the
+	// node tree, so calling this with no keyboard showing is a no-op rather
+	// than a stray back-navigation.
 	for attempt := 0; attempt < 3; attempt++ {
 		_ = d.client.HideKeyboard()
 
@@ -910,11 +1148,48 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 		return errorResult(err, "Failed to get screen size")
 	}
 
-	if err := d.performScroll(direction, width, height, step.Engine, 0.5); err != nil {
+	if err := d.performScroll(direction, width, height, step.Engine, 0.5, core.ScrollDurationOrDefault(step.Speed, scrollDurationMs)); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to scroll: %v", err))
 	}
 	return successResult(fmt.Sprintf("Scrolled %s", direction), nil)
 }
+
+// atScrollContainerEdge reports whether the element occupying b ends exactly on
+// its nearest scrollable ancestor's leading edge — the shape of a rect the
+// hierarchy clipped rather than a whole element that happens to be visible
+// (#164).
+//
+// Costs one page-source fetch, and is only consulted once the geometry check
+// has already passed, so a scroll that stops on an unambiguous match pays
+// nothing. Any failure to establish the ancestry answers false: an
+// unverifiable tree must not block a match that the geometry accepted.
+func (d *Driver) atScrollContainerEdge(b core.Bounds, direction string) bool {
+	src, err := d.client.Source()
+	if err != nil {
+		return false
+	}
+	elems, err := ParsePageSource(src)
+	if err != nil {
+		return false
+	}
+	for _, e := range elems {
+		if e.Bounds != b {
+			continue
+		}
+		for p := e.Parent; p != nil; p = p.Parent {
+			if !p.Scrollable {
+				continue
+			}
+			return core.ClippedAtScrollEdge(b, p.Bounds, direction, scrollEdgeTolerancePx)
+		}
+	}
+	return false
+}
+
+// How far from the container edge still counts as flush. Rounding between the
+// hierarchy's integer bounds and the container's own edge leaves a pixel or
+// two; anything larger is a real gap.
+const scrollEdgeTolerancePx = 2
 
 func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.CommandResult {
 	// `from:` confines the scroll to a container. Only the UIAutomator2 driver
@@ -939,6 +1214,11 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 	deadline := time.Now().Add(timeout)
 
+	// `speed:` is a Maestro speed, not a duration — invert it once here.
+	// It used to be parsed and dropped, so a flow asking to scroll slowly
+	// scrolled at whatever the constant happened to be (#165).
+	scrollMs := core.ScrollDurationOrDefault(step.Speed, scrollDurationMs)
+
 	// Use the FULL physical display (same coordinate space as the hierarchy bounds). An element
 	// in the bottom system-bar band — e.g. the last nav-drawer item, centre y in
 	// (usableHeight, physicalHeight] — is genuinely on screen and tappable (see boundsTappable),
@@ -948,6 +1228,13 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	if err != nil {
 		return errorResult(err, "Failed to get screen size")
 	}
+
+	// Height of a flush candidate awaiting confirmation, or -1 for none.
+	pendingHeight := -1
+
+	// Stop early when the surface stops moving — a target that is not in the
+	// list should not cost every scroll the step allows.
+	var progress core.ScrollProgress
 
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		_, info, err := d.findElement(step.Element, true, 1000)
@@ -959,7 +1246,19 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 			// visibility requirement (default: fully inside the viewport, which
 			// here is the full physical display — see tappableScreenSize above).
 			if core.MeetsVisibility(info.Bounds, width, height, step.VisibilityPercentage) {
-				return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+				// The geometry says fully visible, but it is computed from a
+				// rect the hierarchy may already have clipped to the scroll
+				// container — a sliver at the fold scores 100% (#164). A rect
+				// flush with the container's leading edge might be truncated,
+				// so scroll once and look again: a sliver grows, an element
+				// resting at the end of the list does not.
+				if pendingHeight >= 0 && info.Bounds.Height <= pendingHeight {
+					return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+				}
+				if !d.atScrollContainerEdge(info.Bounds, direction) {
+					return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+				}
+				pendingHeight = info.Bounds.Height
 			}
 		} else if err != nil && !isElementNotFoundError(err) {
 			// Infrastructure failure (dead session, connection refused, etc.):
@@ -967,7 +1266,11 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 			return errorResult(err, "Failed to find element")
 		}
 
-		if err := d.performScroll(direction, width, height, step.Engine, 0.3); err != nil {
+		if sig, ok := d.scrollSurfaceSignature(); ok && progress.Observe(sig) {
+			return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found: scrolling %s made no progress after %d scrolls (end of content?)", direction, i))
+		}
+
+		if err := d.performScroll(direction, width, height, step.Engine, 0.3, scrollMs); err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to scroll: %v", err))
 		}
 
@@ -977,29 +1280,40 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found after %d scrolls", maxScrolls))
 }
 
+// scrollSurfaceSignature reduces the current page source to a key for
+// core.ScrollProgress. A capture that cannot be read reports ok=false and is
+// not observed, so a hiccup never passes for the end of the content.
+func (d *Driver) scrollSurfaceSignature() (string, bool) {
+	source, err := d.client.Source()
+	if err != nil || source == "" {
+		return "", false
+	}
+	return core.ScrollSignature(source), true
+}
+
 // performScroll dispatches a scroll gesture using the engine selected by the
 // step. Default ("" or "adb") uses adb input swipe (matches upstream Maestro
 // and is the most reliable path across Android skins). "agent" uses the
 // on-device DeviceLab agent's MotionEvent injection. ADB falls back to the
 // agent (with a warning) when no shell executor is available.
 // percent controls the swipe distance as a fraction of screen dimension.
-func (d *Driver) performScroll(direction string, width, height int, engine string, percent float64) error {
+func (d *Driver) performScroll(direction string, width, height int, engine string, percent float64, durationMs int) error {
 	useAgent := strings.EqualFold(engine, "agent")
 	if !useAgent {
 		if d.device != nil {
-			return d.scrollByAdb(direction, width, height, percent)
+			return d.scrollByAdb(direction, width, height, percent, durationMs)
 		}
 		logger.Warn("scroll: ADB shell unavailable, falling back to agent gesture (may be unreliable on some Android skins)")
 	}
 	area := uiautomator2.NewRect(0, height/8, width, height*3/4)
-	return d.client.ScrollInArea(area, direction, percent, scrollDurationMs)
+	return d.client.ScrollInArea(area, direction, percent, durationMs)
 }
 
 // scrollByAdb issues `adb shell input swipe` over the local shell executor.
 // percent is the swipe distance as a fraction of the screen dimension along
 // the scroll axis. Direction uses Maestro scroll semantics (what becomes
 // visible — "down" reveals content below by swiping the finger UP).
-func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, percent float64) error {
+func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, percent float64, durationMs int) error {
 	centerX := screenWidth / 2
 	centerY := screenHeight / 2
 	halfV := int(float64(screenHeight) * percent / 2)
@@ -1022,7 +1336,7 @@ func (d *Driver) scrollByAdb(direction string, screenWidth, screenHeight int, pe
 		fromX, fromY = centerX, centerY+halfV
 		toX, toY = centerX, centerY-halfV
 	}
-	cmd := fmt.Sprintf("input swipe %d %d %d %d %d", fromX, fromY, toX, toY, scrollDurationMs)
+	cmd := fmt.Sprintf("input swipe %d %d %d %d %d", fromX, fromY, toX, toY, durationMs)
 	_, err := d.device.Shell(cmd)
 	return err
 }
@@ -1842,8 +2156,25 @@ func (d *Driver) setOrientation(step *flow.SetOrientationStep) *core.CommandResu
 		return errorResult(err, fmt.Sprintf("Failed to set orientation: %v", err))
 	}
 
+	// The setting is written before the display has turned; the next step's
+	// hierarchy read would otherwise land mid-rotation. Wait for the display
+	// to report the rotation. Not reporting it is not a failure — a
+	// portrait-locked app ignores user_rotation and always has — but it is
+	// worth saying.
+	want, _ := strconv.Atoi(rotation)
+	if err := core.WaitForDisplayRotation(d.device.Shell, want, rotationSettleTimeout, rotationPollInterval); err != nil {
+		return successResult(fmt.Sprintf("Set orientation to %s (%v)", step.Orientation, err), nil)
+	}
+
 	return successResult(fmt.Sprintf("Set orientation to %s", step.Orientation), nil)
 }
+
+// How long setOrientation waits for the display to report the new rotation
+// before moving on, and how often it looks.
+const (
+	rotationSettleTimeout = 5 * time.Second
+	rotationPollInterval  = 250 * time.Millisecond
+)
 
 func (d *Driver) openLink(step *flow.OpenLinkStep) *core.CommandResult {
 	link := step.Link
@@ -1947,6 +2278,22 @@ func (d *Driver) addMedia(step *flow.AddMediaStep) *core.CommandResult {
 	// old MEDIA_SCANNER_SCAN_FILE broadcast is deprecated and doesn't register
 	// media for the modern photo picker.
 	for _, file := range step.Files {
+		// Documents are not MediaStore photos or videos — the agent's insert
+		// targets those collections — so they go over adb to Downloads, where
+		// the system file picker lists them from disk (#167).
+		if core.IsDocumentMedia(file) {
+			pusher, ok := d.device.(core.AndroidFilePusher)
+			if !ok {
+				return errorResult(fmt.Errorf("device does not support file push"), "addMedia with documents requires adb push support")
+			}
+			if _, err := os.Stat(file); err != nil {
+				return errorResult(err, fmt.Sprintf("Media file not found: %s", file))
+			}
+			if _, err := core.PushAndroidDocument(pusher, file); err != nil {
+				return errorResult(err, fmt.Sprintf("Failed to add document %s: %v", filepath.Base(file), err))
+			}
+			continue
+		}
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return errorResult(err, fmt.Sprintf("Failed to read media file %s: %v", file, err))
@@ -2015,7 +2362,11 @@ func (d *Driver) stopRecording(_ *flow.StopRecordingStep) *core.CommandResult {
 		logger.Warn("failed to stop screenrecord process: %v", err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	// screenrecord writes the MP4 index as it exits. A fixed sleep was long
+	// enough on short clips and not on long ones, and a file read before the
+	// index lands is unplayable — the same race --record already guards
+	// against by waiting for the process, so do that here too.
+	core.WaitForProcessExit(d.device.Shell, "screenrecord", 5*time.Second, 200*time.Millisecond)
 
 	return successResult("Stopped recording", nil)
 }
@@ -2073,6 +2424,13 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 				_, info, err := d.findElementOnce(*step.Visible)
 				if err == nil && info != nil {
 					return successResult("Element is now visible", info)
+				}
+				// Hosted WebView content (card-field values, order confirmation)
+				// isn't in the a11y tree — read it directly over CDP.
+				if os.Getenv("MAESTRO_CDP_IFRAME_FILL") != "" && d.webView != nil && d.webView.isConnected() {
+					if p := webTextPattern(*step.Visible); p != "" && d.webView.webViewMatchesText(p) {
+						return successResult("Element is now visible (webview text)", nil)
+					}
 				}
 			} else {
 				_, info, err := d.findElementOnce(*step.NotVisible)
@@ -2430,4 +2788,74 @@ func (d *Driver) applyDarkMode(enabled bool) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Failed to set dark mode: %v", err))
 	}
 	return successResult(fmt.Sprintf("Set %s mode", core.DarkModeStateName(enabled)), nil)
+}
+
+// documentsUIPackages are the system file picker's package names: AOSP's and
+// the Google-signed build that ships on Pixels.
+var documentsUIPackages = []string{"com.android.documentsui", "com.google.android.documentsui"}
+
+// fileNameLike matches a selector that ends in a short extension, the shape
+// of a row in the file picker ("contract.pdf", "config.yaml").
+var fileNameLike = regexp.MustCompile(`\.[A-Za-z0-9]{0,4}[A-Za-z][A-Za-z0-9]{0,4}$`)
+
+func looksLikeFileName(text string) bool {
+	return text != "" && !strings.ContainsAny(text, " /") && fileNameLike.MatchString(text)
+}
+
+// isDocumentsUIForeground reports whether the system file picker owns the
+// resumed activity. One dumpsys call, ~120ms; callers gate it.
+func (d *Driver) isDocumentsUIForeground() bool {
+	if d.device == nil {
+		return false
+	}
+	out, err := d.device.Shell("dumpsys activity activities | grep topResumedActivity")
+	if err != nil || out == "" {
+		return false
+	}
+	for _, pkg := range documentsUIPackages {
+		if strings.Contains(out, pkg) {
+			return true
+		}
+	}
+	return false
+}
+
+// tapViaInputTap finds the element through the agent without clicking it and
+// taps its centre with `input tap`, the path the file picker accepts.
+func (d *Driver) tapViaInputTap(ctx context.Context, step *flow.TapOnStep, strategies []LocatorStrategy) *core.CommandResult {
+	var lastErr error
+	for {
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return errorResult(fmt.Errorf("%s: %w", ctx.Err(), lastErr), fmt.Sprintf("Element not found: %v", lastErr))
+			}
+			return errorResult(ctx.Err(), fmt.Sprintf("Element not found: %v", ctx.Err()))
+		default:
+		}
+		for _, s := range strategies {
+			elem, err := d.client.FindElement(s.Strategy, s.Value)
+			if err != nil || elem == nil {
+				lastErr = err
+				continue
+			}
+			rect, err := elem.Rect()
+			if err != nil || rect.Width <= 0 || rect.Height <= 0 {
+				lastErr = fmt.Errorf("element rect unavailable")
+				continue
+			}
+			cx, cy := rect.X+rect.Width/2, rect.Y+rect.Height/2
+			d.recordTap(step.Selector)
+			if _, err := d.device.Shell(fmt.Sprintf("input tap %d %d", cx, cy)); err != nil {
+				return errorResult(err, fmt.Sprintf("input tap failed: %v", err))
+			}
+			info := &core.ElementInfo{Visible: true, Enabled: true,
+				Bounds: core.Bounds{X: rect.X, Y: rect.Y, Width: rect.Width, Height: rect.Height}}
+			if t, err := elem.Text(); err == nil {
+				info.Text = t
+			}
+			return successResult(fmt.Sprintf("Tapped %s via input tap (system file picker)", step.Selector.Describe()), info)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }

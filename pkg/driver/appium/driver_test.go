@@ -3,6 +3,7 @@ package appium
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2555,6 +2556,58 @@ func TestSwipeWithSelectorAnchorsOnElement(t *testing.T) {
 	}
 }
 
+// An element-relative `point:` moves where the swipe starts (upstream #3470);
+// it was parsed into the selector and ignored on this driver.
+func TestSwipeWithSelectorPointStartsAtPoint(t *testing.T) {
+	var actionsBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/actions") && r.Method == "POST":
+			body, _ := io.ReadAll(r.Body)
+			actionsBody = string(body)
+			writeJSON(w, map[string]interface{}{"value": nil})
+		case strings.HasSuffix(path, "/element") && r.Method == "POST":
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{
+					"element-6066-11e4-a52e-4f735466cecf": "elem-swipe",
+				},
+			})
+		case strings.Contains(path, "/rect"):
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"x": 100.0, "y": 200.0, "width": 300.0, "height": 80.0},
+			})
+		case strings.Contains(path, "/text"):
+			writeJSON(w, map[string]interface{}{"value": "Slider"})
+		case strings.Contains(path, "/displayed"), strings.Contains(path, "/enabled"):
+			writeJSON(w, map[string]interface{}{"value": true})
+		default:
+			writeJSON(w, map[string]interface{}{"value": nil})
+		}
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	sel := flow.Selector{ID: "slider", Point: "50%, 85%"}
+	step := &flow.SwipeStep{Direction: "left", Selector: &sel, Duration: 800}
+	result := driver.swipe(step)
+
+	if !result.Success {
+		t.Fatalf("Expected success, got: %s", result.Message)
+	}
+	// Element bounds x=100,y=200,w=300,h=80: the point is (250, 268); the
+	// swipe starts there and still travels the element's own width leftwards.
+	for _, want := range []string{`"x":250`, `"y":268`, `"duration":800`} {
+		if !strings.Contains(actionsBody, want) {
+			t.Errorf("actions payload missing %s: %s", want, actionsBody)
+		}
+	}
+	if strings.Contains(actionsBody, `"x":370`) {
+		t.Errorf("swipe should not start at the element's 90%% edge when a point is given: %s", actionsBody)
+	}
+}
+
 // --- #122: Android inputText must reach WebView DOM inputs ---
 
 // TestInputText_AndroidTypesIntoActiveElement verifies the Android path
@@ -2763,19 +2816,22 @@ func TestInputTextAndroidStillUsesActions(t *testing.T) {
 func TestAppiumScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 	t.Parallel()
 	scrollCount := 0
+	captures := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 
 		if strings.HasSuffix(path, "/source") {
-			// Element never found
+			// Element never found; one row drifts on every capture so the
+			// list reads as still moving and maxScrolls stays the limit.
+			captures++
 			writeJSON(w, map[string]interface{}{
-				"value": `<?xml version="1.0" encoding="UTF-8"?>
+				"value": fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <hierarchy rotation="0">
   <android.widget.FrameLayout bounds="[0,0][1080,2340]">
-    <android.widget.TextView text="Other" bounds="[100,100][300,150]"/>
+    <android.widget.TextView text="Other" bounds="[100,%d][300,%d]"/>
   </android.widget.FrameLayout>
-</hierarchy>`,
+</hierarchy>`, 100+captures, 150+captures),
 			})
 			return
 		}
@@ -2898,4 +2954,52 @@ func TestAccessibilityLabelOf(t *testing.T) {
 			t.Errorf("made %d requests, want 0", calls)
 		}
 	})
+}
+
+func TestAppiumScrollUntilVisibleStopsWhenScreenStopsMoving(t *testing.T) {
+	// The same source on every read: a list at its end. Two scrolls that
+	// change nothing are proof enough — the loop must not spend the other 18.
+	scrollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/source"):
+			writeJSON(w, map[string]interface{}{
+				"value": `<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <android.widget.FrameLayout bounds="[0,0][1080,2340]">
+    <android.widget.TextView text="Last row" bounds="[100,2200][300,2250]"/>
+  </android.widget.FrameLayout>
+</hierarchy>`,
+			})
+		case strings.Contains(path, "/actions") && r.Method == "POST":
+			scrollCount++
+			writeJSON(w, map[string]interface{}{"value": nil})
+		case strings.Contains(path, "/window/rect"):
+			writeJSON(w, map[string]interface{}{
+				"value": map[string]interface{}{"width": 1080.0, "height": 2340.0, "x": 0.0, "y": 0.0},
+			})
+		default:
+			writeJSON(w, map[string]interface{}{"value": nil})
+		}
+	}))
+	defer server.Close()
+	driver := createTestAppiumDriver(server)
+
+	result := driver.scrollUntilVisible(&flow.ScrollUntilVisibleStep{
+		Element:   flow.Selector{Text: "NonExistent"},
+		Direction: "down",
+		BaseStep:  flow.BaseStep{TimeoutMs: 60000},
+	})
+
+	if result.Success {
+		t.Fatal("expected failure when the element is not in the list")
+	}
+	if scrollCount != 2 {
+		t.Errorf("expected 2 scrolls before the no-progress stop, got %d", scrollCount)
+	}
+	if !strings.Contains(result.Message, "made no progress") {
+		t.Errorf("message should name the reason, got %q", result.Message)
+	}
 }

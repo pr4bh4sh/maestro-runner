@@ -40,17 +40,7 @@ func (a *Adapter) FindElement(strategy, selector string) (*uiautomator2.Element,
 		return nil, fmt.Errorf("parse findElement result: %w", err)
 	}
 
-	elem := uiautomator2.NewCachedElement(
-		result.ElementID,
-		result.Text,
-		uiautomator2.ElementRect{
-			X:      result.Bounds.X,
-			Y:      result.Bounds.Y,
-			Width:  result.Bounds.Width,
-			Height: result.Bounds.Height,
-		},
-	)
-	a.wireElementActions(elem, result.ElementID)
+	elem := a.newElement(result)
 	return elem, nil
 }
 
@@ -66,6 +56,22 @@ func (a *Adapter) ActiveElement() (*uiautomator2.Element, error) {
 		return nil, fmt.Errorf("parse activeElement result: %w", err)
 	}
 
+	elem := a.newElement(result)
+	return elem, nil
+}
+
+// SendKeysToActive finds the active element and sends text in a single RPC.
+func (a *Adapter) SendKeysToActive(text string) error {
+	_, err := a.client.Call("Input.sendKeysToActive", map[string]interface{}{
+		"text": text,
+	})
+	return err
+}
+
+// newElement builds a cached element from a find result, with its actions
+// routed through the WebSocket driver. Text and bounds come from the find
+// itself, so reading them right after costs no round trip.
+func (a *Adapter) newElement(result ElementResult) *uiautomator2.Element {
 	elem := uiautomator2.NewCachedElement(
 		result.ElementID,
 		result.Text,
@@ -77,15 +83,10 @@ func (a *Adapter) ActiveElement() (*uiautomator2.Element, error) {
 		},
 	)
 	a.wireElementActions(elem, result.ElementID)
-	return elem, nil
-}
-
-// SendKeysToActive finds the active element and sends text in a single RPC.
-func (a *Adapter) SendKeysToActive(text string) error {
-	_, err := a.client.Call("Input.sendKeysToActive", map[string]interface{}{
-		"text": text,
+	elem.SetTextFunc(func() (string, error) {
+		return a.focusedFieldText(result.ElementID, result.Bounds)
 	})
-	return err
+	return elem
 }
 
 // wireElementActions sets Click/Clear/SendKeys callbacks on a cached element
@@ -110,6 +111,39 @@ func (a *Adapter) wireElementActions(elem *uiautomator2.Element, elementID strin
 		})
 		return err
 	})
+}
+
+// focusedFieldText reads the current text of the field a find returned, after
+// something has written to it.
+//
+// The agent has no read-by-elementId call, and re-running the original find is
+// unsafe: selectors often match on the very text or hint that typing just
+// replaced, so a re-find misses or lands on another element. The field being
+// typed into is, in practice, the one holding input focus — a flow taps it
+// first, and key events only reach the focused view — so UI.activeElement
+// returns a fresh reading of it in one cheap call.
+//
+// Focus alone does not prove identity, so the focused node must sit where the
+// found element sat. Height is left out of the comparison because a multi-line
+// field grows as text wraps. When focus is elsewhere the read fails: the caller
+// then treats the field as unreadable instead of trusting a stale value.
+//
+// The reading has the platform's quirks, which callers already allow for: an
+// empty EditText reports its hint, and a password field reports bullets.
+func (a *Adapter) focusedFieldText(elementID string, at BoundsResult) (string, error) {
+	resp, err := a.client.Call("UI.activeElement", nil)
+	if err != nil {
+		return "", fmt.Errorf("re-read text of %s: %w", elementID, err)
+	}
+	var focused ElementResult
+	if err := json.Unmarshal(resp.Result, &focused); err != nil {
+		return "", fmt.Errorf("parse activeElement result: %w", err)
+	}
+	b := focused.Bounds
+	if b.X != at.X || b.Y != at.Y || b.Width != at.Width {
+		return "", fmt.Errorf("re-read text of %s: focused element is a different view", elementID)
+	}
+	return focused.Text, nil
 }
 
 // FindFirstOf tries multiple (strategy, selector) pairs in a single RPC,
@@ -141,47 +175,59 @@ func (a *Adapter) FindFirstOf(strategiesAndSelectors []string) (*uiautomator2.El
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		return nil, fmt.Errorf("parse findFirstOf result: %w", err)
 	}
-	elem := uiautomator2.NewCachedElement(
-		result.ElementID,
-		result.Text,
-		uiautomator2.ElementRect{
-			X:      result.Bounds.X,
-			Y:      result.Bounds.Y,
-			Width:  result.Bounds.Width,
-			Height: result.Bounds.Height,
-		},
-	)
-	a.wireElementActions(elem, result.ElementID)
+	elem := a.newElement(result)
 	return elem, nil
 }
 
 // FindAndClick finds an element and clicks it in a single RPC call.
 func (a *Adapter) FindAndClick(strategy, selector string) (*uiautomator2.Element, error) {
-	resp, err := a.client.Call("Gesture.findAndClick", map[string]interface{}{
+	elem, _, err := a.FindAndClickGuarded(strategy, selector, 0, 0)
+	return elem, err
+}
+
+// FindAndClickGuarded is FindAndClick with the screen dimensions the agent
+// needs to reject an untappable rect BEFORE injecting the tap (#162).
+//
+// The second return reports whether the tap actually fired. An agent older
+// than the guard does not send the field and has already clicked, so a missing
+// value reads as true and behaviour is unchanged. Passing 0 for either
+// dimension disables the check agent-side.
+func (a *Adapter) FindAndClickGuarded(strategy, selector string, screenW, screenH int) (*uiautomator2.Element, bool, error) {
+	elem, clicked, _, err := a.FindAndClickChecked(strategy, selector, screenW, screenH, false)
+	return elem, clicked, err
+}
+
+// FindAndClickChecked additionally asks the agent to hit-test the tap point
+// when hitTest is set, and returns what blocked the tap when one did.
+//
+// Geometry cannot tell you a tap will reach its target: a keyboard, scrim or
+// dialog on top swallows it. An agent that predates the check ignores the flag
+// and behaves as before, so the reason is simply empty.
+func (a *Adapter) FindAndClickChecked(strategy, selector string, screenW, screenH int, hitTest bool) (*uiautomator2.Element, bool, string, error) {
+	params := map[string]interface{}{
 		"strategy": strategy,
 		"selector": selector,
-	})
+	}
+	if screenW > 0 && screenH > 0 {
+		params["screenWidth"] = screenW
+		params["screenHeight"] = screenH
+	}
+	if hitTest {
+		params["hitTest"] = true
+	}
+	resp, err := a.client.Call("Gesture.findAndClick", params)
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
 
 	var result ElementResult
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		return nil, fmt.Errorf("parse findAndClick result: %w", err)
+		return nil, false, "", fmt.Errorf("parse findAndClick result: %w", err)
 	}
 
-	elem := uiautomator2.NewCachedElement(
-		result.ElementID,
-		result.Text,
-		uiautomator2.ElementRect{
-			X:      result.Bounds.X,
-			Y:      result.Bounds.Y,
-			Width:  result.Bounds.Width,
-			Height: result.Bounds.Height,
-		},
-	)
-	a.wireElementActions(elem, result.ElementID)
-	return elem, nil
+	elem := a.newElement(result)
+	clicked := result.Clicked == nil || *result.Clicked
+	return elem, clicked, result.BlockedBy, nil
 }
 
 // --- Timeouts ---

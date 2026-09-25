@@ -329,7 +329,7 @@ func TestScrollByAdb_Coordinates(t *testing.T) {
 			if direction == "unknown_direction_defaults_to_down" {
 				direction = "diagonal"
 			}
-			if err := driver.scrollByAdb(direction, W, H, 0.3); err != nil {
+			if err := driver.scrollByAdb(direction, W, H, 0.3, scrollDurationMs); err != nil {
 				t.Fatalf("scrollByAdb: %v", err)
 			}
 			if len(shell.commands) != 1 || shell.commands[0] != c.wantCmd {
@@ -341,7 +341,7 @@ func TestScrollByAdb_Coordinates(t *testing.T) {
 
 func TestScrollByAdb_ShellError(t *testing.T) {
 	driver := &Driver{device: &mockShell{err: fmt.Errorf("permission denied")}}
-	if err := driver.scrollByAdb("down", 1080, 2400, 0.3); err == nil {
+	if err := driver.scrollByAdb("down", 1080, 2400, 0.3, scrollDurationMs); err == nil {
 		t.Error("expected error from shell")
 	}
 }
@@ -495,8 +495,10 @@ func TestSetOrientation_ExtendedViaShell(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("LANDSCAPE_LEFT via shell failed: %v", res.Error)
 	}
-	if len(shell.commands) != 2 {
-		t.Errorf("expected 2 shell calls (accelerometer + rotation), got %d: %v", len(shell.commands), shell.commands)
+	// accelerometer + rotation + one look at the display (empty mock dumpsys
+	// is unobservable, so the settle wait stops after a single read)
+	if len(shell.commands) != 3 {
+		t.Errorf("expected 3 shell calls (accelerometer + rotation + dumpsys display), got %d: %v", len(shell.commands), shell.commands)
 	}
 	if !strings.Contains(shell.commands[1], "user_rotation 1") {
 		t.Errorf("expected user_rotation 1 (landscape_left), got %q", shell.commands[1])
@@ -1794,6 +1796,10 @@ type scriptedClient struct {
 	findElementErr    error
 	findElementCalls  int
 
+	findAndClickGuardW, findAndClickGuardH int
+	findAndClickHitTest                    bool
+	findAndClickBlockedBy                  string
+	findAndClickSkip                       bool
 	// findAndClickReturn is returned for any FindAndClick call.
 	findAndClickReturn *uiautomator2.Element
 	findAndClickErr    error
@@ -1813,6 +1819,16 @@ func (s *scriptedClient) FindElement(strategy, selector string) (*uiautomator2.E
 func (s *scriptedClient) FindAndClick(strategy, selector string) (*uiautomator2.Element, error) {
 	s.findAndClickCalls++
 	return s.findAndClickReturn, s.findAndClickErr
+}
+func (s *scriptedClient) FindAndClickChecked(strategy, selector string, screenW, screenH int, hitTest bool) (*uiautomator2.Element, bool, string, error) {
+	elem, clicked, err := s.FindAndClickGuarded(strategy, selector, screenW, screenH)
+	s.findAndClickHitTest = hitTest
+	return elem, clicked, s.findAndClickBlockedBy, err
+}
+func (s *scriptedClient) FindAndClickGuarded(strategy, selector string, screenW, screenH int) (*uiautomator2.Element, bool, error) {
+	s.findAndClickCalls++
+	s.findAndClickGuardW, s.findAndClickGuardH = screenW, screenH
+	return s.findAndClickReturn, !s.findAndClickSkip, s.findAndClickErr
 }
 func (s *scriptedClient) ActiveElement() (*uiautomator2.Element, error) {
 	return s.activeElementReturn, s.activeElementErr
@@ -3174,5 +3190,267 @@ func TestSwipeWithAbsoluteCoords_FallsBackToAdb(t *testing.T) {
 	}
 	if len(shell.commands) != 1 || shell.commands[0] != "input swipe 1 2 3 4 300" {
 		t.Errorf("expected the adb fallback with the default duration, got %v", shell.commands)
+	}
+}
+
+// =============================================================================
+// #162 — the rect guard must run BEFORE the tap is injected
+// =============================================================================
+
+// TestTapOn_UntappableRect_AgentSkipsTap covers the reported failure: a
+// ScrollView still settling reports a clipped rect (top > bottom, so a
+// negative height) whose centre lands in the bottom tab bar. The tap used to
+// be injected first and validated afterwards, so the "rejected" tap switched
+// tabs and the flow desynced. The agent now declines to click and the driver
+// keeps polling.
+func TestTapOn_UntappableRect_AgentSkipsTap(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	// The clipped rect from the report: bounds=[42,2134][1038,2083].
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "", uiautomator2.ElementRect{X: 42, Y: 2134, Width: 996, Height: -51},
+	)
+	client.findAndClickSkip = true // agent reports clicked=false
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{
+		BaseStep: flow.BaseStep{TimeoutMs: 300},
+		Selector: flow.Selector{ID: "manage-portfolio-button"},
+	})
+	if res.Success {
+		t.Fatal("expected tapOn to fail rather than report success for an untappable rect")
+	}
+	if client.findAndClickCalls < 1 {
+		t.Errorf("expected the driver to keep polling, got %d calls", client.findAndClickCalls)
+	}
+}
+
+// TestTapOn_PassesScreenSizeToAgent pins that the dimensions actually reach
+// the agent. Without them the agent cannot validate and clicks unconditionally,
+// which is the pre-fix behaviour — so a silent regression here would restore
+// the bug while every other test still passed.
+func TestTapOn_PassesScreenSizeToAgent(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "Sign In", uiautomator2.ElementRect{X: 10, Y: 20, Width: 100, Height: 50},
+	)
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{Selector: flow.Selector{Text: "Sign In"}})
+	if !res.Success {
+		t.Fatalf("tapOn: %v", res.Error)
+	}
+	if client.findAndClickGuardW <= 0 || client.findAndClickGuardH <= 0 {
+		t.Errorf("expected a screen size to be passed to the agent, got %dx%d",
+			client.findAndClickGuardW, client.findAndClickGuardH)
+	}
+}
+
+// =============================================================================
+// #162 — the coordinate paths must not inject either
+// =============================================================================
+
+func TestTapPointInjectable(t *testing.T) {
+	const sw, sh = 1080, 2400
+	tests := []struct {
+		name string
+		b    core.Bounds
+		x, y int
+		want bool
+	}{
+		{"ordinary on-screen element", core.Bounds{X: 42, Y: 100, Width: 996, Height: 154}, 540, 177, true},
+		// The reported rect: bounds=[42,2134][1038,2083]. Its centre (540,2109)
+		// is ON screen, so an on-screen-only check would wave it through — the
+		// negative height is the only thing that gives it away.
+		{"clipped rect with on-screen centre", core.Bounds{X: 42, Y: 2134, Width: 996, Height: -51}, 540, 2109, false},
+		{"zero width", core.Bounds{X: 0, Y: 0, Width: 0, Height: 100}, 0, 50, false},
+		{"well-formed but scrolled below the fold", core.Bounds{X: 42, Y: 2500, Width: 996, Height: 154}, 540, 2577, false},
+		{"negative point", core.Bounds{X: -100, Y: 100, Width: 50, Height: 50}, -75, 125, false},
+		{"bottom edge is on screen", core.Bounds{X: 0, Y: 2340, Width: 100, Height: 58}, 50, 2369, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tapPointInjectable(tt.b, tt.x, tt.y, sw, sh); got != tt.want {
+				t.Errorf("tapPointInjectable(%+v, %d, %d) = %v, want %v", tt.b, tt.x, tt.y, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDoubleTapAndLongPress_RejectClippedRect covers the sibling commands.
+// They resolve the point host-side and call the coordinate RPCs, so the
+// agent-side guard never sees them — a clipped rect used to be double-tapped
+// or long-pressed at a point outside the element.
+func TestDoubleTapAndLongPress_RejectClippedRect(t *testing.T) {
+	clipped := uiautomator2.ElementRect{X: 42, Y: 2134, Width: 996, Height: -51}
+
+	t.Run("doubleTapOn", func(t *testing.T) {
+		client := &scriptedClient{trackingClient: newTrackingClient()}
+		client.findElementReturn = uiautomator2.NewCachedElement("elem", "Target", clipped)
+		driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+		res := driver.doubleTapOn(&flow.DoubleTapOnStep{Selector: flow.Selector{ID: "target"}})
+		if res.Success {
+			t.Error("expected doubleTapOn to refuse an untappable rect")
+		}
+	})
+
+	t.Run("longPressOn", func(t *testing.T) {
+		client := &scriptedClient{trackingClient: newTrackingClient()}
+		client.findElementReturn = uiautomator2.NewCachedElement("elem", "Target", clipped)
+		driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+		res := driver.longPressOn(&flow.LongPressOnStep{Selector: flow.Selector{ID: "target"}})
+		if res.Success {
+			t.Error("expected longPressOn to refuse an untappable rect")
+		}
+	})
+}
+
+// TestTapOn_BlockedByOverlay_ReportsCause pins that when the hit test refuses
+// a tap, the failure names what covered it. Diagnosis is the point: "element
+// not tappable" sends you looking at the element, when the real problem is the
+// keyboard on top of it.
+func TestTapOn_BlockedByOverlay_ReportsCause(t *testing.T) {
+	client := &scriptedClient{trackingClient: newTrackingClient()}
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"elem", "Submit", uiautomator2.ElementRect{X: 100, Y: 1800, Width: 300, Height: 120},
+	)
+	client.findAndClickSkip = true
+	client.findAndClickBlockedBy = "keyboard window"
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, &mockShell{})
+
+	res := driver.tapOn(&flow.TapOnStep{
+		BaseStep: flow.BaseStep{TimeoutMs: 300},
+		Selector: flow.Selector{Text: "Submit"},
+	})
+	if res.Success {
+		t.Fatal("expected tapOn to fail when the point is covered")
+	}
+	if !strings.Contains(res.Error.Error(), "keyboard window") {
+		t.Errorf("expected the failure to name the blocker, got %q", res.Error.Error())
+	}
+	if !client.findAndClickHitTest {
+		t.Error("expected the hit test to be requested by default")
+	}
+}
+
+// pushShell is a mockShell that also accepts adb pushes.
+type pushShell struct {
+	mockShell
+	pushes [][2]string
+}
+
+func (p *pushShell) Push(local, remote string) error {
+	p.pushes = append(p.pushes, [2]string{local, remote})
+	return nil
+}
+
+// A document bypasses the agent's MediaStore insert — that targets the photo
+// and video collections — and goes over adb to Downloads instead (#167).
+func TestAddMediaDocumentPushesToDownloads(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "report.pdf")
+	jpg := filepath.Join(dir, "photo.jpg")
+	for _, f := range []string{pdf, jpg} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := newTrackingClient()
+	shell := &pushShell{}
+	driver := New(client, &core.PlatformInfo{}, shell)
+
+	res := driver.addMedia(&flow.AddMediaStep{Files: []string{pdf, jpg}})
+	if !res.Success {
+		t.Fatalf("addMedia failed: %v", res.Error)
+	}
+	if len(shell.pushes) != 1 || shell.pushes[0][1] != "/sdcard/Download/report.pdf" {
+		t.Errorf("document push = %v, want /sdcard/Download/report.pdf", shell.pushes)
+	}
+	if got := client.addMediaNames; len(got) != 1 || got[0] != "photo.jpg" {
+		t.Errorf("only the photo should reach the agent, got %v", got)
+	}
+
+	// A shell without push support says so rather than silently skipping.
+	res = New(newTrackingClient(), &core.PlatformInfo{}, &mockShell{}).addMedia(&flow.AddMediaStep{Files: []string{pdf}})
+	if res.Success {
+		t.Error("a device without adb push cannot add a document and should fail")
+	}
+}
+
+// routeShell answers dumpsys with a DocumentsUI foreground and records the rest.
+type routeShell struct {
+	commands []string
+}
+
+func (r *routeShell) Shell(cmd string) (string, error) {
+	r.commands = append(r.commands, cmd)
+	if strings.Contains(cmd, "topResumedActivity") {
+		return "  topResumedActivity=ActivityRecord{abc u0 com.google.android.documentsui/com.android.documentsui.picker.PickActivity t42}", nil
+	}
+	return "", nil
+}
+
+// The system file picker ignores the agent's injected tap (#87, #167). When a
+// file-name-like selector is tapped with DocumentsUI in the foreground, the
+// element is found without clicking and tapped through `input tap`.
+func TestTapOn_FilePickerRowGoesThroughInputTap(t *testing.T) {
+	client := &scriptedClient{}
+	client.findElementReturn = uiautomator2.NewCachedElement(
+		"row", "contract.pdf", uiautomator2.ElementRect{X: 0, Y: 1000, Width: 1080, Height: 200},
+	)
+	shell := &routeShell{}
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, shell)
+
+	res := driver.tapOn(&flow.TapOnStep{Selector: flow.Selector{Text: "contract.pdf"}})
+	if !res.Success {
+		t.Fatalf("expected success, got %v", res.Error)
+	}
+	if client.findAndClickCalls != 0 {
+		t.Errorf("the agent's click must not be used in the picker, got %d FindAndClick calls", client.findAndClickCalls)
+	}
+	var tapped bool
+	for _, c := range shell.commands {
+		if c == "input tap 540 1100" {
+			tapped = true
+		}
+	}
+	if !tapped {
+		t.Errorf("expected `input tap 540 1100`, got %v", shell.commands)
+	}
+}
+
+// A selector that does not read like a file name never pays for the
+// foreground check, and a non-picker foreground keeps the agent path.
+func TestTapOn_NonFileNameSkipsPickerCheck(t *testing.T) {
+	client := &scriptedClient{}
+	client.findAndClickReturn = uiautomator2.NewCachedElement(
+		"btn", "Save", uiautomator2.ElementRect{X: 0, Y: 1000, Width: 200, Height: 100},
+	)
+	shell := &routeShell{}
+	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 2400}, shell)
+
+	res := driver.tapOn(&flow.TapOnStep{Selector: flow.Selector{Text: "Save"}})
+	if !res.Success {
+		t.Fatalf("expected success, got %v", res.Error)
+	}
+	for _, c := range shell.commands {
+		if strings.Contains(c, "topResumedActivity") {
+			t.Errorf("foreground check must not run for %q", "Save")
+		}
+	}
+	if client.findAndClickCalls == 0 {
+		t.Error("expected the normal agent click path")
+	}
+}
+
+func TestLooksLikeFileName(t *testing.T) {
+	for _, yes := range []string{"contract.pdf", "config.yaml", "IMG_0001.JPG", "notes.txt"} {
+		if !looksLikeFileName(yes) {
+			t.Errorf("%q should look like a file name", yes)
+		}
+	}
+	for _, no := range []string{"Save", "Add to cart", "v1.2.3.4.5.6", "", "Downloads", "path/to.pdf", "Mr. Smith"} {
+		if looksLikeFileName(no) {
+			t.Errorf("%q should not look like a file name", no)
+		}
 	}
 }

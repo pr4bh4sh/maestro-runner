@@ -48,6 +48,7 @@ type UIA2Client interface {
 	HideKeyboard() error
 	PressKeyCode(keyCode int) error
 	SendKeyActions(text string) error
+	SendKeyActionsWithDelay(text string, perKeyDelayMs int) error
 
 	// Device state
 	Screenshot() ([]byte, error)
@@ -81,6 +82,11 @@ type Driver struct {
 	// Keyboard auto-dismiss: set after inputText/inputRandom, checked on next tap/assert
 	lastStepWasInput bool
 
+	// typingDelayMs is the pause inserted after each character in keyPress-mode
+	// inputText (0 = type as fast as the device accepts). Set from an explicit
+	// --typing-frequency; unset it stays 0 so normal typing is not slowed.
+	typingDelayMs int
+
 	// currentAppID is the package launched by the last launchApp, used to
 	// detect a mid-flow crash/termination so a failing step reports "app
 	// crashed" instead of a generic "element not found".
@@ -111,6 +117,19 @@ func (d *Driver) screenSize() (int, int, error) {
 // SetContext sets the parent context for element-finding operations.
 func (d *Driver) SetContext(ctx context.Context) {
 	d.ctx = ctx
+}
+
+// SetTypingFrequency implements core.TypingFrequencyConfigurer. freq is in
+// keys/sec; it maps to a per-character pause (1000/freq ms) applied in
+// keyPress-mode inputText so apps that drop fast key events still receive every
+// keystroke. freq <= 0 clears the delay (type as fast as the device accepts).
+func (d *Driver) SetTypingFrequency(freq int) error {
+	if freq <= 0 {
+		d.typingDelayMs = 0
+		return nil
+	}
+	d.typingDelayMs = 1000 / freq
+	return nil
 }
 
 // parentContext returns the parent context for element-finding operations.
@@ -271,8 +290,8 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	default:
 		result = &core.CommandResult{
 			Success: false,
-			Error:   fmt.Errorf("unknown step type: %T", step),
-			Message: fmt.Sprintf("Step type '%T' is not supported", step),
+			Error:   fmt.Errorf("unknown step type: %s", step.Type()),
+			Message: fmt.Sprintf("Step type '%s' is not supported", step.Type()),
 		}
 	}
 
@@ -464,7 +483,7 @@ func buildClickableOnlyStrategies(sel flow.Selector) ([]LocatorStrategy, error) 
 
 	if sel.Text != "" {
 		if looksLikeRegex(sel.Text) {
-			pattern := "(?is)" + escapeUIAutomatorString(sel.Text)
+			pattern := "(?s)" + escapeUIAutomatorString(sel.Text)
 			strategies = append(strategies, LocatorStrategy{
 				Strategy: uiautomator2.StrategyUIAutomator,
 				Value:    `new UiSelector().textMatches("` + pattern + `").clickable(true)` + stateFilters,
@@ -1186,7 +1205,7 @@ func buildSelectorsWithOptions(sel flow.Selector, timeoutMs int, preferClickable
 	var textTiers [][]string
 	if sel.Text != "" {
 		if looksLikeRegex(sel.Text) {
-			pattern := "(?is)" + escapeUIAutomatorString(sel.Text)
+			pattern := "(?s)" + escapeUIAutomatorString(sel.Text)
 			textTiers = [][]string{
 				{`.textMatches("` + pattern + `")`, `.descriptionMatches("` + pattern + `")`},
 			}

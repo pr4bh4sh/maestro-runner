@@ -126,6 +126,7 @@ const (
 	StepSleep                 StepType = "sleep"
 	StepPressKey              StepType = "pressKey"
 	StepWaitForAnimationToEnd StepType = "waitForAnimationToEnd"
+	StepWait                  StepType = "wait"
 	StepDefineVariables       StepType = "defineVariables"
 )
 
@@ -296,12 +297,16 @@ type ScrollStep struct {
 	// /appium/gestures/scroll for the uiautomator2 driver, RPC MotionEvent
 	// injection for the devicelab driver). Ignored on iOS/web.
 	Engine string `yaml:"engine" json:"engine,omitempty"`
+	// Speed is a Maestro speed (1-100, default 40), inverted into a swipe
+	// duration by core.ScrollSpeedToDurationMs. scrollUntilVisible accepted
+	// this field long before scroll did, and neither honoured it (#165).
+	Speed int `yaml:"speed" json:"speed,omitempty"`
 }
 
 // ScrollUntilVisibleStep scrolls until element is visible.
 type ScrollUntilVisibleStep struct {
-	BaseStep              `yaml:",inline" json:",inline"`
-	Element               Selector `yaml:"element" json:"element"`
+	BaseStep `yaml:",inline" json:",inline"`
+	Element  Selector `yaml:"element" json:"element"`
 	// From restricts the scroll gesture to one container, for a screen with an
 	// inner list or a horizontal carousel that a full-width swipe would miss.
 	// Empty means scroll the screen, which is the usual case.
@@ -354,11 +359,37 @@ type DismissAlertStep struct {
 // ============================================
 
 // InputTextStep inputs text.
+//
+// Text and Selector.Text both bind the `text:` key (Selector is inlined), so
+// the map form populates both from one value. For inputText, `text:` is the
+// value to type and never a predicate — upstream Maestro accepts no selector
+// on this step at all — so UnmarshalYAML clears the selector copy. Left in
+// place, the typed value became a hint/text constraint on the target field
+// and any `inputText` naming an `id:` could not match (#166).
 type InputTextStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
 	Text     string   `yaml:"text" json:"text,omitempty"`
 	KeyPress bool     `yaml:"keyPress" json:"keyPress,omitempty"` // If true, simulate real key presses (Android native only)
 	Selector Selector `yaml:",inline" json:"selector,omitempty"`
+	// RawText is `text:` exactly as written in the flow, before variable
+	// expansion overwrites Text. Describe prints this form when it carried a
+	// variable, so a password passed through `${PASSWORD}` reaches the report,
+	// the console and the log as `${PASSWORD}` and not as its value.
+	RawText string `yaml:"-" json:"-"`
+}
+
+// UnmarshalYAML decodes InputTextStep and drops the `text:` value that the
+// inlined Selector picked up alongside Text. See the type comment.
+func (s *InputTextStep) UnmarshalYAML(node *yaml.Node) error {
+	type inputTextAlias InputTextStep
+	var a inputTextAlias
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	*s = InputTextStep(a)
+	s.Selector.Text = ""
+	s.RawText = s.Text
+	return nil
 }
 
 // InputRandomStep generates random input.
@@ -574,6 +605,11 @@ type SetAirplaneModeStep struct {
 	BaseStep   `yaml:",inline" json:",inline"`
 	Enabled    bool `yaml:"-" json:"enabled,omitempty"`
 	EnabledRaw any  `yaml:"enabled" json:"-"`
+	// ValueRaw is upstream Maestro's spelling of the map form:
+	// `{value: enabled, label: …, optional: …}`. It was ignored, so a flow
+	// written for Maestro decoded to Enabled=false without a word. The parser
+	// folds it into Enabled (or EnabledRaw when it carries a variable).
+	ValueRaw string `yaml:"value" json:"-"`
 }
 
 // ToggleAirplaneModeStep toggles airplane mode.
@@ -590,6 +626,11 @@ type SetDarkModeStep struct {
 	BaseStep   `yaml:",inline"`
 	Enabled    bool `yaml:"-"`
 	EnabledRaw any  `yaml:"enabled"`
+	// ValueRaw is upstream Maestro's spelling of the map form:
+	// `{value: enabled, label: …, optional: …}`. It was ignored, so a flow
+	// written for Maestro decoded to Enabled=false without a word. The parser
+	// folds it into Enabled (or EnabledRaw when it carries a variable).
+	ValueRaw string `yaml:"value"`
 }
 
 // ToggleDarkModeStep flips the current appearance.
@@ -656,8 +697,8 @@ type RetryStep struct {
 type RunFlowStep struct {
 	BaseStep  `yaml:",inline" json:",inline"`
 	File      string            `yaml:"file" json:"file,omitempty"`
-	Steps     []Step            `yaml:"-" json:"-"` // Inline steps (commands)
-	ElseFile  string            `yaml:"-" json:"elseFile,omitempty"` // Fallback flow file when `when` is false
+	Steps     []Step            `yaml:"-" json:"-"`                   // Inline steps (commands)
+	ElseFile  string            `yaml:"-" json:"elseFile,omitempty"`  // Fallback flow file when `when` is false
 	ElseSteps []Step            `yaml:"-" json:"elseSteps,omitempty"` // Inline fallback steps (else / elseCommands)
 	When      *Condition        `yaml:"when" json:"when,omitempty"`
 	Env       map[string]string `yaml:"env" json:"env,omitempty"`
@@ -987,6 +1028,22 @@ type WaitForAnimationToEndStep struct {
 	Threshold float64 `yaml:"threshold" json:"threshold,omitempty"`
 }
 
+// WaitStep pauses the flow for a fixed duration. This is a maestro-runner
+// extension: Maestro has no plain wait, only condition waits
+// (extendedWaitUntil, waitForAnimationToEnd), so a flow that uses it will not
+// parse on Maestro. The duration is in milliseconds, matching every other
+// timing field in a flow. Written either as a scalar (`- wait: 2000`) or a
+// mapping (`- wait: { duration: 2000 }`).
+type WaitStep struct {
+	BaseStep   `yaml:",inline"`
+	DurationMs int `yaml:"duration"`
+}
+
+// Describe returns a human-readable description of the wait step.
+func (s *WaitStep) Describe() string {
+	return fmt.Sprintf("wait: %dms", s.DurationMs)
+}
+
 // DefineVariablesStep defines variables.
 type DefineVariablesStep struct {
 	BaseStep `yaml:",inline" json:",inline"`
@@ -1038,6 +1095,13 @@ func (s *AssertNotVisibleStep) Describe() string {
 
 // Describe returns a human-readable description of the input text step.
 func (s *InputTextStep) Describe() string {
+	// A value that arrived through a variable is described by the variable.
+	// Expansion mutates Text in place, and a sub-flow's steps are described
+	// after that, so without this the expanded secret is what the report and
+	// console would show.
+	if strings.Contains(s.RawText, "${") {
+		return "inputText: \"" + s.RawText + "\""
+	}
 	return "inputText: \"" + s.Text + "\""
 }
 

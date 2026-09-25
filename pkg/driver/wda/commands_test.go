@@ -2,6 +2,7 @@ package wda
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -4509,6 +4510,7 @@ func TestToggleAirplaneModeTapFails(t *testing.T) {
 func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 	t.Parallel()
 	scrollCount := 0
+	captures := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
@@ -4519,12 +4521,15 @@ func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/source") {
-			// Element never found
+			// Element never found; one row drifts on every capture so the
+			// list reads as still moving and maxScrolls stays the limit.
+			captures++
 			jsonResponse(w, map[string]interface{}{
-				"value": `<AppiumAUT>
+				"value": fmt.Sprintf(`<AppiumAUT>
   <XCUIElementTypeApplication name="TestApp" enabled="true" visible="true" x="0" y="0" width="390" height="844">
+    <XCUIElementTypeStaticText name="Other" label="Other" enabled="true" visible="true" x="20" y="%d" width="200" height="40"/>
   </XCUIElementTypeApplication>
-</AppiumAUT>`,
+</AppiumAUT>`, 100+captures),
 			})
 			return
 		}
@@ -5186,5 +5191,104 @@ func TestInputTextFallsBackWhenElementRejectsSendKeys(t *testing.T) {
 	}
 	if !sentKeys {
 		t.Error("expected the text to be typed via the keyboard path")
+	}
+}
+
+// An element-relative `point:` on `swipe.from` moves where the swipe starts
+// (upstream #3470); it was parsed into the selector and ignored on this driver.
+func TestSwipeFromElementPointStartsAtPoint(t *testing.T) {
+	var fromX, fromY, toX float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.Contains(path, "/window/size"):
+			jsonResponse(w, map[string]interface{}{"value": map[string]interface{}{"width": 390.0, "height": 844.0}})
+		case strings.HasSuffix(path, "/source"):
+			jsonResponse(w, map[string]interface{}{"value": `<?xml version="1.0" encoding="UTF-8"?>
+<AppiumAUT>
+  <XCUIElementTypeApplication type="XCUIElementTypeApplication" name="TestApp" enabled="true" visible="true" x="0" y="0" width="390" height="844">
+    <XCUIElementTypeOther type="XCUIElementTypeOther" name="card" label="Card A" enabled="true" visible="true" x="20" y="200" width="350" height="400"/>
+  </XCUIElementTypeApplication>
+</AppiumAUT>`})
+		case strings.HasSuffix(path, "/element") && r.Method == "POST":
+			jsonResponse(w, map[string]interface{}{"value": map[string]interface{}{"error": "not found"}})
+		case strings.Contains(path, "/dragfromtoforduration"):
+			body, _ := io.ReadAll(r.Body)
+			var payload map[string]interface{}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("bad body: %v", err)
+			}
+			fromX, _ = payload["fromX"].(float64)
+			fromY, _ = payload["fromY"].(float64)
+			toX, _ = payload["toX"].(float64)
+			jsonResponse(w, map[string]interface{}{"status": 0})
+		default:
+			jsonResponse(w, map[string]interface{}{"status": 0})
+		}
+	}))
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	sel := &flow.Selector{Text: "Card A", Point: "50%, 85%"}
+	step := &flow.SwipeStep{BaseStep: flow.BaseStep{TimeoutMs: 1000}, Direction: "left", Selector: sel}
+	result := driver.swipe(step)
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.Message)
+	}
+	// Card x=20,y=200,w=350,h=400 → point (195, 540). The default from-element
+	// LEFT swipe would have started at 90% of the width (335, 400).
+	if fromX != 195 || fromY != 540 {
+		t.Errorf("swipe should start at the element-relative point (195, 540), got (%.0f, %.0f)", fromX, fromY)
+	}
+	if toX >= fromX {
+		t.Errorf("left swipe should move leftwards, got fromX=%.0f toX=%.0f", fromX, toX)
+	}
+}
+
+func TestScrollUntilVisibleStopsWhenScreenStopsMoving(t *testing.T) {
+	// The same source on every read: a list at its end. Two scrolls that
+	// change nothing are proof enough — the loop must not spend the other 18.
+	scrollCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		switch {
+		case strings.Contains(path, "/dragfromtoforduration"):
+			scrollCount++
+			jsonResponse(w, map[string]interface{}{"status": 0})
+		case strings.HasSuffix(path, "/source"):
+			jsonResponse(w, map[string]interface{}{
+				"value": `<AppiumAUT>
+  <XCUIElementTypeApplication name="TestApp" enabled="true" visible="true" x="0" y="0" width="390" height="844">
+    <XCUIElementTypeStaticText name="Last row" label="Last row" enabled="true" visible="true" x="20" y="780" width="200" height="40"/>
+  </XCUIElementTypeApplication>
+</AppiumAUT>`,
+			})
+		case strings.Contains(path, "/window/size"):
+			jsonResponse(w, map[string]interface{}{
+				"value": map[string]interface{}{"width": 390.0, "height": 844.0},
+			})
+		default:
+			jsonResponse(w, map[string]interface{}{"status": 0})
+		}
+	}))
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	result := driver.scrollUntilVisible(&flow.ScrollUntilVisibleStep{
+		Element:   flow.Selector{Text: "NonExistent"},
+		Direction: "down",
+		BaseStep:  flow.BaseStep{TimeoutMs: 60000},
+	})
+
+	if result.Success {
+		t.Fatal("expected failure when the element is not in the list")
+	}
+	if scrollCount != 2 {
+		t.Errorf("expected 2 scrolls before the no-progress stop, got %d", scrollCount)
+	}
+	if !strings.Contains(result.Message, "made no progress") {
+		t.Errorf("message should name the reason, got %q", result.Message)
 	}
 }

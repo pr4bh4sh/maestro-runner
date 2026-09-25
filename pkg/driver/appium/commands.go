@@ -39,7 +39,13 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 		return errorResult(err, fmt.Sprintf("Element not found: %s", step.Selector.Describe()))
 	}
 
-	cx, cy := info.Bounds.Center()
+	// `point` with a selector is relative to the element ("90%,50%" is near its
+	// right edge), as Maestro documents and every other driver does. Tapping
+	// the centre instead hit the row, not the switch at its edge (#175).
+	cx, cy, perr := core.PointInBounds(step.Point, info.Bounds)
+	if perr != nil {
+		return errorResult(perr, fmt.Sprintf("Invalid point coordinates: %v", perr))
+	}
 
 	// If duration is set (or longPress: true), hold the press for that long.
 	if step.DurationMs > 0 || step.LongPress {
@@ -57,6 +63,10 @@ func (d *Driver) tapOn(step *flow.TapOnStep) *core.CommandResult {
 	// to atomically focus + type (bypasses keyboard focus timing issues).
 	if d.platform == "ios" && info.ID != "" {
 		d.lastTappedElementID = info.ID
+	}
+	// A point inside the element needs the coordinate tap below: an element
+	// click always lands on the element's centre.
+	if d.platform == "ios" && info.ID != "" && step.Point == "" {
 		// Use ClickElement (POST /element/{id}/click) instead of coordinate tap.
 		// Coordinate taps via W3C pointer actions are unreliable on iOS: they can miss
 		// if the keyboard is animating, or if the element is partially obscured.
@@ -227,7 +237,12 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 			return errorResult(err, fmt.Sprintf("Element not found for swipe: %s", step.Selector.Describe()))
 		}
 		if info != nil && info.Bounds.Width > 0 {
-			startX, startY, endX, endY, err := core.SwipeCoordsInBounds(direction, info.Bounds, w, h)
+			// `point:` re-aims where inside the element the swipe starts and
+			// `distance:` sets how far it travels; both were parsed and
+			// ignored on this driver while uiautomator2/devicelab honoured
+			// them. Neither set → the historic edge-to-edge swipe.
+			startX, startY, endX, endY, err := core.SwipeCoordsForElement(
+				direction, info.Bounds, w, h, step.Distance, step.Selector.Point)
 			if err != nil {
 				return errorResult(err, fmt.Sprintf("Invalid swipe direction: %s", step.Direction))
 			}
@@ -290,7 +305,8 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("invalid scroll direction: %s", direction), "")
 	}
 
-	if err := d.client.Swipe(centerX, startY, centerX, endY, 500); err != nil {
+	// Was hardcoded 500ms, so `speed:` was parsed and dropped (#165).
+	if err := d.client.Swipe(centerX, startY, centerX, endY, core.ScrollDurationOrDefault(step.Speed, 500)); err != nil {
 		return errorResult(err, "Failed to scroll")
 	}
 
@@ -360,6 +376,12 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	partiallyVisible := false
+	// Height of a flush candidate awaiting confirmation, or -1 for none.
+	pendingHeight := -1
+	// Stop early when the surface stops moving — a target that is not in the
+	// list should not cost every scroll the step allows.
+	var progress core.ScrollProgress
+
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		if err := d.parentContext().Err(); err != nil {
 			return errorResult(fmt.Errorf("scroll cancelled: %w", err), "")
@@ -374,14 +396,39 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		if err == nil && info != nil {
 			w, h := d.client.ScreenSize()
 			boundsKnown := info.Bounds.Width > 0 && info.Bounds.Height > 0 && w > 0 && h > 0
-			if !boundsKnown || core.MeetsVisibility(info.Bounds, w, h, step.VisibilityPercentage) {
+			if !boundsKnown {
 				return successResult("Element found", info)
 			}
-			partiallyVisible = true
+			if core.MeetsVisibility(info.Bounds, w, h, step.VisibilityPercentage) {
+				// Computed from a rect the hierarchy may already have clipped
+				// to the scroll container, where a sliver at the fold scores
+				// 100% (#164). A rect flush with the container's leading edge
+				// gets one confirming scroll: a sliver grows, an element
+				// resting at the end of the list does not. Same rule as the
+				// uiautomator2 and devicelab drivers; this one reaches the
+				// hierarchy through the Appium server instead.
+				if pendingHeight >= 0 && info.Bounds.Height <= pendingHeight {
+					return successResult("Element found", info)
+				}
+				if !d.atScrollContainerEdge(info.Bounds, direction) {
+					return successResult("Element found", info)
+				}
+				pendingHeight = info.Bounds.Height
+			} else {
+				partiallyVisible = true
+			}
+		}
+
+		if sig, ok := d.scrollSurfaceSignature(); ok && progress.Observe(sig) {
+			reason := fmt.Sprintf("scrolling %s made no progress after %d scrolls (end of content?)", direction, i)
+			if partiallyVisible {
+				return errorResult(fmt.Errorf("element found but never sufficiently visible after scrolling"), reason)
+			}
+			return errorResult(fmt.Errorf("element not found after scrolling"), reason)
 		}
 
 		// Scroll
-		d.scroll(&flow.ScrollStep{Direction: direction})
+		d.scroll(&flow.ScrollStep{Direction: direction, Speed: step.Speed})
 		time.Sleep(300 * time.Millisecond)
 	}
 
@@ -390,6 +437,50 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 	return errorResult(fmt.Errorf("element not found after scrolling"), "")
 }
+
+// scrollSurfaceSignature reduces the current page source to a key for
+// core.ScrollProgress. A capture that cannot be read reports ok=false and is
+// not observed, so a hiccup never passes for the end of the content.
+func (d *Driver) scrollSurfaceSignature() (string, bool) {
+	source, err := d.client.Source()
+	if err != nil || source == "" {
+		return "", false
+	}
+	return core.ScrollSignature(source), true
+}
+
+// atScrollContainerEdge reports whether the element with bounds b sits flush
+// against its nearest scrollable ancestor's leading edge for direction. It
+// re-reads the page source to find the ancestor; a fetch or parse failure
+// answers false, which keeps the pre-#164 behaviour (stop on the sliver)
+// rather than scrolling forever.
+func (d *Driver) atScrollContainerEdge(b core.Bounds, direction string) bool {
+	src, err := d.client.Source()
+	if err != nil {
+		return false
+	}
+	elems, _, err := ParsePageSource(src)
+	if err != nil {
+		return false
+	}
+	for _, e := range elems {
+		if e.Bounds != b {
+			continue
+		}
+		for p := e.Parent; p != nil; p = p.Parent {
+			if !p.Scrollable {
+				continue
+			}
+			return core.ClippedAtScrollEdge(b, p.Bounds, direction, scrollEdgeTolerancePx)
+		}
+	}
+	return false
+}
+
+// How far from the container edge still counts as flush. Rounding between the
+// hierarchy's integer bounds and the container's own edge leaves a pixel or
+// two; anything larger is a real gap.
+const scrollEdgeTolerancePx = 2
 
 // Text input
 
@@ -407,11 +498,9 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 
 	// Inline selector: find the element and type into it directly — parity
 	// with the uiautomator2/devicelab drivers, which already honour it.
-	// Guard against the YAML artifact where InputTextStep.Text and
-	// Selector.Text share the `text:` key (map form), which would otherwise
-	// send us hunting for an element whose text equals the input value.
-	selectorIsReal := !step.Selector.IsEmpty() && step.Selector.Text != text
-	if selectorIsReal {
+	// The parser has already stripped the `text:` value from the selector
+	// (flow.InputTextStep.UnmarshalYAML), so a non-empty selector is real.
+	if !step.Selector.IsEmpty() {
 		timeout := time.Duration(step.TimeoutMs) * time.Millisecond
 		if timeout <= 0 {
 			timeout = d.getFindTimeout()
@@ -1115,7 +1204,13 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 					return successResult("Element is no longer visible", nil)
 				}
 			}
-			// HTTP round-trip (~100ms) is natural rate limit, no sleep needed
+			// A miss used to cost a page-source dump, which throttled this
+			// loop by accident; a proven absence now returns in ~13ms on a
+			// local simulator (#173), which spun ~75 queries a second.
+			select {
+			case <-ctx.Done():
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
 	}
 }

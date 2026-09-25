@@ -405,8 +405,18 @@ func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 		// inside it types perfectly well once focused. So fall through to the
 		// tap-and-type path rather than failing the step outright (#143).
 		if info.ID != "" {
+			// Read the field first so a dropped character is detectable after
+			// typing — WDA's XCUITest typing can silently lose characters when
+			// the app janks, notably digits in Expo/React Native fields.
+			before, _ := d.client.ElementText(info.ID)
 			if err := d.client.ElementSendKeys(info.ID, text, d.typingFrequency); err == nil {
-				return successResult(fmt.Sprintf("Entered text: %s%s", text, unicodeWarning), info)
+				field := core.TextFieldFuncs(
+					func() (string, error) { return d.client.ElementText(info.ID) },
+					func(s string) error { return d.client.ElementSendKeys(info.ID, s, d.typingFrequency) },
+					func() error { return d.client.ElementClear(info.ID) },
+				)
+				note := core.ConfirmTypedText(field, text, before, logger.Warn)
+				return successResult(fmt.Sprintf("Entered text: %s%s%s", text, unicodeWarning, note), info)
 			}
 		}
 		// Fallback: tap to focus first
@@ -677,7 +687,10 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("invalid direction: %s", step.Direction), "Invalid scroll direction")
 	}
 
-	if err := d.client.Swipe(fromX, fromY, toX, toY, 0.3); err != nil {
+	// WDA's swipe duration is in seconds; the Maestro speed inverts to ms.
+	// Was hardcoded 0.3s, so `speed:` was silently dropped here too (#165).
+	durationSec := float64(core.ScrollDurationOrDefault(step.Speed, 300)) / 1000.0
+	if err := d.client.Swipe(fromX, fromY, toX, toY, durationSec); err != nil {
 		return errorResult(err, "Scroll failed")
 	}
 
@@ -707,6 +720,10 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 	deadline := time.Now().Add(timeout)
 
+	// Stop early when the surface stops moving — a target that is not in the
+	// list should not cost every scroll the step allows.
+	var progress core.ScrollProgress
+
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
 		info, err := d.findElement(step.Element, true, 1000)
 		if err == nil && info != nil {
@@ -720,8 +737,12 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 			}
 		}
 
+		if sig, ok := d.scrollSurfaceSignature(); ok && progress.Observe(sig) {
+			return errorResult(fmt.Errorf("element not found after scrolling"), fmt.Sprintf("Element not found: %s — scrolling %s made no progress after %d scrolls (end of content?)", selectorDesc(step.Element), direction, i))
+		}
+
 		// Scroll
-		scrollStep := &flow.ScrollStep{Direction: direction}
+		scrollStep := &flow.ScrollStep{Direction: direction, Speed: step.Speed}
 		result := d.scroll(scrollStep)
 		if !result.Success {
 			return result
@@ -731,6 +752,17 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	}
 
 	return errorResult(fmt.Errorf("element not found after scrolling"), fmt.Sprintf("Element not found: %s", selectorDesc(step.Element)))
+}
+
+// scrollSurfaceSignature reduces the current page source to a key for
+// core.ScrollProgress. A capture that cannot be read reports ok=false and is
+// not observed, so a hiccup never passes for the end of the content.
+func (d *Driver) scrollSurfaceSignature() (string, bool) {
+	source, err := d.client.Source()
+	if err != nil || source == "" {
+		return "", false
+	}
+	return core.ScrollSignature(source), true
 }
 
 func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
@@ -775,6 +807,24 @@ func (d *Driver) swipe(step *flow.SwipeStep) *core.CommandResult {
 				return errorResult(err, fmt.Sprintf("Element not found for swipe: %s", step.Selector.Describe()))
 			}
 			if info != nil && info.Bounds.Width > 0 {
+				// An element-relative `point:` re-aims where the swipe
+				// starts (upstream #3470). It was parsed into the selector
+				// and ignored here while the Android drivers honoured it.
+				if step.Selector.Point != "" {
+					sx, sy, ex, ey, perr := core.SwipeCoordsForElement(
+						strings.ToLower(step.Direction), info.Bounds, width, height, step.Distance, step.Selector.Point)
+					if perr != nil {
+						return errorResult(perr, fmt.Sprintf("Invalid swipe: %v", perr))
+					}
+					duration := 0.1
+					if step.Duration > 0 {
+						duration = float64(step.Duration) / 1000.0
+					}
+					if err := d.client.Swipe(float64(sx), float64(sy), float64(ex), float64(ey), duration); err != nil {
+						return errorResult(err, "Swipe failed")
+					}
+					return successResult("Swipe completed", info)
+				}
 				areaX = float64(info.Bounds.X)
 				areaY = float64(info.Bounds.Y)
 				areaW = float64(info.Bounds.Width)

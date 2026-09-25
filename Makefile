@@ -1,4 +1,4 @@
-.PHONY: build clean test test-race test-coverage test-coverage-check test-fuzz bench install check ci fmt imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck lint-py lint-py-fix client-test client-test-ts client-test-py hooks-install
+.PHONY: build clean test test-race test-coverage test-coverage-check cover-gaps test-fuzz bench install check ci fmt fmt-check imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck lint-py lint-py-fix client-test client-test-ts client-test-py hooks-install
 
 # Build variables
 BINARY_NAME=maestro-runner
@@ -67,6 +67,17 @@ test-coverage-check:
 	@go tool cover -func=coverage.out | grep total | awk '{print $$3}' | sed 's/%//' | \
 		awk '{if ($$1 < 80) {print "Coverage " $$1 "% is below 80% threshold"; exit 1} else {print "Coverage " $$1 "% meets 80% threshold"}}'
 
+## cover-gaps: the worst-covered packages — where bugs hide unnoticed.
+## Visibility, not a gate. test-coverage-check gates on the 80% TOTAL, which is
+## exactly the number that hides a package sitting at 0%.
+cover-gaps:
+	@$(GOTEST) -coverprofile=coverage.out ./... > /dev/null 2>&1 || true
+	@go tool cover -func=coverage.out \
+		| awk '$$1 ~ /\.go:/ {split($$1,a,":"); n=a[1]; sub(/\/[^\/]*$$/,"",n); \
+		       pct=$$NF; sub(/%/,"",pct); tot[n]+=pct; cnt[n]++} \
+		  END {for (p in tot) printf "%6.1f%%  %s\n", tot[p]/cnt[p], p}' \
+		| sort -n | head -15
+
 test-fuzz:
 	$(GOTEST) -v -fuzz=. -fuzztime=30s ./...
 
@@ -76,6 +87,17 @@ bench:
 # Code quality tools
 fmt:
 	gofmt -s -w .
+
+# Fails when any tracked Go file is not gofmt-clean. `fmt` rewrites and always
+# succeeds, so without this nothing in check/ci could ever fail on formatting,
+# and stray unformatted files turned every `gofmt -w` into unrelated diffs.
+fmt-check:
+	@unformatted=$$(gofmt -s -l $$(git ls-files '*.go')); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt: these files are not formatted (run 'make fmt'):"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
 
 imports:
 	goimports -w .
@@ -111,11 +133,11 @@ govulncheck:
 	govulncheck ./...
 
 # Quality check - run all checks (use test-race for race detection)
-check: fmt imports fumpt vet staticcheck revive errcheck nilaway gosec ineffassign deadcode govulncheck test-race
+check: fmt-check fmt imports fumpt vet staticcheck revive errcheck nilaway gosec ineffassign deadcode govulncheck test-race
 	@echo "All checks passed!"
 
 # Full CI check (includes coverage threshold)
-ci: fmt imports fumpt vet staticcheck revive errcheck nilaway gosec ineffassign deadcode govulncheck test-coverage-check
+ci: fmt-check fmt imports fumpt vet staticcheck revive errcheck nilaway gosec ineffassign deadcode govulncheck test-coverage-check
 	@echo "CI checks passed!"
 
 deps:
