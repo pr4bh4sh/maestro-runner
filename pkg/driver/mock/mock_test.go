@@ -44,9 +44,6 @@ func TestExecute_SuccessTapStep(t *testing.T) {
 	if res.Element == nil {
 		t.Error("tapOn step should produce an Element")
 	}
-	if res.Duration <= 0 {
-		t.Errorf("expected non-zero duration, got %v", res.Duration)
-	}
 }
 
 func TestExecute_SuccessNonElementStep(t *testing.T) {
@@ -80,9 +77,12 @@ func TestExecute_FailOnStep(t *testing.T) {
 func TestExecute_StepDelay(t *testing.T) {
 	d := New(Config{StepDelay: 5 * time.Millisecond})
 	start := time.Now()
-	d.Execute(backStep())
-	if time.Since(start) < 5*time.Millisecond {
+	res := d.Execute(backStep())
+	if elapsed := time.Since(start); elapsed < 5*time.Millisecond {
 		t.Error("StepDelay was not honored")
+	}
+	if res.Duration < 5*time.Millisecond {
+		t.Errorf("result duration %v does not include StepDelay", res.Duration)
 	}
 }
 

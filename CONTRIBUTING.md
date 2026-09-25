@@ -57,7 +57,32 @@ make check
 
 ### Commit Messages
 
-Use clear, descriptive commit messages:
+This repository enforces Conventional Commit style commit titles through a `commit-msg` hook.
+
+Install hooks once after cloning:
+
+```bash
+make hooks-install
+```
+
+Required first-line format:
+
+```text
+<type>(<scope>)!: <subject>
+<type>: <subject>
+```
+
+Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`
+
+Examples:
+
+```text
+feat(ios): add retry for session creation
+fix: handle empty response body
+chore!: remove deprecated flag
+```
+
+Use clear and descriptive messages:
 
 ```
 Add support for swipe gestures

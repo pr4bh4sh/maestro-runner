@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts
+!jest.config.js
+.tsbuildinfo
+coverage/
+maestro-server.log
+reports/
+
+# Local copied iOS driver sources
+drivers/

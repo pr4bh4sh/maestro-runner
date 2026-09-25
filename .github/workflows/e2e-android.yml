@@ -1,0 +1,315 @@
+name: E2E Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  detect-changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      py-lib: ${{ steps.filter.outputs.py-lib }}
+      ts-lib: ${{ steps.filter.outputs.ts-lib }}
+      py-e2e: ${{ steps.filter.outputs.py-e2e }}
+      ts-e2e: ${{ steps.filter.outputs.ts-e2e }}
+      android-app: ${{ steps.filter.outputs.android-app }}
+      driver-apk: ${{ steps.filter.outputs.driver-apk }}
+      android-yaml: ${{ steps.filter.outputs.android-yaml }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+      docs: ${{ steps.filter.outputs.docs }}
+      app: ${{ steps.filter.outputs.android-app }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+            py-lib:
+              - 'client/python/maestro_runner/**'
+            ts-lib:
+              - 'client/typescript/src/**'
+            py-e2e:
+              - 'client/python/tests/**'
+            ts-e2e:
+              - 'client/typescript/tests/**'
+            android-app:
+              - 'e2e/android-animation-app/**'
+            driver-apk:
+              - 'drivers/android/**'
+            android-yaml:
+              - 'e2e/workspaces/**'
+            workflow:
+              - '.github/workflows/**'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+
+  build-animation-apk:
+    name: Build animation test APK
+    runs-on: ubuntu-latest
+    needs: [detect-changes]
+    if: ${{ needs.detect-changes.outputs.app == 'true' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Android SDK
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Make gradlew executable
+        run: chmod +x e2e/android-animation-app/gradlew
+
+      - name: Build animation test APK
+        env:
+          ANDROID_SDK_ROOT: ""
+        run: cd e2e/android-animation-app && ./gradlew :app:assembleDebug --no-daemon
+
+  e2e-android:
+    name: E2E Android (API 36)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [detect-changes]
+    if: ${{ needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.py-lib == 'true' || needs.detect-changes.outputs.ts-lib == 'true' || needs.detect-changes.outputs.py-e2e == 'true' || needs.detect-changes.outputs.ts-e2e == 'true' || needs.detect-changes.outputs.android-app == 'true' || needs.detect-changes.outputs.driver-apk == 'true' || needs.detect-changes.outputs.android-yaml == 'true' || needs.detect-changes.outputs.workflow == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [uiautomator2, devicelab, appium]
+    env:
+      MAESTRO_DRIVER: ${{ matrix.driver }}
+      APPIUM_URL: ${{ matrix.driver == 'appium' && 'http://localhost:4723' || '' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Required to run Android emulator with hardware acceleration on Linux
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.6'
+          cache: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: client/typescript/package-lock.json
+
+      - name: Setup Appium server (appium only)
+        if: ${{ matrix.driver == 'appium' }}
+        run: |
+          npm install -g appium@latest
+          appium driver install uiautomator2 || appium driver install --source=npm appium-uiautomator2-driver
+          nohup appium --port 4723 --log /tmp/appium.log > /tmp/appium.out 2>&1 &
+          echo $! > /tmp/appium.pid
+          echo "Waiting for Appium on :4723 ..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4723/status > /dev/null; then
+              echo "Appium ready"
+              break
+            fi
+            sleep 2
+            if [ "$i" -eq 30 ]; then
+              echo "Appium failed to start"
+              cat /tmp/appium.log || true
+              cat /tmp/appium.out || true
+              exit 1
+            fi
+          done
+          curl -s http://localhost:4723/status | head -c 500; echo
+
+      - name: Build maestro-runner
+        run: |
+          go mod download
+          go build -o maestro-runner .
+
+      - name: Install Python client dependencies
+        working-directory: client/python
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Install TypeScript client dependencies
+        working-directory: client/typescript
+        run: |
+          npm ci
+          npm install --no-save jest-junit
+
+      - name: Write e2e test script
+        run: |
+          cat > /tmp/run-e2e.sh << 'SCRIPT'
+          #!/usr/bin/env bash
+          set +e
+          FAILED=0
+          # The maestro-runner server (auto-started by the Python/TS client conftest)
+          # resolves its drivers directory relative to MAESTRO_RUNNER_HOME. When the
+          # client runs `cd client/python`/`client/typescript`, CWD is no longer the
+          # repo root, so point it back at the repo root where drivers/android lives.
+          export MAESTRO_RUNNER_HOME="$(pwd)"
+          mkdir -p reports/yaml reports/yaml/animation reports/yaml/animation-stop reports/python reports/typescript ctrf
+
+          # Detect emulator serial
+          DEVICE=$(adb devices | grep -E "emulator-[0-9]+" | head -1 | awk '{print $1}')
+          export MAESTRO_DEVICE_ID="$DEVICE"
+          echo "Using device: $DEVICE"
+          adb devices
+
+          # Driver-specific APK installs
+          case "${MAESTRO_DRIVER:-uiautomator2}" in
+            uiautomator2)
+              adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+              adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+              adb install -r -g drivers/android/settings_apk-debug.apk
+              ;;
+            devicelab)
+              # DeviceLab driver wraps uiautomator2.Driver, so the UIAutomator2
+              # server APK(s) must also be present on the device.
+              adb install -r -g drivers/android/devicelab-android-driver.apk
+              adb install -r -g drivers/android/devicelab-android-driver-test.apk
+              adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+              adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+              adb install -r -g drivers/android/settings_apk-debug.apk
+              ;;
+            appium)
+              # Appium manages the UIAutomator2 server itself; only the test
+              # app (installed below as common) is needed.
+              ;;
+          esac
+          # Animation test app (needed by all Android drivers)
+          adb install -r -g drivers/android/animation-test-app-debug.apk
+
+          # --- YAML flow tests ---
+          echo "::group::YAML flow tests"
+          ./maestro-runner --driver "$MAESTRO_DRIVER" --platform android test --output reports/yaml e2e/workspaces/contacts/add_contact_android.yaml || FAILED=1
+
+          # Animation coverage: launch the offline WebView spinner app and run
+          # waitForAnimationToEnd through the YAML pipeline (mirrors the Python/TS
+          # never-ends e2e tests).
+          ./maestro-runner --driver "$MAESTRO_DRIVER" --platform android test --output reports/yaml/animation e2e/workspaces/animation/wait_for_animation_android.yaml || FAILED=1
+          ./maestro-runner --driver "$MAESTRO_DRIVER" --platform android test --output reports/yaml/animation-stop e2e/workspaces/animation/wait_for_animation_stops_on_click_android.yaml || FAILED=1
+          echo "::endgroup::"
+
+          # --- Python e2e tests (conftest.py auto-starts server) ---
+          echo "::group::Python e2e tests"
+          cd client/python
+          .venv/bin/python -m pytest tests/test_add_contact.py tests/test_wait_for_animation_to_end.py tests/test_wait_for_animation_never_ends.py tests/test_wait_for_animation_stops_on_click.py -v --junit-xml=../../reports/python/junit.xml || FAILED=1
+          cd ../..
+          echo "::endgroup::"
+
+          # --- TypeScript e2e tests (setup.ts auto-starts server) ---
+          echo "::group::TypeScript e2e tests"
+          cd client/typescript
+          JEST_JUNIT_OUTPUT_DIR=../../reports/typescript JEST_JUNIT_OUTPUT_NAME=junit.xml npx jest tests/test_add_contact.device.test.ts tests/test_wait_for_animation_to_end.device.test.ts tests/test_wait_for_animation_never_ends.device.test.ts tests/test_wait_for_animation_stops_on_click.device.test.ts --runInBand --reporters=default --reporters=jest-junit || FAILED=1
+          cd ../..
+          echo "::endgroup::"
+
+          exit $FAILED
+          SCRIPT
+          chmod +x /tmp/run-e2e.sh
+
+      - name: Run Android E2E tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: -no-boot-anim -no-snapshot-load -netdelay none -netspeed full -no-window -gpu swiftshader_indirect
+          disable-animations: true
+          script: bash /tmp/run-e2e.sh
+
+      - name: Generate CTRF reports
+        if: always()
+        run: |
+          mkdir -p ctrf
+
+          # Convert YAML flow JUnit XMLs (one timestamped subdir per run)
+          find reports/yaml -name "*.xml" -type f | while read -r f; do
+            name=$(basename "$(dirname "$f")")
+            npx --yes junit-to-ctrf "$f" -o "ctrf/yaml-${name}-ctrf.json" || true
+          done
+
+          # Convert Python e2e JUnit
+          if [ -f reports/python/junit.xml ]; then
+            npx --yes junit-to-ctrf reports/python/junit.xml -o ctrf/python-ctrf.json || true
+          fi
+
+          # Convert TypeScript e2e JUnit
+          if [ -f reports/typescript/junit.xml ]; then
+            npx --yes junit-to-ctrf reports/typescript/junit.xml -o ctrf/ts-ctrf.json || true
+          fi
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-reports-${{ github.run_number }}
+          path: |
+            reports/
+            ctrf/
+          retention-days: 14
+
+      - name: Publish test results
+        if: always()
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: 'ctrf/*.json'
+          pull-request-report: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

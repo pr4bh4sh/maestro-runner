@@ -1094,14 +1094,71 @@ func iosKeyChar(name string) string {
 
 // Wait commands
 
-func (d *Driver) waitForAnimationToEnd(_ *flow.WaitForAnimationToEndStep) *core.CommandResult {
-	// NOTE: waitForAnimationToEnd is not fully implemented.
-	// Maestro uses screenshot comparison which is complex to implement correctly.
-	// For now, we pass this step with a warning.
-	return &core.CommandResult{
-		Success: true,
-		Message: "WARNING: waitForAnimationToEnd is not fully implemented - step passed without animation check",
+const (
+	defaultAnimationTimeoutMs = 15000
+	defaultAnimationSleepMs   = 200   // pause between the two comparison screenshots
+	screenshotDiffThreshold   = 0.005 // 0.5 % — default pixel-diff threshold
+	screenshotRetryIntervalMs = 100   // outer loop retry interval
+)
+
+func (d *Driver) waitForAnimationToEnd(step *flow.WaitForAnimationToEndStep) *core.CommandResult {
+	timeoutMs := step.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = defaultAnimationTimeoutMs
 	}
+
+	sleepMs := step.SleepMs
+	if sleepMs <= 0 {
+		sleepMs = defaultAnimationSleepMs
+	}
+
+	threshold := step.Threshold
+	if threshold <= 0 {
+		threshold = screenshotDiffThreshold
+	}
+
+	logger.Info("waitForAnimationToEnd starting: timeoutMs=%d sleepMs=%d threshold=%.4f",
+		timeoutMs, sleepMs, threshold)
+
+	res := core.WaitForScreenStatic(
+		func() ([]byte, error) { return d.client.Screenshot() },
+		time.Duration(timeoutMs)*time.Millisecond,
+		time.Duration(sleepMs)*time.Millisecond,
+		time.Duration(screenshotRetryIntervalMs)*time.Millisecond,
+		threshold,
+	)
+
+	if res.Settled {
+		logger.Info("waitForAnimationToEnd: screen became static after %d iteration(s) (%.0fms elapsed), diffs=%s",
+			res.Iterations, res.Elapsed.Seconds()*1000, formatAnimationDiffs(res.Diffs))
+		return successResult(
+			fmt.Sprintf("Animation ended (screen became static) after %d iteration(s) in %.0fms, diffs=%s",
+				res.Iterations, res.Elapsed.Seconds()*1000, formatAnimationDiffs(res.Diffs)),
+			nil,
+		)
+	}
+
+	logger.Info("waitForAnimationToEnd: timed out after %d iteration(s) (%.0fms), diffs=%s threshold=%.4f",
+		res.Iterations, res.Elapsed.Seconds()*1000, formatAnimationDiffs(res.Diffs), threshold)
+	return &core.CommandResult{
+		Success: false,
+		Message: fmt.Sprintf(
+			"Timed out after %dms (%d iteration(s)) waiting for screen to become static; diffs=%s threshold=%.4f",
+			timeoutMs, res.Iterations, formatAnimationDiffs(res.Diffs), threshold,
+		),
+	}
+}
+
+// formatAnimationDiffs formats a slice of diff values as "[0.000764 0.000821 ...]"
+func formatAnimationDiffs(diffs []float64) string {
+	if len(diffs) == 0 {
+		return "[]"
+	}
+	parts := make([]string, len(diffs))
+	for i, d := range diffs {
+		parts[i] = fmt.Sprintf("%.6f", d)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {

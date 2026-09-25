@@ -457,7 +457,9 @@ func createDeviceLabDriver(cfg *RunConfig, dev *device.AndroidDevice, info devic
 	session, err := adapter.CreateSession()
 	if err != nil {
 		logger.Error("Failed to create session: %v", err)
-		wsClient.Close()
+		if closeErr := wsClient.Close(); closeErr != nil {
+			logger.Warn("failed to close WebSocket client after session failure: %v", closeErr)
+		}
 		if stopErr := dev.StopDeviceLabDriver(); stopErr != nil {
 			logger.Warn("failed to stop DeviceLab driver after session failure: %v", stopErr)
 		}
@@ -542,6 +544,7 @@ func createDeviceLabDriver(cfg *RunConfig, dev *device.AndroidDevice, info devic
 	driver.SetWebViewForwarder(dev)
 
 	cleanup := func() {
+		driver.Close()
 		if err := adapter.DeleteSession(); err != nil {
 			logger.Debug("failed to delete session during cleanup: %v", err)
 		}

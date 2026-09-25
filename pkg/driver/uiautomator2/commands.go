@@ -526,39 +526,69 @@ func (d *Driver) eraseText(step *flow.EraseTextStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Erased %d characters", chars), nil)
 }
 
-func (d *Driver) hideKeyboard(_ *flow.HideKeyboardStep) *core.CommandResult {
-	// Appium's /appium/device/hide_keyboard is a no-op on some devices (notably
-	// several Samsung models): it returns success without closing the keyboard,
-	// so the next coordinate tap lands on the keyboard overlay (#42). We verify
-	// with dumpsys and, while the keyboard is still shown, fall back to a key
-	// event.
-	//
-	// KEYCODE_BACK dismisses the IME when it is open and only triggers back-
-	// navigation when the keyboard is NOT shown — so we send it ONLY after
-	// confirming the keyboard is still up, which is what keeps it from navigating
-	// away (the side effect reported on the devicelab driver).
-
-	// If we can confirm the keyboard isn't shown, there's nothing to do.
-	if d.device != nil && !d.isKeyboardVisible() {
-		return successResult("Keyboard not visible", nil)
+func (d *Driver) hideKeyboard(step *flow.HideKeyboardStep) *core.CommandResult {
+	if !d.isInputShown() {
+		return successResult("Keyboard not visible, skipped", nil)
 	}
 
+	strategy := strings.ToLower(strings.TrimSpace(step.Strategy))
+
+	// If a specific strategy is requested, use only that one.
+	switch strategy {
+	case "appium":
+		return d.hideKeyboardAppium()
+	case "escape", "esc":
+		return d.hideKeyboardEscape()
+	case "back":
+		return d.hideKeyboardBack()
+	case "":
+		// Try all strategies in order.
+	default:
+		return errorResult(nil, fmt.Sprintf("Unknown hideKeyboard strategy: %q (valid: appium, escape/esc, back)", step.Strategy))
+	}
+
+	// Try all strategies: Appium → ESCAPE → BACK
+	if r := d.hideKeyboardAppium(); r.Success {
+		return r
+	}
+	if r := d.hideKeyboardEscape(); r.Success {
+		return r
+	}
+	return d.hideKeyboardBack()
+}
+
+func (d *Driver) hideKeyboardAppium() *core.CommandResult {
 	_ = d.client.HideKeyboard()
-	if d.waitKeyboardHidden() {
-		return successResult("Keyboard hidden", nil)
+	time.Sleep(500 * time.Millisecond)
+	if !d.isInputShown() {
+		return successResult("Keyboard hidden via Appium endpoint", nil)
 	}
+	return errorResult(nil, "Appium endpoint failed toa hide keyboard")
+}
 
-	// Appium's call didn't take. Fall back to BACK, but only while the keyboard
-	// is still shown so we can't trigger a stray back-navigation.
-	if d.isKeyboardVisible() {
-		if err := d.client.PressKeyCode(uiautomator2.KeyCodeBack); err == nil && d.waitKeyboardHidden() {
-			return successResult("Keyboard hidden (via back key)", nil)
-		}
+func (d *Driver) hideKeyboardEscape() *core.CommandResult {
+	if d.device == nil {
+		return errorResult(nil, "No device available for KEYCODE_ESCAPE")
 	}
+	_, _ = d.device.Shell("input keyevent 111")
+	time.Sleep(500 * time.Millisecond)
+	if !d.isInputShown() {
+		return successResult("Keyboard hidden via KEYCODE_ESCAPE", nil)
+	}
+	return errorResult(nil, "KEYCODE_ESCAPE failed to hide keyboard")
+}
 
-	// Couldn't confirm dismissal — don't fail the step (the keyboard may already
-	// be gone on a device we can't inspect).
-	return successResult("Hide keyboard (dismissal not confirmed)", nil)
+func (d *Driver) hideKeyboardBack() *core.CommandResult {
+	if d.device == nil {
+		return errorResult(nil, "No device available for BACK key")
+	}
+	// Safe: when keyboard IS visible, BACK dismisses it without navigating
+	_, _ = d.device.Shell("input keyevent 4")
+	time.Sleep(500 * time.Millisecond)
+	if !d.isInputShown() {
+		return successResult("Keyboard hidden via BACK key", nil)
+	}
+	return errorResult(nil, "BACK key failed to hide keyboard")
 }
 
 func (d *Driver) inputRandom(step *flow.InputRandomStep) *core.CommandResult {
@@ -764,6 +794,13 @@ func (d *Driver) scrollSurfaceSignature() (string, bool) {
 // scrollDurationMs is the swipe duration (in ms) used for adb input swipe.
 const scrollDurationMs = 300
 
+const (
+	defaultAnimationTimeoutMs = 15000
+	defaultAnimationSleepMs   = 200   // pause between the two comparison screenshots
+	screenshotDiffThreshold   = 0.005 // 0.5 % — default pixel-diff threshold
+	screenshotRetryIntervalMs = 100   // outer loop retry interval
+)
+
 // performScroll dispatches a scroll gesture. Default ("" or "adb") uses adb
 // input swipe (matches upstream Maestro and is the most reliable path across
 // Android skins, including OneUI where /appium/gestures/scroll often no-ops).
@@ -958,6 +995,11 @@ func (d *Driver) findScrollableElement(timeoutMs int) (*core.ElementInfo, int) {
 					Bounds: largest.Bounds,
 				}, len(scrollables)
 			}
+		}
+
+		// Valid page source with elements but no scrollables — no point waiting
+		if len(elements) > 0 {
+			return nil, 0
 		}
 
 		time.Sleep(pollInterval)
@@ -1949,41 +1991,52 @@ func (d *Driver) waitUntil(step *flow.WaitUntilStep) *core.CommandResult {
 }
 
 func (d *Driver) waitForAnimationToEnd(step *flow.WaitForAnimationToEndStep) *core.CommandResult {
-	return waitForScreenStatic(d, step.TimeoutMs)
+	timeoutMs := step.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = defaultAnimationTimeoutMs
+	}
+	sleepMs := step.SleepMs
+	if sleepMs <= 0 {
+		sleepMs = defaultAnimationSleepMs
+	}
+	threshold := step.Threshold
+	if threshold <= 0 {
+		threshold = screenshotDiffThreshold
+	}
+
+	res := core.WaitForScreenStatic(
+		func() ([]byte, error) { return d.client.Screenshot() },
+		time.Duration(timeoutMs)*time.Millisecond,
+		time.Duration(sleepMs)*time.Millisecond,
+		time.Duration(screenshotRetryIntervalMs)*time.Millisecond,
+		threshold,
+	)
+
+	if res.Settled {
+		return successResult(
+			fmt.Sprintf("Animation ended (%.1f%% diff, %dms)", res.Diffs[len(res.Diffs)-1]*100, res.Elapsed.Milliseconds()),
+			nil,
+		)
+	}
+	return &core.CommandResult{
+		Success: false,
+		Message: fmt.Sprintf(
+			"Timed out after %dms (%d iteration(s)) waiting for screen to become static; diffs=%s threshold=%.4f",
+			timeoutMs, res.Iterations, formatAnimationDiffs(res.Diffs), threshold,
+		),
+	}
 }
 
-// waitForScreenStatic polls two consecutive screenshots and returns when the
-// pixel-difference falls below the threshold, or after the timeout.
-//
-// Matches upstream Maestro: default 15s timeout, 0.5% threshold. The step is
-// "soft" — it never fails, even when the screen never stabilizes, since the
-// surrounding flow may genuinely involve an indefinite animation and we don't
-// want to block test progress.
-func waitForScreenStatic(d *Driver, timeoutMs int) *core.CommandResult {
-	if timeoutMs <= 0 {
-		timeoutMs = 15000
+// formatAnimationDiffs formats a slice of diff values as "[0.000764 0.000821 ...]"
+func formatAnimationDiffs(diffs []float64) string {
+	if len(diffs) == 0 {
+		return "[]"
 	}
-	const threshold = 0.005 // 0.5%, matches upstream Maestro
-
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
-	start := time.Now()
-	for time.Now().Before(deadline) {
-		prev, err := d.client.Screenshot()
-		if err != nil {
-			return errorResult(err, fmt.Sprintf("Failed to take screenshot: %v", err))
-		}
-		curr, err := d.client.Screenshot()
-		if err != nil {
-			return errorResult(err, fmt.Sprintf("Failed to take screenshot: %v", err))
-		}
-		diff := core.ImageDifference(prev, curr)
-		if diff <= threshold {
-			elapsed := time.Since(start)
-			return successResult(fmt.Sprintf("Animation ended (%.1f%% diff, %dms)", diff*100, elapsed.Milliseconds()), nil)
-		}
+	parts := make([]string, len(diffs))
+	for i, d := range diffs {
+		parts[i] = fmt.Sprintf("%.6f", d)
 	}
-
-	return successResult(fmt.Sprintf("Animation did not settle within %dms — continuing", timeoutMs), nil)
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 // ============================================================================

@@ -1,0 +1,43 @@
+appId: com.apple.MobileAddressBook
+name: Add a new contact (iOS)
+tags:
+  - ios
+  - contacts
+---
+# Launch the Contacts system app on iOS
+- launchApp:
+    stopApp: true
+- waitForAnimationToEnd
+
+# Open the create-contact form
+- tapOn: Add
+- waitForAnimationToEnd
+
+# Fill in the name
+- tapOn:
+    text: "First name"
+- inputText: Alice
+
+- tapOn:
+    text: "Last name"
+- inputText: Tester
+
+# Fill in the phone number
+- waitForAnimationToEnd
+- swipe:
+    start: 50%, 42%
+    end: 50%, 12%
+    duration: 700
+- tapOn:
+    text: "add phone"
+- tapOn:
+    text: "phone"
+- inputText: "5550100"
+
+# Save the contact
+- tapOn:
+    text: "Done"
+- waitForAnimationToEnd
+
+# Verify the contact now appears in the list
+- assertVisible: "Alice Tester"

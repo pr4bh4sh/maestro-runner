@@ -35,6 +35,15 @@ func (m *mockDriver) SetFindTimeout(int)                    {}
 func (m *mockDriver) SetWaitForIdleTimeout(int) error       { return nil }
 func (m *mockDriver) SetContext(context.Context)            {}
 
+type mockEmulatorStarter struct {
+	startSerial string
+	startErr    error
+}
+
+func (m *mockEmulatorStarter) Start(avdName string, timeout time.Duration) (string, error) {
+	return m.startSerial, m.startErr
+}
+
 func TestResolveOutputDir_Default(t *testing.T) {
 	dir, err := resolveOutputDir("", false)
 	if err != nil {
@@ -1634,20 +1643,23 @@ func TestExecuteFlowsWithMode_AppiumParallel(t *testing.T) {
 // ============================================================
 
 func TestHandleEmulatorStartup_StartEmulatorError(t *testing.T) {
-	// Suppress stdout
-	oldStdout := os.Stdout
-	os.Stdout, _ = os.Open(os.DevNull)
-	defer func() { os.Stdout = oldStdout }()
+	mock := &mockEmulatorStarter{
+		startErr: fmt.Errorf("emulator not found"),
+	}
 
 	cfg := &RunConfig{
 		Platform:      "android",
 		StartEmulator: "NonExistent_AVD_12345",
 		BootTimeout:   5,
 	}
-	mgr := emulator.NewManager()
 
-	err := handleEmulatorStartup(cfg, mgr)
-	// This will fail because the AVD does not exist (emulator binary may not be found)
+	// Suppress stdout
+	oldStdout := os.Stdout
+	os.Stdout, _ = os.Open(os.DevNull)
+	defer func() { os.Stdout = oldStdout }()
+
+	err := handleEmulatorStartup(cfg, mock)
+	// This will fail because the mock returns an error
 	if err == nil {
 		t.Error("expected error when starting nonexistent emulator")
 	}

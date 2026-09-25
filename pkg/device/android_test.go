@@ -402,6 +402,7 @@ func TestAndroidDevice_InstallUIAutomator2(t *testing.T) {
 }
 
 func TestAndroidDevice_New_InvalidSerial(t *testing.T) {
+	t.Parallel()
 	// Test with invalid serial - should timeout
 	_, err := New("invalid-device-serial-xyz")
 	if err == nil {

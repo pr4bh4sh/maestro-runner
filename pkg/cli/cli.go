@@ -11,7 +11,7 @@ import (
 
 // Build info — set at build time via -ldflags.
 var (
-	Version   = "1.1.0"
+	Version   = "1.1.25"
 	Commit    = "unknown"
 	BuildDate = "unknown"
 )
@@ -176,6 +176,7 @@ Examples:
 		Commands: []*cli.Command{
 			testCommand,
 			wdaCommand,
+			serverCommand,
 			hierarchyCommand,
 			lintCommand,
 			devicesCommand,

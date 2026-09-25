@@ -1,0 +1,7 @@
+dev.devicelab.driver.android.test.agent-tracing-1.1.0-0 /Users/omnarayan/.gradle/caches/transforms-3/3ef51527abdafe69403c52018cb6743f/transformed/tracing-1.1.0/res
+dev.devicelab.driver.android.test.agent-annotation-experimental-1.1.0-1 /Users/omnarayan/.gradle/caches/transforms-3/7665749b5972d47a97a64d1a1c2bf5d5/transformed/annotation-experimental-1.1.0/res
+dev.devicelab.driver.android.test.agent-core-1.5.0-2 /Users/omnarayan/.gradle/caches/transforms-3/e67ad194fe294fda38ca2cda940df44c/transformed/core-1.5.0/res
+dev.devicelab.driver.android.test.agent-androidTest-3 /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/build/generated/res/resValues/androidTest/debug
+dev.devicelab.driver.android.test.agent-mergeDebugAndroidTestResources-4 /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/build/intermediates/incremental/debugAndroidTest/mergeDebugAndroidTestResources/merged.dir
+dev.devicelab.driver.android.test.agent-mergeDebugAndroidTestResources-5 /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/build/intermediates/incremental/debugAndroidTest/mergeDebugAndroidTestResources/stripped.dir
+dev.devicelab.driver.android.test.agent-merged_res-6 /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/build/intermediates/merged_res/debugAndroidTest

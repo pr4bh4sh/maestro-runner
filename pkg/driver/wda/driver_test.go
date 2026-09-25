@@ -1162,6 +1162,7 @@ func mockWDAServerWithScrollElements(foundAfterScrolls int) *httptest.Server {
 
 // TestScrollUntilVisibleElementFound tests scrollUntilVisible when element is found after scrolls
 func TestScrollUntilVisibleElementFound(t *testing.T) {
+	t.Parallel()
 	server := mockWDAServerWithScrollElements(2) // Element found after 2 scrolls
 	defer server.Close()
 	driver := createTestDriver(server)
@@ -1180,6 +1181,7 @@ func TestScrollUntilVisibleElementFound(t *testing.T) {
 
 // TestScrollUntilVisibleElementNotFound tests scrollUntilVisible when element is not found
 func TestScrollUntilVisibleElementNotFound(t *testing.T) {
+	t.Parallel()
 	server := mockWDAServerWithScrollElements(100) // Element never found
 	defer server.Close()
 	driver := createTestDriver(server)
@@ -2523,6 +2525,7 @@ func TestInputTextSelectorNotFound(t *testing.T) {
 
 // TestInputTextWithSelectorNoElementID tests inputText with element that has no ID (tap fallback)
 func TestInputTextWithSelectorNoElementID(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
@@ -3642,6 +3645,7 @@ func TestCopyTextFromNotFound(t *testing.T) {
 	driver := createTestDriver(server)
 
 	step := &flow.CopyTextFromStep{
+		BaseStep: flow.BaseStep{TimeoutMs: 100},
 		Selector: flow.Selector{Text: "NonExistent"},
 	}
 	result := driver.copyTextFrom(step)
@@ -4602,6 +4606,7 @@ func TestAssertNotVisibleOptional(t *testing.T) {
 
 // TestInputTextAppendMode tests inputText with append mode
 func TestInputTextAppendMode(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// A text field holds focus, which is the state inputText runs in.
@@ -5106,6 +5111,7 @@ func TestScrollDownDirection(t *testing.T) {
 
 // TestInputTextSendKeysError tests inputText when sendKeys fails
 func TestInputTextSendKeysError(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/wda/keys") {
@@ -5256,6 +5262,7 @@ func TestSwipeError(t *testing.T) {
 
 // TestScrollUntilVisibleScrollFails tests scrollUntilVisible when scroll fails
 func TestScrollUntilVisibleScrollFails(t *testing.T) {
+	t.Parallel()
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -5420,6 +5427,7 @@ func TestEraseTextElementClearFallback(t *testing.T) {
 
 // TestScrollUntilVisibleMaxScrolls tests scrollUntilVisible hitting max scrolls
 func TestScrollUntilVisibleMaxScrolls(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -5521,6 +5529,7 @@ func TestFindElementRelativeWithNonExistentAnchor(t *testing.T) {
 
 // TestInputTextWithUnicodeChars tests inputText with non-ASCII characters
 func TestInputTextWithUnicodeChars(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// A text field holds focus, which is the state inputText runs in.
@@ -5670,6 +5679,7 @@ func TestFindElementWithCustomOptionalFindTimeout(t *testing.T) {
 
 // TestAssertNotVisibleDefaultTimeout tests assertNotVisible with default timeout
 func TestAssertNotVisibleDefaultTimeout(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/source") {
@@ -5696,6 +5706,7 @@ func TestAssertNotVisibleDefaultTimeout(t *testing.T) {
 
 // TestScrollUntilVisibleWithTimeoutMs tests scrollUntilVisible using TimeoutMs for maxScrolls
 func TestScrollUntilVisibleWithTimeoutMs(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

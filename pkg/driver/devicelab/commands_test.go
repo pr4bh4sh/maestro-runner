@@ -101,6 +101,7 @@ func (m *mockDeviceLabClient) WaitForWindowUpdate(string, int) (bool, error) { r
 var _ DeviceLabClient = (*mockDeviceLabClient)(nil)
 
 func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
+	t.Parallel()
 	captures := 0
 	client := &mockDeviceLabClient{
 		sourceFunc: func() (string, error) {
@@ -128,6 +129,7 @@ func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 }
 
 func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
+	t.Parallel()
 	client := &mockDeviceLabClient{
 		sourceFunc: func() (string, error) {
 			return `<?xml version="1.0" encoding="UTF-8"?>
@@ -159,6 +161,7 @@ func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
 }
 
 func TestScrollUntilVisibleDefaultMaxScrolls(t *testing.T) {
+	t.Parallel()
 	captures := 0
 	client := &mockDeviceLabClient{
 		sourceFunc: func() (string, error) {

@@ -297,11 +297,16 @@ func bootTimeout(cfg *RunConfig) time.Duration {
 	return timeout
 }
 
+// EmulatorStarter abstracts emulator start operations for testability.
+type EmulatorStarter interface {
+	Start(avdName string, timeout time.Duration) (string, error)
+}
+
 // handleEmulatorStartup starts Android emulators if requested via CLI flags.
 // Handles two cases:
 // 1. --start-emulator: Explicitly start a specific AVD
 // 2. --auto-start-emulator: Start an emulator if no devices are found
-func handleEmulatorStartup(cfg *RunConfig, mgr *emulator.Manager) error {
+func handleEmulatorStartup(cfg *RunConfig, mgr EmulatorStarter) error {
 	// Only handle Android emulators
 	if cfg.Platform != "" && cfg.Platform != "android" {
 		return nil

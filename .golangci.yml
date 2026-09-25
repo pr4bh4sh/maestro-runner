@@ -20,3 +20,14 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      # Test files: ignore unchecked error returns - HTTP handler helpers,
+      # mock servers, and deferred teardown are irrelevant in tests.
+      - path: "_test\\.go"
+        linters:
+          - errcheck
+
+      # Deferred cleanup: fire-and-forget, errors not actionable.
+      - source: "^\\s+defer "
+        linters:
+          - errcheck

@@ -3,6 +3,8 @@ package maestro
 import (
 	"encoding/json"
 	"sync"
+
+	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
 // EventHandler is a callback for push events from the device driver.
@@ -79,6 +81,7 @@ func NewCDPTracker(c *Client) *CDPTracker {
 		if err := json.Unmarshal(params, &state); err != nil {
 			return
 		}
+		logger.Info("[cdp:1-detect] push event from device agent: available=%v socket=%s", state.Available, state.Socket)
 		ct.mu.Lock()
 		ct.state = state
 		ct.ready = true

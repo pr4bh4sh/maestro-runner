@@ -1878,7 +1878,7 @@ func (d *Driver) initPage(page *rod.Page) error {
 	}); err != nil {
 		return err
 	}
-	_, err := page.EvalOnNewDocument(jsHelperCode)
+	_, err := page.EvalOnNewDocument(JSHelperCode)
 	return err
 }
 

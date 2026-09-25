@@ -1101,7 +1101,7 @@ func TestSetAirplaneModeEnabled(t *testing.T) {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
 
-	// Should try "cmd connectivity airplane-mode enable" first (Android 11+)
+	// New implementation tries "cmd connectivity airplane-mode" first (Android 11+)
 	if len(mock.commands) < 1 || mock.commands[0] != "cmd connectivity airplane-mode enable" {
 		t.Errorf("expected cmd connectivity command, got %v", mock.commands)
 	}
@@ -1118,7 +1118,7 @@ func TestSetAirplaneModeDisabled(t *testing.T) {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
 
-	// Should try "cmd connectivity airplane-mode disable" first (Android 11+)
+	// New implementation tries "cmd connectivity airplane-mode" first (Android 11+)
 	if len(mock.commands) < 1 || mock.commands[0] != "cmd connectivity airplane-mode disable" {
 		t.Errorf("expected cmd connectivity command, got %v", mock.commands)
 	}
@@ -1150,7 +1150,7 @@ func TestToggleAirplaneModeFromOff(t *testing.T) {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
 
-	// First command reads current state, second enables via cmd connectivity
+	// Should toggle from disable → enable via "cmd connectivity airplane-mode enable"
 	found := false
 	for _, cmd := range mock.commands {
 		if cmd == "cmd connectivity airplane-mode enable" {
@@ -1159,7 +1159,7 @@ func TestToggleAirplaneModeFromOff(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected cmd connectivity enable, got commands: %v", mock.commands)
+		t.Errorf("expected toggle to enable, got commands: %v", mock.commands)
 	}
 }
 
@@ -1174,7 +1174,7 @@ func TestToggleAirplaneModeFromOn(t *testing.T) {
 		t.Errorf("expected success, got error: %v", result.Error)
 	}
 
-	// First command reads current state, second disables via cmd connectivity
+	// Should toggle from enable → disable via "cmd connectivity airplane-mode disable"
 	found := false
 	for _, cmd := range mock.commands {
 		if cmd == "cmd connectivity airplane-mode disable" {
@@ -1183,7 +1183,7 @@ func TestToggleAirplaneModeFromOn(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected cmd connectivity disable, got commands: %v", mock.commands)
+		t.Errorf("expected toggle to disable, got commands: %v", mock.commands)
 	}
 }
 
@@ -2146,7 +2146,8 @@ func TestStartRecordingError(t *testing.T) {
 
 func TestHideKeyboardSuccess(t *testing.T) {
 	client := &MockUIA2Client{}
-	driver := New(client, nil, nil)
+	shell := &MockShellExecutor{responses: []string{"mInputShown=true", "mInputShown=false"}}
+	driver := New(client, nil, shell)
 
 	step := &flow.HideKeyboardStep{}
 	result := driver.hideKeyboard(step)
@@ -2492,7 +2493,9 @@ func TestSwipeWithAbsoluteCoords(t *testing.T) {
 
 func TestSwipeEmptyDirectionDefaultsToUp(t *testing.T) {
 	shell := &MockShellExecutor{}
-	client := &MockUIA2Client{}
+	client := &MockUIA2Client{
+		sourceData: `<hierarchy rotation="0"><node class="android.widget.FrameLayout" bounds="[0,0][1080,1920]" text="" resource-id="" content-desc="" enabled="true" displayed="true"/></hierarchy>`,
+	}
 	driver := New(client, &core.PlatformInfo{ScreenWidth: 1080, ScreenHeight: 1920}, shell)
 
 	step := &flow.SwipeStep{Direction: ""}
@@ -3247,6 +3250,7 @@ func TestSetWaitForIdleTimeoutServerError(t *testing.T) {
 // ============================================================================
 
 func TestTravelSuccess(t *testing.T) {
+	t.Parallel()
 	shell := &MockShellExecutor{}
 	driver := &Driver{device: shell}
 
@@ -4098,6 +4102,7 @@ func TestLaunchAppViaShellAmStartErrorWithArgs(t *testing.T) {
 // ============================================================================
 
 func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	captures := 0
 	client := &MockUIA2Client{
@@ -4132,6 +4137,7 @@ func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 }
 
 func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
+	t.Parallel()
 	client := &MockUIA2Client{
 		sourceFunc: func() (string, error) {
 			// Element never found
@@ -4166,6 +4172,7 @@ func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
 }
 
 func TestScrollUntilVisibleDefaultMaxScrolls(t *testing.T) {
+	t.Parallel()
 	captures := 0
 	client := &MockUIA2Client{
 		sourceFunc: func() (string, error) {

@@ -1,4 +1,4 @@
-.PHONY: build clean test test-race test-coverage test-coverage-check cover-gaps test-fuzz bench install check ci fmt fmt-check imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck
+.PHONY: build clean test test-race test-coverage test-coverage-check cover-gaps test-fuzz bench install check ci fmt fmt-check imports fumpt staticcheck revive vet errcheck nilaway gosec ineffassign deadcode govulncheck lint-py lint-py-fix client-test client-test-ts client-test-py hooks-install
 
 # Build variables
 BINARY_NAME=maestro-runner
@@ -164,6 +164,31 @@ run:
 
 validate:
 	./$(BINARY_NAME) validate $(FLOW)
+
+# Python lint targets
+lint-py:
+	cd client/python && .venv/bin/ruff check maestro_runner tests
+	cd client/python && .venv/bin/mypy maestro_runner
+
+lint-py-fix:
+	cd client/python && .venv/bin/ruff check --fix maestro_runner tests
+	cd client/python && .venv/bin/ruff format maestro_runner tests
+
+# Client unit test targets
+client-test-ts:
+	cd client/typescript && npm run test:unit
+
+client-test-py:
+	cd client/python && .venv/bin/python -m pytest tests/test_client.py tests/test_models.py -v
+
+client-test: client-test-ts client-test-py
+	@echo "Client unit tests passed"
+
+hooks-install:
+	@git config core.hooksPath .githooks
+	@chmod +x .githooks/commit-msg
+	@chmod +x .githooks/pre-push
+	@echo "Installed git hooks from .githooks"
 
 # Release
 release: clean build-all

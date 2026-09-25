@@ -194,6 +194,13 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 		result = d.eraseText(s)
 	case *flow.HideKeyboardStep:
 		result = d.hideKeyboard(s)
+	case *flow.IsKeyboardVisibleStep:
+		visible := d.IsKeyboardVisible()
+		result = &core.CommandResult{
+			Success: true,
+			Message: fmt.Sprintf("%t", visible),
+			Data:    visible,
+		}
 	case *flow.InputRandomStep:
 		result = d.inputRandom(s)
 
@@ -331,7 +338,14 @@ func (d *Driver) GetState() *core.StateSnapshot {
 		state.ClipboardText = clipboard
 	}
 
+	state.KeyboardVisible = d.IsKeyboardVisible()
+
 	return state
+}
+
+// IsKeyboardVisible returns whether the soft keyboard is currently shown.
+func (d *Driver) IsKeyboardVisible() bool {
+	return d.isInputShown()
 }
 
 // GetPlatformInfo returns device/platform information.

@@ -1,0 +1,319 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1000001 /* DeviceLabDriverRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000001 /* DeviceLabDriverRunner.swift */; };
+		A1000002 /* WebSocketServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002 /* WebSocketServer.swift */; };
+		A1000003 /* RequestRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000003 /* RequestRouter.swift */; };
+		A1000004 /* Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000004 /* Protocol.swift */; };
+		A1000005 /* SessionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000005 /* SessionHandler.swift */; };
+		A1000006 /* ElementHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000006 /* ElementHandler.swift */; };
+		A1000007 /* GestureHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000007 /* GestureHandler.swift */; };
+		A1000008 /* InputHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000008 /* InputHandler.swift */; };
+		A1000009 /* AppHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000009 /* AppHandler.swift */; };
+		A100000A /* SettingsHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000A /* SettingsHandler.swift */; };
+		A100000B /* SnapshotManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000B /* SnapshotManager.swift */; };
+		A100000C /* ElementTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000C /* ElementTree.swift */; };
+		A100000D /* ElementModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000D /* ElementModel.swift */; };
+		A100000E /* ObjCExceptionCatcher.m in Sources */ = {isa = PBXBuildFile; fileRef = B100000F /* ObjCExceptionCatcher.m */; };
+		A100000F /* EventSynthesizer.m in Sources */ = {isa = PBXBuildFile; fileRef = B1000012 /* EventSynthesizer.m */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B1000001 /* DeviceLabDriverRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLabDriverRunner.swift; sourceTree = "<group>"; };
+		B1000002 /* WebSocketServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketServer.swift; sourceTree = "<group>"; };
+		B1000003 /* RequestRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestRouter.swift; sourceTree = "<group>"; };
+		B1000004 /* Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocol.swift; sourceTree = "<group>"; };
+		B1000005 /* SessionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHandler.swift; sourceTree = "<group>"; };
+		B1000006 /* ElementHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElementHandler.swift; sourceTree = "<group>"; };
+		B1000007 /* GestureHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureHandler.swift; sourceTree = "<group>"; };
+		B1000008 /* InputHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputHandler.swift; sourceTree = "<group>"; };
+		B1000009 /* AppHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppHandler.swift; sourceTree = "<group>"; };
+		B100000A /* SettingsHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsHandler.swift; sourceTree = "<group>"; };
+		B100000B /* SnapshotManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotManager.swift; sourceTree = "<group>"; };
+		B100000C /* ElementTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElementTree.swift; sourceTree = "<group>"; };
+		B100000D /* ElementModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElementModel.swift; sourceTree = "<group>"; };
+		B100000E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B100000F /* ObjCExceptionCatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ObjCExceptionCatcher.m; sourceTree = "<group>"; };
+		B1000010 /* ObjCExceptionCatcher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ObjCExceptionCatcher.h; sourceTree = "<group>"; };
+		B1000011 /* DeviceLabDriver-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "DeviceLabDriver-Bridging-Header.h"; sourceTree = "<group>"; };
+		B1000012 /* EventSynthesizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = EventSynthesizer.m; sourceTree = "<group>"; };
+		B1000013 /* EventSynthesizer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EventSynthesizer.h; sourceTree = "<group>"; };
+		C1000001 /* DeviceLabDriverRunner.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DeviceLabDriverRunner.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D1000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		E1000001 /* Root */ = {
+			isa = PBXGroup;
+			children = (
+				E1000002 /* DeviceLabDriverRunner */,
+				E1000003 /* Sources */,
+				E1000009 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E1000002 /* DeviceLabDriverRunner */ = {
+			isa = PBXGroup;
+			children = (
+				B1000001 /* DeviceLabDriverRunner.swift */,
+				B100000E /* Info.plist */,
+			);
+			path = DeviceLabDriverRunner;
+			sourceTree = "<group>";
+		};
+		E1000003 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				E1000004 /* Server */,
+				E1000005 /* Handlers */,
+				E1000006 /* Core */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		E1000004 /* Server */ = {
+			isa = PBXGroup;
+			children = (
+				B1000002 /* WebSocketServer.swift */,
+				B1000003 /* RequestRouter.swift */,
+				B1000004 /* Protocol.swift */,
+			);
+			path = Server;
+			sourceTree = "<group>";
+		};
+		E1000005 /* Handlers */ = {
+			isa = PBXGroup;
+			children = (
+				B1000005 /* SessionHandler.swift */,
+				B1000006 /* ElementHandler.swift */,
+				B1000007 /* GestureHandler.swift */,
+				B1000008 /* InputHandler.swift */,
+				B1000009 /* AppHandler.swift */,
+				B100000A /* SettingsHandler.swift */,
+			);
+			path = Handlers;
+			sourceTree = "<group>";
+		};
+		E1000006 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				B100000B /* SnapshotManager.swift */,
+				B100000C /* ElementTree.swift */,
+				B100000D /* ElementModel.swift */,
+				B1000010 /* ObjCExceptionCatcher.h */,
+				B100000F /* ObjCExceptionCatcher.m */,
+				B1000011 /* DeviceLabDriver-Bridging-Header.h */,
+				B1000013 /* EventSynthesizer.h */,
+				B1000012 /* EventSynthesizer.m */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		E1000009 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C1000001 /* DeviceLabDriverRunner.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F1000001 /* DeviceLabDriverRunner */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = G1000003 /* Build configuration list for PBXNativeTarget "DeviceLabDriverRunner" */;
+			buildPhases = (
+				F1000002 /* Sources */,
+				D1000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DeviceLabDriverRunner;
+			productName = DeviceLabDriverRunner;
+			productReference = C1000001 /* DeviceLabDriverRunner.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F1000010 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+			};
+			buildConfigurationList = G1000001 /* Build configuration list for PBXProject "DeviceLabDriver" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = E1000001 /* Root */;
+			productRefGroup = E1000009 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F1000001 /* DeviceLabDriverRunner */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		F1000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000001 /* DeviceLabDriverRunner.swift in Sources */,
+				A1000002 /* WebSocketServer.swift in Sources */,
+				A1000003 /* RequestRouter.swift in Sources */,
+				A1000004 /* Protocol.swift in Sources */,
+				A1000005 /* SessionHandler.swift in Sources */,
+				A1000006 /* ElementHandler.swift in Sources */,
+				A1000007 /* GestureHandler.swift in Sources */,
+				A1000008 /* InputHandler.swift in Sources */,
+				A1000009 /* AppHandler.swift in Sources */,
+				A100000A /* SettingsHandler.swift in Sources */,
+				A100000B /* SnapshotManager.swift in Sources */,
+				A100000C /* ElementTree.swift in Sources */,
+				A100000D /* ElementModel.swift in Sources */,
+				A100000E /* ObjCExceptionCatcher.m in Sources */,
+				A100000F /* EventSynthesizer.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		H1000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		H1000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				ONLY_ACTIVE_ARCH = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		H1000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DeviceLabDriverRunner/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.devicelab.DeviceLabDriverRunner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/Core/DeviceLabDriver-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "";
+			};
+			name = Debug;
+		};
+		H1000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DeviceLabDriverRunner/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.devicelab.DeviceLabDriverRunner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/Core/DeviceLabDriver-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		G1000001 /* Build configuration list for PBXProject "DeviceLabDriver" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				H1000001 /* Debug */,
+				H1000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		G1000003 /* Build configuration list for PBXNativeTarget "DeviceLabDriverRunner" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				H1000003 /* Debug */,
+				H1000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = F1000010 /* Project object */;
+}

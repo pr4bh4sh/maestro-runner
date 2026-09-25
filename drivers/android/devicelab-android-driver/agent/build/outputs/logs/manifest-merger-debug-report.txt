@@ -1,0 +1,86 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:2:1-17:12
+INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:2:1-17:12
+INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:2:1-17:12
+INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:2:1-17:12
+MERGED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:17:1-32:12
+MERGED from [androidx.test.uiautomator:uiautomator:2.3.0] /Users/omnarayan/.gradle/caches/transforms-3/ea71cbba1e14911000e15f95ef259f67/transformed/uiautomator-2.3.0/AndroidManifest.xml:2:1-7:12
+MERGED from [androidx.test.services:storage:1.4.2] /Users/omnarayan/.gradle/caches/transforms-3/84ba689f8588b0c9124eb01ac084d903/transformed/storage-1.4.2/AndroidManifest.xml:17:1-24:12
+MERGED from [androidx.test:monitor:1.6.1] /Users/omnarayan/.gradle/caches/transforms-3/f0c4ffb1d0001c571c08de318540ef27/transformed/monitor-1.6.1/AndroidManifest.xml:17:1-24:12
+MERGED from [androidx.test:annotation:1.0.1] /Users/omnarayan/.gradle/caches/transforms-3/0206d03c91d9bbe95cd210bce62c1ce8/transformed/annotation-1.0.1/AndroidManifest.xml:17:1-24:12
+MERGED from [androidx.tracing:tracing:1.1.0] /Users/omnarayan/.gradle/caches/transforms-3/3ef51527abdafe69403c52018cb6743f/transformed/tracing-1.1.0/AndroidManifest.xml:17:1-24:12
+MERGED from [androidx.annotation:annotation-experimental:1.1.0] /Users/omnarayan/.gradle/caches/transforms-3/7665749b5972d47a97a64d1a1c2bf5d5/transformed/annotation-experimental-1.1.0/AndroidManifest.xml:17:1-24:12
+	package
+		INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+	android:versionName
+		INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+	android:versionCode
+		INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+	xmlns:android
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:2:11-69
+uses-permission#android.permission.INTERNET
+ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:4:5-67
+	android:name
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:4:22-64
+uses-permission#android.permission.ACCESS_NETWORK_STATE
+ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:5:5-79
+	android:name
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:5:22-76
+application
+ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:7:5-12:19
+INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:7:5-12:19
+MERGED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:30:5-20
+MERGED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:30:5-20
+	android:extractNativeLibs
+		INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+	android:label
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:9:9-41
+	android:allowBackup
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:8:9-36
+uses-library#android.test.runner
+ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:11:9-60
+	android:name
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:11:23-57
+instrumentation
+ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:14:5-16:64
+	android:targetPackage
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:16:9-61
+	android:name
+		ADDED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:15:9-74
+uses-sdk
+INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+MERGED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.test.uiautomator:uiautomator:2.3.0] /Users/omnarayan/.gradle/caches/transforms-3/ea71cbba1e14911000e15f95ef259f67/transformed/uiautomator-2.3.0/AndroidManifest.xml:5:5-44
+MERGED from [androidx.test.uiautomator:uiautomator:2.3.0] /Users/omnarayan/.gradle/caches/transforms-3/ea71cbba1e14911000e15f95ef259f67/transformed/uiautomator-2.3.0/AndroidManifest.xml:5:5-44
+MERGED from [androidx.test.services:storage:1.4.2] /Users/omnarayan/.gradle/caches/transforms-3/84ba689f8588b0c9124eb01ac084d903/transformed/storage-1.4.2/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.test.services:storage:1.4.2] /Users/omnarayan/.gradle/caches/transforms-3/84ba689f8588b0c9124eb01ac084d903/transformed/storage-1.4.2/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.test:monitor:1.6.1] /Users/omnarayan/.gradle/caches/transforms-3/f0c4ffb1d0001c571c08de318540ef27/transformed/monitor-1.6.1/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.test:monitor:1.6.1] /Users/omnarayan/.gradle/caches/transforms-3/f0c4ffb1d0001c571c08de318540ef27/transformed/monitor-1.6.1/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.test:annotation:1.0.1] /Users/omnarayan/.gradle/caches/transforms-3/0206d03c91d9bbe95cd210bce62c1ce8/transformed/annotation-1.0.1/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.test:annotation:1.0.1] /Users/omnarayan/.gradle/caches/transforms-3/0206d03c91d9bbe95cd210bce62c1ce8/transformed/annotation-1.0.1/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.tracing:tracing:1.1.0] /Users/omnarayan/.gradle/caches/transforms-3/3ef51527abdafe69403c52018cb6743f/transformed/tracing-1.1.0/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.tracing:tracing:1.1.0] /Users/omnarayan/.gradle/caches/transforms-3/3ef51527abdafe69403c52018cb6743f/transformed/tracing-1.1.0/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.annotation:annotation-experimental:1.1.0] /Users/omnarayan/.gradle/caches/transforms-3/7665749b5972d47a97a64d1a1c2bf5d5/transformed/annotation-experimental-1.1.0/AndroidManifest.xml:20:5-22:41
+MERGED from [androidx.annotation:annotation-experimental:1.1.0] /Users/omnarayan/.gradle/caches/transforms-3/7665749b5972d47a97a64d1a1c2bf5d5/transformed/annotation-experimental-1.1.0/AndroidManifest.xml:20:5-22:41
+	android:targetSdkVersion
+		INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from /Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml
+queries
+ADDED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:24:5-28:15
+package#androidx.test.orchestrator
+ADDED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:25:9-62
+	android:name
+		ADDED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:25:18-59
+package#androidx.test.services
+ADDED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:26:9-58
+	android:name
+		ADDED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:26:18-55
+package#com.google.android.apps.common.testing.services
+ADDED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:27:9-83
+	android:name
+		ADDED from [androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:27:18-80

@@ -452,7 +452,7 @@ func injectPortIntoXctestrun(path string, port int) error {
 // usable again.
 func resetSimulator(ctx context.Context, udid string, logOut io.Writer) error {
 	if logOut != nil {
-		fmt.Fprintf(logOut, "  ⟳ Resetting simulator %s...\n", udid)
+		_, _ = fmt.Fprintf(logOut, "  ⟳ Resetting simulator %s...\n", udid)
 	}
 	shutdownCmd := exec.CommandContext(ctx, "xcrun", "simctl", "shutdown", udid)
 	if out, err := shutdownCmd.CombinedOutput(); err != nil {

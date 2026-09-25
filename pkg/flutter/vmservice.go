@@ -72,7 +72,7 @@ func Connect(wsURL string) (*VMServiceClient, error) {
 
 	// Find the Flutter isolate
 	if err := c.findFlutterIsolate(); err != nil {
-		conn.Close(websocket.StatusNormalClosure, "")
+		_ = conn.Close(websocket.StatusNormalClosure, "")
 		cancel()
 		return nil, fmt.Errorf("find flutter isolate: %w", err)
 	}
@@ -115,7 +115,7 @@ func ConnectUnix(socketPath, token string) (*VMServiceClient, error) {
 	}
 
 	if err := c.findFlutterIsolate(); err != nil {
-		conn.Close(websocket.StatusNormalClosure, "")
+		_ = conn.Close(websocket.StatusNormalClosure, "")
 		cancel()
 		return nil, fmt.Errorf("find flutter isolate: %w", err)
 	}

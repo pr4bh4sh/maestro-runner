@@ -194,6 +194,10 @@ func TestListAVDs_Integration(t *testing.T) {
 }
 
 func TestManager_AllocatePort(t *testing.T) {
+	// AllocatePort calls RunningEmulatorPorts() which runs "adb devices".
+	// Use a fake adb so a live emulator-5554 is not seen as occupied.
+	t.Setenv("PATH", fakeADB(t)+":"+os.Getenv("PATH"))
+
 	// Create a clean manager without persistent port mapping
 	mgr := &Manager{
 		portMap: make(map[string]int),
@@ -428,6 +432,11 @@ func TestForceKillEmulator_InvalidSerialFormats(t *testing.T) {
 }
 
 func TestForceKillEmulator_ValidSerialNoProcess(t *testing.T) {
+	// forceKillEmulator falls back to pgrep -f "qemu-system.*-avd" which would
+	// find and kill a real running emulator. Use a fake pgrep (via fakeADB) that
+	// always exits 1 so no real process is ever touched.
+	t.Setenv("PATH", fakeADB(t)+":"+os.Getenv("PATH"))
+
 	// Valid serial format but no matching process running.
 	// This test exercises the code path where pgrep fails.
 	err := forceKillEmulator("emulator-59998")
@@ -443,13 +452,47 @@ func TestForceKillEmulator_ValidSerialNoProcess(t *testing.T) {
 // Additional tests for Manager.Shutdown
 // ============================================================
 
+// fakeADB writes fake binaries into a temp dir so tests never hit real adb or
+// pgrep:
+//   - "adb":   exits 0 for "emu kill", exits 1 for "get-state" (device gone),
+//     exits 0 with empty output for everything else (e.g. "devices").
+//   - "pgrep": always exits 1 (no process found), preventing forceKillEmulator
+//     from ever locating or killing a real emulator process.
+//
+// Prepend the returned dir to PATH via t.Setenv so exec.Command resolves to
+// these stubs instead of the real binaries.
+func fakeADB(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	// fake pgrep — always reports "not found"
+	if err := os.WriteFile(dir+"/pgrep", []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("fakeADB: write pgrep: %v", err)
+	}
+
+	script := `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    kill) exit 0 ;;
+    get-state) exit 1 ;;
+  esac
+done
+exit 0
+`
+	path := dir + "/adb"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("fakeADB: %v", err)
+	}
+	return dir
+}
+
 func TestManager_Shutdown_TrackedEmulatorNotRunning(t *testing.T) {
+	// Point PATH at a fake adb so no real "adb -s emulator-5554 emu kill" fires.
+	t.Setenv("PATH", fakeADB(t)+":"+os.Getenv("PATH"))
+
 	mgr := NewManager()
 
 	// Register an emulator that is not actually running.
-	// Shutdown will try ShutdownEmulator which will run "adb -s emulator-5554 emu kill"
-	// and fail, then fall through to forceKillEmulator.
-	// The test verifies the error propagation path.
 	instance := &EmulatorInstance{
 		AVDName:     "test-avd",
 		Serial:      "emulator-5554",
@@ -460,18 +503,21 @@ func TestManager_Shutdown_TrackedEmulatorNotRunning(t *testing.T) {
 	}
 	mgr.started.Store("emulator-5554", instance)
 
-	// Shutdown should eventually fail because there is no real emulator running
-	// but this exercises the Shutdown code path.
-	// We do not check the error value because it depends on whether adb is available.
-	_ = mgr.Shutdown("emulator-5554")
+	// Shutdown should succeed: fake adb handles emu kill + get-state.
+	if err := mgr.Shutdown("emulator-5554"); err != nil {
+		t.Errorf("Shutdown() with fake adb should not error, got: %v", err)
+	}
 
-	// After Shutdown attempt (whether it succeeds or fails on real machine),
-	// verify the emulator was removed from tracking on success,
-	// or still tracked on failure.
-	// In unit tests without adb, it will fail, so the emulator stays tracked.
+	// The emulator should be removed from tracking after a successful shutdown.
+	if mgr.IsStartedByUs("emulator-5554") {
+		t.Error("emulator-5554 should have been removed from tracking after Shutdown()")
+	}
 }
 
 func TestManager_ShutdownAll_MultipleTracked(t *testing.T) {
+	// Point PATH at a fake adb so no real emu kill commands fire.
+	t.Setenv("PATH", fakeADB(t)+":"+os.Getenv("PATH"))
+
 	mgr := NewManager()
 
 	// Track two emulators that are not actually running
@@ -485,16 +531,16 @@ func TestManager_ShutdownAll_MultipleTracked(t *testing.T) {
 		mgr.started.Store(serial, instance)
 	}
 
-	// This will attempt to shut down both.
-	// They are not actually running, so ShutdownEmulator will fail.
-	err := mgr.ShutdownAll()
-	// We expect errors because emulators are not running
-	if err == nil {
-		// This can happen if adb is not found at all (no error from ShutdownEmulator)
-		// or if system adb responds unexpectedly
-		t.Log("ShutdownAll returned nil (adb may not be available)")
-	} else {
-		t.Logf("ShutdownAll returned expected error: %v", err)
+	// ShutdownAll should succeed: fake adb handles all adb sub-commands.
+	if err := mgr.ShutdownAll(); err != nil {
+		t.Errorf("ShutdownAll() with fake adb should not error, got: %v", err)
+	}
+
+	// Both emulators should be removed from tracking.
+	for _, serial := range []string{"emulator-5554", "emulator-5556"} {
+		if mgr.IsStartedByUs(serial) {
+			t.Errorf("%s should have been removed from tracking after ShutdownAll()", serial)
+		}
 	}
 }
 

@@ -310,6 +310,7 @@ func TestEraseTextPartialEraseSendKeysFails(t *testing.T) {
 
 // TestOpenLinkWithAutoVerify tests openLink with autoVerify flag set.
 func TestOpenLinkWithAutoVerify(t *testing.T) {
+	t.Parallel()
 	var urlRequested string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -365,6 +366,7 @@ func TestOpenLinkWithBrowserFlag(t *testing.T) {
 
 // TestOpenLinkWithBothFlags tests openLink with both autoVerify and browser flags.
 func TestOpenLinkWithBothFlags(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		jsonResponse(w, map[string]interface{}{"status": 0})
@@ -587,6 +589,7 @@ func TestScrollUntilVisibleImmediateFind(t *testing.T) {
 
 // TestScrollUntilVisibleUpDirection tests scrollUntilVisible with "up" direction.
 func TestScrollUntilVisibleUpDirection(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	server := mockWDAServerWithScrollElements(1) // Found after 1 scroll
 	// Override to count scrolls
@@ -651,6 +654,7 @@ func TestScrollUntilVisibleUpDirection(t *testing.T) {
 // off-screen (visible="false"). This is the core iOS bug: findElement returns
 // off-screen elements, so we must check info.Visible before declaring success.
 func TestScrollUntilVisibleSkipsOffScreenElement(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -712,6 +716,7 @@ func TestScrollUntilVisibleSkipsOffScreenElement(t *testing.T) {
 // TestScrollUntilVisibleCaseInsensitiveDirection tests that direction is
 // case-insensitive (e.g., "DOWN", "Down" work the same as "down").
 func TestScrollUntilVisibleCaseInsensitiveDirection(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1534,6 +1539,7 @@ func TestSetPermissionsEmptyPermissions(t *testing.T) {
 // TestSetPermissionsAllAllow tests setPermissions with "all" permission and "allow" value.
 // Since exec.Command("xcrun",...) will fail in test, the code handles errors gracefully.
 func TestSetPermissionsAllAllow(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		jsonResponse(w, map[string]interface{}{"status": 0})
@@ -1564,6 +1570,7 @@ func TestSetPermissionsAllAllow(t *testing.T) {
 
 // TestSetPermissionsSpecificAllow tests setPermissions with a specific permission.
 func TestSetPermissionsSpecificAllow(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		jsonResponse(w, map[string]interface{}{"status": 0})
@@ -1589,6 +1596,7 @@ func TestSetPermissionsSpecificAllow(t *testing.T) {
 
 // TestSetPermissionsSpecificDeny tests setPermissions with "deny" value.
 func TestSetPermissionsSpecificDeny(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		jsonResponse(w, map[string]interface{}{"status": 0})
@@ -3940,6 +3948,7 @@ func TestDismissAlertSuccess(t *testing.T) {
 // TestAcceptAlertNoAlertTimeout tests acceptAlert when no alert appears within timeout.
 // Should succeed silently per the waitForAlert contract.
 func TestAcceptAlertNoAlertTimeout(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/alert/accept") && r.Method == "POST" {
@@ -3971,6 +3980,7 @@ func TestAcceptAlertNoAlertTimeout(t *testing.T) {
 
 // TestDismissAlertNoAlertTimeout tests dismissAlert when no alert appears within timeout.
 func TestDismissAlertNoAlertTimeout(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/alert/dismiss") && r.Method == "POST" {
@@ -4028,6 +4038,7 @@ func TestAcceptAlertDefaultTimeout(t *testing.T) {
 
 // TestWaitForAlertPollingBehavior tests that waitForAlert polls and eventually finds an alert.
 func TestWaitForAlertPollingBehavior(t *testing.T) {
+	t.Parallel()
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -4334,6 +4345,7 @@ func TestSetAirplaneModeActivateSettingsFails(t *testing.T) {
 }
 
 func TestSetAirplaneModeElementNotFound(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/wda/apps/activate") {
 			jsonResponse(w, map[string]interface{}{"status": 0})
@@ -4496,6 +4508,7 @@ func TestToggleAirplaneModeTapFails(t *testing.T) {
 // =============================================================================
 
 func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	captures := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4548,6 +4561,7 @@ func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 }
 
 func TestScrollUntilVisibleRespectsTimeout(t *testing.T) {
+	t.Parallel()
 	scrollCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

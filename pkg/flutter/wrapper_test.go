@@ -485,6 +485,7 @@ func TestFlutterDriver_WidgetTreeFallback_Identifier(t *testing.T) {
 }
 
 func TestFlutterDriver_WidgetTreeFallback_NoMatch(t *testing.T) {
+	t.Parallel()
 	// Inner driver can't find element
 	inner := &mockDriver{
 		executeFunc: func(step flow.Step) *core.CommandResult {

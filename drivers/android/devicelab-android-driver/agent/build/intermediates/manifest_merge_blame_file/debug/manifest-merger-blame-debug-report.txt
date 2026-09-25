@@ -1,0 +1,51 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="dev.devicelab.driver.android"
+4    android:versionCode="1"
+5    android:versionName="1.0.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="21"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:4:5-67
+11-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+12-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:5:5-79
+12-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:5:22-76
+13
+14    <instrumentation
+14-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:14:5-16:64
+15        android:name="dev.devicelab.driver.android.DeviceLabDriverRunner"
+15-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:15:9-74
+16        android:targetPackage="dev.devicelab.driver.android" />
+16-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:16:9-61
+17
+18    <queries>
+18-->[androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:24:5-28:15
+19        <package android:name="androidx.test.orchestrator" />
+19-->[androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:25:9-62
+19-->[androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:25:18-59
+20        <package android:name="androidx.test.services" />
+20-->[androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:26:9-58
+20-->[androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:26:18-55
+21        <package android:name="com.google.android.apps.common.testing.services" />
+21-->[androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:27:9-83
+21-->[androidx.test:runner:1.5.2] /Users/omnarayan/.gradle/caches/transforms-3/e3aadfa7130535ea5a1befba6f24cd0d/transformed/runner-1.5.2/AndroidManifest.xml:27:18-80
+22    </queries>
+23
+24    <application
+24-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:7:5-12:19
+25        android:allowBackup="false"
+25-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:8:9-36
+26        android:debuggable="true"
+27        android:extractNativeLibs="true"
+28        android:label="DeviceLab Driver" >
+28-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:9:9-41
+29        <uses-library android:name="android.test.runner" />
+29-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:11:9-60
+29-->/Users/omnarayan/work/go/src/maestro-runner/drivers/android/devicelab-android-driver/agent/src/main/AndroidManifest.xml:11:23-57
+30    </application>
+31
+32</manifest>

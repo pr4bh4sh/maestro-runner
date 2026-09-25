@@ -53,6 +53,8 @@ scripts/
 docs_local/
 research/
 examples/
+# Server log
+maestro-server.log
 
 # Internal planning / research files. Kept local to avoid creating
 # cross-repo backlinks via GitHub's automatic org/repo#N indexing.
@@ -63,6 +65,13 @@ LANDING-DOC-UPDATES-*.md
 SAUCE-LABS-HOOKS.md
 ROADMAP.md
 SNAPSHOT_MODE_SPEC.md
+
+# Track maestro-runner agent skills (exception to the `.claude/` ignore above).
+# Re-include the dir tree, then keep local-only config ignored.
+!.claude/
+.claude/settings.local.json
+!.claude/skills/
+!.claude/skills/**
 
 # npm platform packages are assembled from dist/<version>/ by npm/build-npm.sh.
 # Each carries a ~50MB binary plus drivers; they are build output, not source.

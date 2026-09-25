@@ -60,12 +60,63 @@ func TestParseKeyboardFrame(t *testing.T) {
 			want: &core.Bounds{X: 0, Y: 1428, Width: 1080, Height: 912},
 		},
 		{
+			name: "Android 13+ with both mFrame and touchable region prefers touchable region",
+			input: `  Window #2 Window{abcdef InputMethod}:
+    mDisplayId=0 stackId=0 mSession=Session{...}
+    mAttrs={(0,0)(fillxfill) ty=INPUT_METHOD fmt=TRANSLUCENT}
+    mBaseLayer=131000 mSubLayer=0
+    mFrame=[0,84][1080,2400]
+    mViewVisibility=0x0 mHaveFrame=true mObscured=false
+    touchable region=SkRegion((0,1428,1080,2340))
+    mHasSurface=true isReadyForDisplay()=true
+    Frames: parent=[0,84][1080,2400] display=[0,84][1080,2400] frame=[0,84][1080,2400]
+    isOnScreen=true`,
+			want: &core.Bounds{X: 0, Y: 1428, Width: 1080, Height: 912},
+		},
+		{
 			name: "Android 13+ keyboard hidden (isOnScreen=false)",
 			input: `    mViewVisibility=0x8 mHaveFrame=true
     touchable region=SkRegion((0,1538,1080,2340))
     mHasSurface=false isReadyForDisplay()=false
     Frames: parent=[0,136][1080,2340] frame=[0,136][1080,2340]
     isOnScreen=false`,
+			want: nil,
+		},
+		{
+			name: "keyboard hidden by mViewVisibility=0x8 alone (no isOnScreen field)",
+			input: `    mViewVisibility=0x8 mHaveFrame=true
+    touchable region=SkRegion((0,1538,1080,2340))
+    mHasSurface=false`,
+			want: nil,
+		},
+		{
+			name: "SDK 30 touchable region without isOnScreen field",
+			input: `  Window #1 Window{abcdef InputMethod}:
+    mFrame=[0,84][1080,2400]
+    mViewVisibility=0x0 mHaveFrame=true mObscured=false
+    mGivenContentInsets=[0,1292][0,0]
+    mTouchableInsets=3
+    touchable region=SkRegion((0,1428,1080,2340))
+    mHasSurface=true`,
+			want: &core.Bounds{X: 0, Y: 1428, Width: 1080, Height: 912},
+		},
+		{
+			name: "vendor keyboard — no touchable region, uses mFrame + content insets",
+			input: `  Window #1 Window{abcdef InputMethod}:
+    mFrame=[0,84][1080,2400]
+    mViewVisibility=0x0 mHaveFrame=true mObscured=false
+    mGivenContentInsets=[0,1292][0,0] mGivenVisibleInsets=[0,1292][0,0]
+    mHasSurface=true isReadyForDisplay()=true
+    isOnScreen=true`,
+			want: &core.Bounds{X: 0, Y: 1376, Width: 1080, Height: 1024},
+		},
+		{
+			name: "full-screen mFrame without insets or touchable region — rejected",
+			input: `  Window #1 Window{abcdef InputMethod}:
+    mFrame=[0,84][1080,2400]
+    mViewVisibility=0x0 mHaveFrame=true
+    mGivenContentInsets=[0,0][0,0]
+    isOnScreen=true`,
 			want: nil,
 		},
 	}
@@ -122,7 +173,8 @@ func TestGetKeyboardBounds(t *testing.T) {
 	t.Run("keyboard visible with mFrame", func(t *testing.T) {
 		mock := &MockUIA2Client{}
 		shell := &MockShellExecutor{
-			response: `mFrame=[0,1584][1080,2400]`,
+			response: `mInputShown=true
+mFrame=[0,1584][1080,2400]`,
 		}
 		d := New(mock, nil, shell)
 		bounds := d.getKeyboardBounds()
@@ -137,7 +189,8 @@ func TestGetKeyboardBounds(t *testing.T) {
 	t.Run("keyboard visible Android 13+", func(t *testing.T) {
 		mock := &MockUIA2Client{}
 		shell := &MockShellExecutor{
-			response: `    touchable region=SkRegion((0,1428,1080,2340))
+			response: `mInputShown=true
+    touchable region=SkRegion((0,1428,1080,2340))
     isOnScreen=true`,
 		}
 		d := New(mock, nil, shell)
@@ -158,7 +211,8 @@ func TestIsKeyboardVisible(t *testing.T) {
 		t.Error("expected false when device is nil")
 	}
 
-	shell := &MockShellExecutor{response: `mFrame=[0,1584][1080,2400]`}
+	shell := &MockShellExecutor{response: `mInputShown=true
+mFrame=[0,1584][1080,2400]`}
 	d2 := New(mock, nil, shell)
 	if !d2.isKeyboardVisible() {
 		t.Error("expected true when keyboard frame is present")
@@ -341,7 +395,8 @@ func TestTapOnKeyboardHintMessage(t *testing.T) {
 		defer server.Close()
 
 		shell := &MockShellExecutor{
-			response: `    touchable region=SkRegion((0,1428,1080,2340))
+			response: `mInputShown=true
+    touchable region=SkRegion((0,1428,1080,2340))
     isOnScreen=true`,
 		}
 		client := newMockHTTPClient(server.URL)
@@ -369,7 +424,8 @@ func TestTapOnKeyboardHintMessage(t *testing.T) {
 		defer server.Close()
 
 		shell := &MockShellExecutor{
-			response: `    touchable region=SkRegion((0,1428,1080,2340))
+			response: `mInputShown=true
+    touchable region=SkRegion((0,1428,1080,2340))
     isOnScreen=true`,
 		}
 		client := newMockHTTPClient(server.URL)
@@ -412,7 +468,8 @@ func TestTapOnKeyboardHintMessage(t *testing.T) {
 		defer server.Close()
 
 		shell := &MockShellExecutor{
-			response: `    touchable region=SkRegion((0,1428,1080,2340))
+			response: `mInputShown=true
+    touchable region=SkRegion((0,1428,1080,2340))
     isOnScreen=true`,
 		}
 		client := newMockHTTPClient(server.URL)
@@ -438,7 +495,8 @@ func TestAssertVisibleKeyboardBlocking(t *testing.T) {
 		defer server.Close()
 
 		shell := &MockShellExecutor{
-			response: `    touchable region=SkRegion((0,1428,1080,2340))
+			response: `mInputShown=true
+    touchable region=SkRegion((0,1428,1080,2340))
     isOnScreen=true`,
 		}
 		client := newMockHTTPClient(server.URL)

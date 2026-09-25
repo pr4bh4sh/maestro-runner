@@ -21,11 +21,28 @@ All drivers implement the same interface.
 
 ### Three independent parts
 
-**1. YAML Parser** (`pkg/flow`) — Parses Maestro flow files into typed step structures. Changes here don't affect drivers.
+**1. Step Parser** (`pkg/flow`) — Parses Maestro steps from YAML flow files or JSON (for the REST API). Changes here don't affect drivers.
 
 **2. Driver** (`pkg/core`, `pkg/driver`) — Interface that all backends implement. Adding a new driver means implementing the interface — nothing else changes.
 
 **3. Report** (`pkg/report`) — Consumes execution results and generates reports (JSON, HTML). Changes here don't affect drivers.
+
+### REST API Server
+
+The `server` package (`pkg/server`) provides an alternative entry point. Instead of parsing YAML files, it accepts JSON steps over HTTP and delegates them to a Driver session. This enables programmatic automation from any language.
+
+```
+┌──────────────┐       ┌──────────────┐       ┌──────────────┐
+│  YAML files  │──────▶│              │       │              │
+│   (parser)   │       │    Driver    │──────▶│    Report    │
+│              │       │  (contract)  │       │  (generator) │
+│  JSON / HTTP │──────▶│              │       │              │
+│   (server)   │       └──────┬───────┘       └──────────────┘
+└──────────────┘              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+         UIAutomator2      Appium           WDA
+```
 
 ### Impact matrix
 

@@ -681,14 +681,13 @@ func TestWaitForAnimationToEnd(t *testing.T) {
 	defer server.Close()
 	driver := createTestAppiumDriver(server)
 
-	step := &flow.WaitForAnimationToEndStep{}
+	// Mock server returns identical "fake-png-data" on every /screenshot call,
+	// so bytes.Equal fast-path fires and the screen is immediately "static".
+	step := &flow.WaitForAnimationToEndStep{BaseStep: flow.BaseStep{TimeoutMs: 1000}}
 	result := driver.waitForAnimationToEnd(step)
 
 	if !result.Success {
 		t.Fatalf("expected success, got error: %v", result.Error)
-	}
-	if !strings.Contains(result.Message, "WARNING") {
-		t.Fatalf("expected warning message, got %q", result.Message)
 	}
 }
 

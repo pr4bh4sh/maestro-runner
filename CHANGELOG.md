@@ -128,6 +128,9 @@ Both make selectors stricter. A flow that relied on the looser behaviour will st
 - **Flutter widget trees are no longer re-serialised on every poll** ([#152](https://github.com/devicelab-dev/maestro-runner/issues/152)).
 - **Binaries are built with `-trimpath`**, so build-machine paths are not baked into them.
 
+### Fixed
+- **Appium Android `checked:` selectors used the unrelated `selected` state** — the page-source parser now retains the XML `checked` attribute and state filtering reads it directly, so checked and unchecked switches match correctly even when `selected` differs ([#153](https://github.com/devicelab-dev/maestro-runner/issues/153)).
+
 ## [1.1.25] - 2026-08-25
 
 This release is about **the first five minutes and the oldest complaints**: a `doctor` that says exactly what your machine is missing, a `devices` listing, a `screenshot` command, `runShell` for the one adb call every suite eventually needs, and an `inputText` that checks what actually landed in the field. It is also about **gestures that behave like a user's finger**: a real `dragAndDrop` on every driver — press, hold until the item lifts, move slowly, settle, release — and a `scrollUntilVisible` that stops when the element is actually visible instead of one pixel in. Flutter apps go from barely drivable to ahead of WDA on the DeviceLab iOS driver, `--step-delay` slows any flow down for demos and animation-heavy apps, and JUnit reports carry test-tracking properties and failure artifacts into CI.
@@ -977,6 +980,16 @@ This release closes out the Flutter Web testing story. v1.1.13 fixed the *findin
 ## [1.0.9] - 2026-03-11
 
 ### Added
+- `sleep` command — pause execution for a given number of milliseconds. Supports scalar (`- sleep: 500`) and mapping syntax
+- `isKeyboardVisible` command — query whether the soft keyboard is currently shown. Returns result in `CommandResult.Data` (boolean). Available via YAML, JSON, and REST API
+- `hideKeyboard` strategy field — specify `strategy: appium|escape|esc|back` to force a specific dismissal method instead of trying all three
+- `KeyboardVisible` field added to `StateSnapshot` for richer state introspection
+- REST API server (`maestro-runner server`) — session-based HTTP server for executing Maestro steps via JSON instead of YAML flow files. Supports session management, screenshots, view hierarchy, and device info. Configurable port via `--port` flag or `MAESTRO_SERVER_PORT` env var
+  ```bash
+  maestro-runner --platform android server --port 9999
+  ```
+- JSON step unmarshaling (`pkg/flow/json.go`) — all step types can now be deserialized from JSON, enabling the REST API execute endpoint
+- JSON struct tags on all flow step types and Selector for proper serialization/deserialization
 - **Desktop browser testing** — new `--platform web` with built-in CDP driver for Chrome/Chromium. Headless by default, `--headed` for visible browser. Supports parallel browser execution
   ```bash
   maestro-runner --platform web test flow.yaml

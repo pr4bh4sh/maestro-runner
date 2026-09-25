@@ -138,7 +138,9 @@ func (d *AndroidDevice) checkUiAutomationConflict() error {
 	for _, pkg := range knownConflicts {
 		if strings.Contains(output, pkg) {
 			logger.Info("Stopping %s to avoid UiAutomation conflict", pkg)
-			_, _ = d.Shell("am force-stop " + pkg)
+			if _, err := d.Shell("am force-stop " + pkg); err != nil {
+				logger.Debug("failed to force-stop conflicting package %s: %v", pkg, err)
+			}
 		}
 	}
 
@@ -155,7 +157,9 @@ func (d *AndroidDevice) checkUiAutomationConflict() error {
 			if idx := strings.Index(line, "/"); idx > 0 {
 				pkg := line[:idx]
 				logger.Info("Stopping active instrumentation: %s", pkg)
-				_, _ = d.Shell("am force-stop " + pkg)
+				if _, err := d.Shell("am force-stop " + pkg); err != nil {
+					logger.Debug("failed to force-stop instrumentation package %s: %v", pkg, err)
+				}
 			}
 		}
 	}
@@ -314,7 +318,9 @@ func (d *AndroidDevice) setupDeviceLabSocketForward(cfg DeviceLabDriverConfig) e
 		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 			logger.Debug("failed to remove stale socket file %s: %v", socketPath, err)
 		}
-		os.Remove(pidPathFor(socketPath))
+		if err := os.Remove(pidPathFor(socketPath)); err != nil && !os.IsNotExist(err) {
+			logger.Debug("failed to remove stale socket PID file for %s: %v", socketPath, err)
+		}
 	}
 
 	if err := d.ForwardSocket(socketPath, cfg.DevicePort); err != nil {
@@ -368,7 +374,9 @@ func (d *AndroidDevice) StopDeviceLabDriver() error {
 		if err := os.Remove(d.driverSocketPath); err != nil && !os.IsNotExist(err) {
 			logger.Warn("failed to remove DeviceLab Android Driver socket file %s: %v", d.driverSocketPath, err)
 		}
-		os.Remove(pidPathFor(d.driverSocketPath))
+		if err := os.Remove(pidPathFor(d.driverSocketPath)); err != nil && !os.IsNotExist(err) {
+			logger.Warn("failed to remove DeviceLab Android Driver socket PID file for %s: %v", d.driverSocketPath, err)
+		}
 		d.driverSocketPath = ""
 	}
 	// Clean up default socket path
@@ -379,7 +387,9 @@ func (d *AndroidDevice) StopDeviceLabDriver() error {
 	if err := os.Remove(defaultSocket); err != nil && !os.IsNotExist(err) {
 		logger.Warn("failed to remove default DeviceLab Android Driver socket file %s: %v", defaultSocket, err)
 	}
-	os.Remove(pidPathFor(defaultSocket))
+	if err := os.Remove(pidPathFor(defaultSocket)); err != nil && !os.IsNotExist(err) {
+		logger.Warn("failed to remove default DeviceLab Android Driver socket PID file for %s: %v", defaultSocket, err)
+	}
 
 	// Clean up port forward (Windows)
 	if d.driverLocalPort != 0 {
@@ -463,9 +473,11 @@ func checkDeviceLabHandshake(network, address string) bool {
 	if err != nil {
 		return false
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return false
+	}
 
 	// Send a minimal WebSocket upgrade request
 	handshake := "GET / HTTP/1.1\r\n" +

@@ -146,6 +146,11 @@ func newTestServer() *httptest.Server {
 // newTestDriver creates a Driver connected to the test server.
 func newTestDriver(t *testing.T, serverURL string) *Driver {
 	t.Helper()
+	// Allow browser-backed tests to run concurrently with one another. Each
+	// test still launches its own headless Chromium against its own test
+	// server, so they are independent; this just bounds total CI time by
+	// running them in parallel (capped at GOMAXPROCS by `go test`).
+	t.Parallel()
 	d, err := New(Config{
 		Headless:  true,
 		URL:       serverURL,

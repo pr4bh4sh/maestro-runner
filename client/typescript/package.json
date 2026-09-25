@@ -1,0 +1,42 @@
+{
+  "name": "maestro-runner",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript client for maestro-runner REST API",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo 'Use npm run test:unit (parallel) or npm run test:device (serial real-device)' && exit 1",
+    "test:unit": "jest --testMatch '**/*.unit.test.ts' --passWithNoTests",
+    "test:device": "echo 'Use npm run test:device:android or npm run test:device:ios' && exit 1",
+    "test:device:android": "jest tests/test_add_contact.device.test.ts --runInBand",
+    "test:device:ios": "jest tests/test_add_contact_ios.device.test.ts --runInBand",
+    "test:animation:android": "jest tests/test_wait_for_animation_never_ends.device.test.ts --runInBand",
+    "test:animation:ios": "jest tests/test_wait_for_animation_never_ends.device.test.ts --runInBand",
+    "test:e2e": "npm run test:device",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "keywords": [
+    "maestro",
+    "mobile",
+    "testing",
+    "automation"
+  ],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "eslint": "^9.0.0",
+    "jest": "^29.7.0",
+    "jest-html-reporters": "^3.1.7",
+    "jest-junit": "^16.0.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

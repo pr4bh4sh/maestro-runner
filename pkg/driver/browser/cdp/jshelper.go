@@ -9,3 +9,6 @@ import _ "embed"
 //
 //go:embed jshelper.js
 var jsHelperCode string
+
+// JSHelperCode remains exported for packages that inject the same helper code.
+var JSHelperCode = jsHelperCode

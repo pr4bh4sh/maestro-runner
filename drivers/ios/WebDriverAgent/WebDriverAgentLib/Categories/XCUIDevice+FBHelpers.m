@@ -320,7 +320,7 @@ static bool fb_isLocked;
 
   NSDictionary<NSString *, NSNumber *> *availableButtons = fb_availableButtonNames();
   NSNumber *buttonValue = availableButtons[buttonName.lowercaseString];
-  
+
   if (!buttonValue) {
     NSArray *sortedKeys = [availableButtons.allKeys sortedArrayUsingSelector:@selector(compare:)];
     return [[[FBErrorBuilder builder]
@@ -344,7 +344,7 @@ static bool fb_isLocked;
 {
   NSDictionary<NSString *, NSNumber *> *availableButtons = fb_availableButtonNames();
   NSNumber *buttonValue = availableButtons[buttonName.lowercaseString];
-  
+
   if (!buttonValue) {
     NSArray *sortedKeys = [availableButtons.allKeys sortedArrayUsingSelector:@selector(compare:)];
     return [[[FBErrorBuilder builder]

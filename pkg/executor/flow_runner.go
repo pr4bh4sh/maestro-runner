@@ -406,6 +406,11 @@ func (fr *FlowRunner) executeStep(idx int, step flow.Step) (report.Status, strin
 	var result *core.CommandResult
 
 	switch s := step.(type) {
+	// Sleep step - handled by FlowRunner directly
+	case *flow.SleepStep:
+		time.Sleep(time.Duration(s.DurationMs) * time.Millisecond)
+		result = &core.CommandResult{Success: true, Message: fmt.Sprintf("Slept %dms", s.DurationMs)}
+
 	// JS/Scripting steps - handled by ScriptEngine
 	case *flow.DefineVariablesStep:
 		result = fr.script.ExecuteDefineVariables(s)
@@ -1419,6 +1424,9 @@ func (fr *FlowRunner) executeNestedStep(step flow.Step) *core.CommandResult {
 	}
 
 	switch s := step.(type) {
+	case *flow.SleepStep:
+		time.Sleep(time.Duration(s.DurationMs) * time.Millisecond)
+		result = &core.CommandResult{Success: true, Message: fmt.Sprintf("Slept %dms", s.DurationMs)}
 	case *flow.DefineVariablesStep:
 		result = fr.script.ExecuteDefineVariables(s)
 	case *flow.RunScriptStep:

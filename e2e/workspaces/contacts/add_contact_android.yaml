@@ -1,0 +1,45 @@
+appId: com.google.android.contacts
+name: Add a new contact (Android)
+tags:
+  - android
+  - contacts
+---
+# Launch with a clean slate
+- launchApp:
+    clearState: true
+- waitForAnimationToEnd
+
+# Open the create-contact form
+- tapOn:
+    id: "com.google.android.contacts:id/floating_action_button"
+- waitForAnimationToEnd
+
+# Fill in the name
+- tapOn:
+    text: "First name"
+- inputText: Alice
+
+- hideKeyboard
+- tapOn:
+    text: "Last name"
+- inputText: Tester
+
+# Fill in the phone number
+- hideKeyboard:
+    strategy: "escape"
+- waitForAnimationToEnd
+- tapOn:
+    text: "+1"
+- inputText:
+    text: "5550100"
+    keyPress: true
+
+# Save the contact
+- hideKeyboard:
+    strategy: "back"
+- tapOn:
+    text: "Save"
+- waitForAnimationToEnd
+
+# Verify the contact now appears in the list
+- assertVisible: "Alice Tester"

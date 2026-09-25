@@ -1052,11 +1052,14 @@ func (d *Driver) findElementDirectWithContext(ctx context.Context, sel flow.Sele
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-
+			nativeStart := time.Now()
 			elem, info, err := d.tryFindElement(combined)
+			nativeDur := time.Since(nativeStart)
 			if err == nil {
+				logger.Debug("[native] found element: %s (%v)", sel.Describe(), nativeDur)
 				return elem, info, nil
 			}
+			logger.Debug("[native] miss: %s (%v)", sel.Describe(), nativeDur)
 			lastErr = err
 		}
 	}
@@ -1209,7 +1212,6 @@ func (d *Driver) findElementWithContext(ctx context.Context, sel flow.Selector, 
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-
 			// Try native UiAutomator strategies
 			var elem *uiautomator2.Element
 			var info *core.ElementInfo
