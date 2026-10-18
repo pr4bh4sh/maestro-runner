@@ -76,7 +76,10 @@ jobs:
     needs: [detect-changes]
     if: ${{ needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.workflow == 'true' }}
     env:
-      CDP_PARALLEL: "4"
+      # 'go test -parallel' is a package-wide flag, so this bounds every shard,
+      # not just CDP. Named for that scope, not for the shard it was introduced
+      # alongside.
+      TEST_PARALLEL: "4"
     strategy:
       fail-fast: false
       # Static sharding: no prepare step, no timing run. The slow CDP browser
@@ -84,7 +87,8 @@ jobs:
       # The remaining fast packages are split round-robin across the other 3
       # shards. Keep node_modules (e.g. the TS client's flatted dep) out of the
       # lists — they are not repo tests. If packages are added/renamed, update
-      # the lists below.
+      # the lists below; the "Verify every Go package is in a shard" step fails
+      # the build if you forget.
       matrix:
         shard:
           - id: cdp
@@ -108,17 +112,40 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Verify every Go package is in a shard
+        # Reads the shard lists back out of this file instead of repeating them:
+        # a second copy would drift and then validate itself, hiding a typo or a
+        # dropped package. `sort` is not `sort -u`, so a package listed in two
+        # shards still shows up. A package that cannot build on this runner
+        # (e.g. //go:build darwin) is absent from `go list`, so listing it fails
+        # — and omitting it hides it from this check entirely.
+        run: |
+          set -euo pipefail
+          workdir=$(mktemp -d)
+          trap 'rm -rf "$workdir"' EXIT
+          go list ./... | sort > "$workdir/all-packages.txt"
+          grep -oE '^[[:space:]]+packages: .*$' .github/workflows/ci.yml \
+            | sed -e "s/^[[:space:]]*packages: ['\"]//" -e "s/['\"]$//" \
+            | tr ' ' '\n' \
+            | grep -v '^$' \
+            | sort > "$workdir/sharded-packages.txt"
+          if ! diff -u "$workdir/all-packages.txt" "$workdir/sharded-packages.txt"; then
+            echo "::error::Go packages and test shards are out of sync. Every package from 'go list ./...' must appear in exactly one shard."
+            exit 1
+          fi
+          echo "All $(wc -l < "$workdir/all-packages.txt" | tr -d ' ') Go packages are covered by a test shard."
+
       - name: Run tests (shard ${{ matrix.shard.id }})
         env:
-          # The CDP browser shard is slow under -race; drop it there (the fast
-          # shards keep -race). Set via expression so the flag is empty for cdp.
+          # Race detection makes the browser-backed CDP tests substantially
+          # slower. The other shards retain -race; CDP is bounded separately.
           RACE_FLAG: ${{ matrix.shard.id != 'cdp' && '-race' || '' }}
         run: |
           PKGS="${{ matrix.shard.packages }}"
           echo "Testing shard ${{ matrix.shard.id }} (race='$RACE_FLAG'):"
           echo "$PKGS"
           # shellcheck disable=SC2086
-          go test $RACE_FLAG -parallel "$CDP_PARALLEL" -v -coverprofile=coverage-${{ matrix.shard.id }}.out -covermode=atomic $PKGS
+          go test $RACE_FLAG -parallel "$TEST_PARALLEL" -timeout 25m -v -coverprofile=coverage-${{ matrix.shard.id }}.out -covermode=atomic $PKGS
 
       - name: Upload coverage
         if: ${{ hashFiles(format('coverage-{0}.out', matrix.shard.id)) != '' }}
