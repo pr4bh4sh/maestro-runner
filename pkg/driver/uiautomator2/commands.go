@@ -385,8 +385,10 @@ func (d *Driver) assertNotVisible(step *flow.AssertNotVisibleStep) *core.Command
 
 func (d *Driver) inputText(step *flow.InputTextStep) *core.CommandResult {
 	text := step.Text
+	// Empty text (often a blank line from a script-split value) types
+	// nothing and passes, as in Maestro.
 	if text == "" {
-		return errorResult(fmt.Errorf("no text specified"), "No text to input")
+		return successResult("Nothing to input (empty text)", nil)
 	}
 
 	// Check for non-ASCII characters (may cause input issues on some devices)
@@ -527,14 +529,26 @@ func (d *Driver) eraseText(step *flow.EraseTextStep) *core.CommandResult {
 }
 
 func (d *Driver) hideKeyboard(step *flow.HideKeyboardStep) *core.CommandResult {
-	if !d.isInputShown() {
-		return successResult("Keyboard not visible, skipped", nil)
+	// Appium's /appium/device/hide_keyboard is a no-op on some devices (notably
+	// several Samsung models): it returns success without closing the keyboard,
+	// so the next coordinate tap lands on the keyboard overlay (#42). We verify
+	// with dumpsys and, while the keyboard is still shown, fall back to a key
+	// event.
+	//
+	// KEYCODE_BACK dismisses the IME when it is open and only triggers back-
+	// navigation when the keyboard is NOT shown — so we send it ONLY after
+	// confirming the keyboard is still up, which is what keeps it from navigating
+	// away (the side effect reported on the devicelab driver).
+
+	// If we can confirm the keyboard isn't shown, there's nothing to do. One read
+	// isn't enough: mid-transition it can say hidden while the IME is coming up.
+	if d.device != nil && d.keyboardConfirmedHidden() {
+		return successResult("Keyboard not visible", nil)
 	}
 
-	strategy := strings.ToLower(strings.TrimSpace(step.Strategy))
-
-	// If a specific strategy is requested, use only that one.
-	switch strategy {
+	// An explicit `strategy:` uses only that one mechanism; without it we run the
+	// default cascade below.
+	switch strings.ToLower(strings.TrimSpace(step.Strategy)) {
 	case "appium":
 		return d.hideKeyboardAppium()
 	case "escape", "esc":
@@ -547,45 +561,56 @@ func (d *Driver) hideKeyboard(step *flow.HideKeyboardStep) *core.CommandResult {
 		return errorResult(nil, fmt.Sprintf("Unknown hideKeyboard strategy: %q (valid: appium, escape/esc, back)", step.Strategy))
 	}
 
-	// Try all strategies: Appium → ESCAPE → BACK
-	if r := d.hideKeyboardAppium(); r.Success {
-		return r
+	_ = d.client.HideKeyboard()
+	if d.waitKeyboardHidden() {
+		return successResult("Keyboard hidden", nil)
 	}
-	if r := d.hideKeyboardEscape(); r.Success {
-		return r
+
+	// Appium's call didn't take. Fall back to BACK, but only while the keyboard
+	// is still shown so we can't trigger a stray back-navigation.
+	if d.isKeyboardVisible() {
+		if err := d.client.PressKeyCode(uiautomator2.KeyCodeBack); err == nil && d.waitKeyboardHidden() {
+			return successResult("Keyboard hidden (via back key)", nil)
+		}
 	}
-	return d.hideKeyboardBack()
+
+	// Couldn't confirm dismissal — don't fail the step (the keyboard may already
+	// be gone on a device we can't inspect).
+	return successResult("Hide keyboard (dismissal not confirmed)", nil)
 }
 
+// hideKeyboardAppium tries only Appium's hide_keyboard endpoint, confirmed by
+// dumpsys. Used for an explicit `strategy: appium`.
 func (d *Driver) hideKeyboardAppium() *core.CommandResult {
 	_ = d.client.HideKeyboard()
-	time.Sleep(500 * time.Millisecond)
-	if !d.isInputShown() {
+	if d.waitKeyboardHidden() {
 		return successResult("Keyboard hidden via Appium endpoint", nil)
 	}
-	return errorResult(nil, "Appium endpoint failed toa hide keyboard")
+	return errorResult(nil, "Appium endpoint failed to hide keyboard")
 }
 
+// hideKeyboardEscape tries only KEYCODE_ESCAPE, confirmed by dumpsys. Used for
+// an explicit `strategy: escape`.
 func (d *Driver) hideKeyboardEscape() *core.CommandResult {
 	if d.device == nil {
 		return errorResult(nil, "No device available for KEYCODE_ESCAPE")
 	}
 	_, _ = d.device.Shell("input keyevent 111")
-	time.Sleep(500 * time.Millisecond)
-	if !d.isInputShown() {
+	if d.waitKeyboardHidden() {
 		return successResult("Keyboard hidden via KEYCODE_ESCAPE", nil)
 	}
 	return errorResult(nil, "KEYCODE_ESCAPE failed to hide keyboard")
 }
 
+// hideKeyboardBack tries only KEYCODE_BACK, confirmed by dumpsys. Used for an
+// explicit `strategy: back`.
 func (d *Driver) hideKeyboardBack() *core.CommandResult {
 	if d.device == nil {
 		return errorResult(nil, "No device available for BACK key")
 	}
 	// Safe: when keyboard IS visible, BACK dismisses it without navigating
 	_, _ = d.device.Shell("input keyevent 4")
-	time.Sleep(500 * time.Millisecond)
-	if !d.isInputShown() {
+	if d.waitKeyboardHidden() {
 		return successResult("Keyboard hidden via BACK key", nil)
 	}
 	return errorResult(nil, "BACK key failed to hide keyboard")
@@ -648,36 +673,35 @@ func (d *Driver) scroll(step *flow.ScrollStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Scrolled %s", direction), nil)
 }
 
-// atScrollContainerEdge reports whether the element occupying b ends exactly on
-// its nearest scrollable ancestor's leading edge — the shape of a rect the
-// hierarchy clipped rather than a whole element that happens to be visible
-// (#164).
+// scrollContainerOf returns the bounds of the nearest scrollable ancestor of
+// the element occupying b. scrollUntilVisible measures the element against it
+// as well as the screen: a part hanging past the container's edge isn't shown,
+// and a part flush with its leading edge may have been clipped (#164).
 //
-// Costs one page-source fetch, and is only consulted once the geometry check
-// has already passed, so a scroll that stops on an unambiguous match pays
-// nothing. Any failure to establish the ancestry answers false: an
-// unverifiable tree must not block a match that the geometry accepted.
-func (d *Driver) atScrollContainerEdge(b core.Bounds, direction string) bool {
+// Costs one page-source fetch for each match that passes the screen geometry
+// check. It answers false when the element has no scrollable ancestor, and on
+// any failure to establish the ancestry: an unverifiable tree must not block a
+// match that the geometry accepted.
+func (d *Driver) scrollContainerOf(b core.Bounds) (core.Bounds, bool) {
 	src, err := d.client.Source()
 	if err != nil {
-		return false
+		return core.Bounds{}, false
 	}
 	elems, err := ParsePageSource(src)
 	if err != nil {
-		return false
+		return core.Bounds{}, false
 	}
 	for _, e := range elems {
 		if e.Bounds != b {
 			continue
 		}
 		for p := e.Parent; p != nil; p = p.Parent {
-			if !p.Scrollable {
-				continue
+			if p.Scrollable {
+				return p.Bounds, true
 			}
-			return core.ClippedAtScrollEdge(b, p.Bounds, direction, scrollEdgeTolerancePx)
 		}
 	}
-	return false
+	return core.Bounds{}, false
 }
 
 // How far from the container edge still counts as flush. Rounding between the
@@ -732,28 +756,63 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 	// list should not cost every scroll the step allows.
 	var progress core.ScrollProgress
 
+	// centerElement: a visible element keeps the scroll going until it is
+	// near the middle. shown is the last match that was already visible
+	// enough, accepted if the list ends or the scrolls run out first.
+	var centering core.Centering
+	var shown *core.ElementInfo
+	// hanging is this pass's match if it is on screen but past its scroll
+	// container's leading edge, accepted if the list ends or the scrolls run
+	// out first; hangingScrolls counts the scrolls it has had in a row.
+	var hanging *core.ElementInfo
+	hangingScrolls := 0
+
 	for i := 0; i < maxScrolls && time.Now().Before(deadline); i++ {
+		wasHanging := hanging
+		hanging = nil
 		// Try to find element (short timeout - includes page source fallback)
 		_, info, err := d.findElement(step.Element, true, 1000)
 		if err == nil && info != nil {
-			// UIAutomator's view hierarchy can include items in a ScrollView
-			// that are off-screen — and a match half-hidden behind a bottom
-			// bar is no better, because the tap that follows lands wrong.
-			// Stop only when the element meets the flow's visibility
-			// requirement (default: fully inside the viewport).
-			if core.MeetsVisibility(info.Bounds, width, height, step.VisibilityPercentage) {
+			if decided, done := centering.Check(step.CenterElement, info.Bounds, direction, width, height); decided {
+				if done {
+					return successResult(fmt.Sprintf("Element centred after %d scrolls", i), info)
+				}
+				if core.MeetsVisibility(info.Bounds, width, height, step.VisibilityPercentage) {
+					shown = info
+				}
+			} else if core.MeetsVisibility(info.Bounds, width, height, step.VisibilityPercentage) {
+				// UIAutomator's view hierarchy can include items in a ScrollView
+				// that are off-screen — and a match half-hidden behind a bottom
+				// bar is no better, because the tap that follows lands wrong.
+				// Stop only when the element meets the flow's visibility
+				// requirement (default: fully inside the viewport).
+				scroller, inContainer := d.scrollContainerOf(info.Bounds)
+				switch {
+				case inContainer && core.HangsPastScrollEdge(info.Bounds, scroller, direction, step.VisibilityPercentage, scrollEdgeTolerancePx):
+					// On screen, but past its scroll container's leading edge, where
+					// the container doesn't show it: scroll it in. A scroll that
+					// leaves it where it was means the list has ended, and two that
+					// don't bring it in are enough: accept it as it is.
+					if wasHanging == nil {
+						hangingScrolls = 0
+					}
+					if wasHanging != nil && (wasHanging.Bounds == info.Bounds || hangingScrolls >= 2) {
+						return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+					}
+					hanging = info
+					hangingScrolls++
 				// Computed from a rect the hierarchy may already have clipped
 				// to the scroll container, where a sliver at the fold scores
 				// 100% (#164). A rect flush with the container's leading edge
 				// gets one confirming scroll: a sliver grows, an element
 				// resting at the end of the list does not.
-				if pendingHeight >= 0 && info.Bounds.Height <= pendingHeight {
+				case pendingHeight >= 0 && info.Bounds.Height <= pendingHeight:
 					return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
-				}
-				if !d.atScrollContainerEdge(info.Bounds, direction) {
+				case !inContainer || !core.ClippedAtScrollEdge(info.Bounds, scroller, direction, scrollEdgeTolerancePx):
 					return successResult(fmt.Sprintf("Element found after %d scrolls", i), info)
+				default:
+					pendingHeight = info.Bounds.Height
 				}
-				pendingHeight = info.Bounds.Height
 			}
 		} else if err != nil && !isElementNotFoundError(err) {
 			// Real infrastructure failure — bail rather than silently looping.
@@ -761,6 +820,12 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		}
 
 		if sig, ok := d.scrollSurfaceSignature(); ok && progress.Observe(sig) {
+			if shown != nil {
+				return successResult(fmt.Sprintf("Element visible after %d scrolls (end of content before centring)", i), shown)
+			}
+			if hanging != nil {
+				return successResult(fmt.Sprintf("Element visible after %d scrolls (end of content, partly past its scroll container)", i), hanging)
+			}
 			return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found: scrolling %s made no progress after %d scrolls (end of content?)", direction, i))
 		}
 
@@ -777,6 +842,12 @@ func (d *Driver) scrollUntilVisible(step *flow.ScrollUntilVisibleStep) *core.Com
 		time.Sleep(300 * time.Millisecond)
 	}
 
+	if shown != nil {
+		return successResult("Element visible (scrolls ran out before centring)", shown)
+	}
+	if hanging != nil {
+		return successResult("Element visible (scrolls ran out, partly past its scroll container)", hanging)
+	}
 	return errorResult(fmt.Errorf("element not found"), fmt.Sprintf("Element not found after %d scrolls", maxScrolls))
 }
 
@@ -1164,8 +1235,8 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 	// found later belongs to the app this launch started.
 	d.clearExitHistory(appID)
 
-	// Stop app first if requested (default: true)
-	if step.StopApp == nil || *step.StopApp {
+	// Stop app first if requested (default: true). A clear stops it itself.
+	if !step.ClearState && (step.StopApp == nil || *step.StopApp) {
 		if _, err := d.device.Shell("am force-stop " + appID); err != nil {
 			logger.Warn("failed to force-stop app %s before launch: %v", appID, err)
 		}
@@ -1173,9 +1244,11 @@ func (d *Driver) launchApp(step *flow.LaunchAppStep) *core.CommandResult {
 
 	// Clear state if requested
 	if step.ClearState {
+		d.stopBeforeClear(appID)
 		if _, err := d.device.Shell("pm clear " + appID); err != nil {
 			return errorResult(err, fmt.Sprintf("launchApp: failed to clear app state for '%s' — is the app installed?", appID))
 		}
+		d.waitForTaskRemoved(appID)
 	}
 
 	// Apply permissions (default: all allow, like Maestro)
@@ -1332,7 +1405,9 @@ func (d *Driver) resolveLauncherActivity(appID string, apiLevel int) (string, er
 // launchWithMonkey launches an app using the monkey command.
 // Universally reliable for simple launches (no arguments) on all Android versions.
 func (d *Driver) launchWithMonkey(appID string) *core.CommandResult {
-	monkeyCmd := fmt.Sprintf("monkey -p %s -c android.intent.category.LAUNCHER 1", appID)
+	// --pct-syskeys 0: on an emulator without a hardware keyboard (hw.keyboard=no)
+	// monkey otherwise refuses to start ("system keys" need a physical key map).
+	monkeyCmd := fmt.Sprintf("monkey -p %s --pct-syskeys 0 -c android.intent.category.LAUNCHER 1", appID)
 	output, err := d.device.Shell(monkeyCmd)
 	if err != nil || strings.Contains(output, "monkey aborted") {
 		errMsg := fmt.Sprintf("launchApp: all launch methods failed for '%s'. "+
@@ -1439,6 +1514,30 @@ func (d *Driver) stopApp(step *flow.StopAppStep) *core.CommandResult {
 	return successResult(fmt.Sprintf("Stopped app: %s", appID), nil)
 }
 
+// stopBeforeClear force-stops the app and waits until its screens are gone, and
+// waitForTaskRemoved waits after the clear until its task is gone, so that the
+// clear doesn't make Android kill the next launch (see core/androidclear.go).
+// Best-effort: the clear and the launch go ahead either way.
+func (d *Driver) stopBeforeClear(appID string) {
+	logClearWait(core.AndroidStopBeforeClear(d.device, appID, core.StopBeforeClearTimeout, core.ClearPollInterval))
+}
+
+func (d *Driver) waitForTaskRemoved(appID string) {
+	logClearWait(core.AndroidWaitForTaskRemoved(d.device, appID, core.TaskRemovedTimeout, core.ClearPollInterval))
+}
+
+// logClearWait warns when a clear wait timed out, since the next launch may
+// then be killed, and notes a device it couldn't read at debug level.
+func logClearWait(err error) {
+	switch {
+	case err == nil:
+	case errors.Is(err, core.ErrClearWaitTimedOut):
+		logger.Warn("clearing app data: %v; going ahead, but the next launch may be killed", err)
+	default:
+		logger.Debug("clearing app data: could not check the app's screens and task: %v", err)
+	}
+}
+
 func (d *Driver) clearState(step *flow.ClearStateStep) *core.CommandResult {
 	appID := step.AppID
 	if appID == "" {
@@ -1449,9 +1548,11 @@ func (d *Driver) clearState(step *flow.ClearStateStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("device not configured"), "clearState requires device access")
 	}
 
+	d.stopBeforeClear(appID)
 	if _, err := d.device.Shell("pm clear " + appID); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to clear state: %v", err))
 	}
+	d.waitForTaskRemoved(appID)
 
 	return successResult(fmt.Sprintf("Cleared state for: %s", appID), nil)
 }
@@ -1466,7 +1567,11 @@ func (d *Driver) killApp(step *flow.KillAppStep) *core.CommandResult {
 		return errorResult(fmt.Errorf("device not configured"), "killApp requires device access")
 	}
 
-	if _, err := d.device.Shell("am force-stop " + appID); err != nil {
+	// killApp is a system-initiated process death, as in Maestro (`am kill`):
+	// the app keeps its saved state and restores it on the next launch.
+	// force-stop is stopApp; using it here lost duckduckgo's open tab after
+	// a restart. Like Maestro, it only kills an app that is in the background.
+	if _, err := d.device.Shell("am kill " + appID); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to kill app: %v", err))
 	}
 
@@ -1634,22 +1739,19 @@ func (d *Driver) copyTextFrom(step *flow.CopyTextFromStep) *core.CommandResult {
 	}
 }
 
+// pasteText types the clipboard's text the way inputText does, as Maestro's
+// pasteText does: into the focused field when the server reports one, else as
+// key events. Requiring a reported focused element failed in fields the
+// server does not report as active (#202).
 func (d *Driver) pasteText(_ *flow.PasteTextStep) *core.CommandResult {
 	text, err := d.client.GetClipboard()
 	if err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to get clipboard: %v", err))
 	}
-
-	active, err := d.client.ActiveElement()
-	if err != nil {
-		return errorResult(err, "No focused element to paste into")
+	if text == "" {
+		return successResult("Nothing to paste: the clipboard is empty", nil) // as Maestro: no-op
 	}
-
-	if err := active.SendKeys(text); err != nil {
-		return errorResult(err, fmt.Sprintf("Failed to paste text: %v", err))
-	}
-
-	return successResult(fmt.Sprintf("Pasted text: %s", text), nil)
+	return d.inputText(&flow.InputTextStep{Text: text})
 }
 
 func (d *Driver) setClipboard(step *flow.SetClipboardStep) *core.CommandResult {
@@ -2047,21 +2149,87 @@ func (d *Driver) setLocation(step *flow.SetLocationStep) *core.CommandResult {
 	if d.device == nil {
 		return errorResult(fmt.Errorf("device not configured"), "setLocation requires device access")
 	}
-
-	lat := step.Latitude
-	lon := step.Longitude
-	if lat == "" || lon == "" {
-		return errorResult(fmt.Errorf("latitude and longitude required"), "Missing coordinates")
+	lat, err := strconv.ParseFloat(strings.TrimSpace(step.Latitude), 64)
+	if err != nil || lat < -90 || lat > 90 {
+		err = fmt.Errorf("latitude %q must be a number between -90 and 90", step.Latitude)
+		return errorResult(err, err.Error())
 	}
-
-	// Enable mock locations and set location via appops
-	// Note: Requires mock location app or root access
-	cmd := fmt.Sprintf("am broadcast -a android.intent.action.MOCK_LOCATION --ef lat %s --ef lon %s", lat, lon)
-	if _, err := d.device.Shell(cmd); err != nil {
+	lon, err := strconv.ParseFloat(strings.TrimSpace(step.Longitude), 64)
+	if err != nil || lon < -180 || lon > 180 {
+		err = fmt.Errorf("longitude %q must be a number between -180 and 180", step.Longitude)
+		return errorResult(err, err.Error())
+	}
+	if err := d.mockLocation(lat, lon); err != nil {
 		return errorResult(err, fmt.Sprintf("Failed to set location: %v", err))
 	}
+	return successResult(fmt.Sprintf("Set location to %s, %s", step.Latitude, step.Longitude), nil)
+}
 
-	return successResult(fmt.Sprintf("Set location to %s, %s", lat, lon), nil)
+// locationApp is the Appium settings app, whose LocationService feeds a
+// location to the gps, network and fused providers as their mock.
+const locationApp = "io.appium.settings"
+
+// mockLocation moves the device to lat, lon through the location app. The
+// broadcast used before had no receiver on any device, so the step passed and
+// nothing moved. The first call installs the app if needed and grants it the
+// location permissions and the mock location app op.
+func (d *Driver) mockLocation(lat, lon float64) error {
+	if !d.locationReady {
+		if d.provisionLocation != nil {
+			if err := d.provisionLocation(); err != nil {
+				return fmt.Errorf("installing %s: %w", locationApp, err)
+			}
+		}
+		for _, perm := range []string{"ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "ACCESS_BACKGROUND_LOCATION"} {
+			// Background location does not exist before Android 10; a
+			// refused grant shows up below as a service that cannot start.
+			_, _ = d.device.Shell("pm grant " + locationApp + " android.permission." + perm)
+		}
+		if out, err := d.device.Shell("appops set " + locationApp + " android:mock_location allow"); err != nil {
+			return fmt.Errorf("allowing mock locations for %s: %v %s", locationApp, err, strings.TrimSpace(out))
+		}
+		d.locationReady = true
+	}
+	args := fmt.Sprintf("--user 0 -n %s/.LocationService --es latitude %s --es longitude %s",
+		locationApp, strconv.FormatFloat(lat, 'f', -1, 64), strconv.FormatFloat(lon, 'f', -1, 64))
+	out, err := d.device.Shell("am start-foreground-service " + args)
+	if err == nil && amFailed(out) {
+		// Android 7 and older have no start-foreground-service.
+		out, err = d.device.Shell("am startservice " + args)
+	}
+	if err != nil {
+		return fmt.Errorf("%v %s", err, strings.TrimSpace(out))
+	}
+	if amFailed(out) {
+		return fmt.Errorf("%s did not start: %s", locationApp, strings.TrimSpace(out))
+	}
+	d.locationSet = true
+	return nil
+}
+
+// amFailed reports whether am printed an error: over adb shell it exits 0
+// on some Android versions, so its output is the only sign.
+func amFailed(out string) bool {
+	return strings.Contains(out, "Error") || strings.Contains(out, "Exception") ||
+		strings.Contains(out, "Unknown command")
+}
+
+// SetLocationProvisioner sets how the location app is installed when a flow
+// first sets the location.
+func (d *Driver) SetLocationProvisioner(provision func() error) {
+	d.provisionLocation = provision
+}
+
+// StopMockLocation ends a location a flow set, so the device reports its real
+// location again after the run.
+func (d *Driver) StopMockLocation() {
+	if !d.locationSet || d.device == nil {
+		return
+	}
+	if _, err := d.device.Shell("am stopservice " + locationApp + "/.LocationService"); err != nil {
+		logger.Debug("stopping the mock location: %v", err)
+	}
+	d.locationSet = false
 }
 
 // applyAirplaneMode sets airplane mode on/off using the best available method.
@@ -2121,43 +2289,6 @@ func (d *Driver) toggleAirplaneMode(_ *flow.ToggleAirplaneModeStep) *core.Comman
 
 	enable := strings.TrimSpace(output) != "1"
 	return d.applyAirplaneMode(enable)
-}
-
-func (d *Driver) travel(step *flow.TravelStep) *core.CommandResult {
-	if d.device == nil {
-		return errorResult(fmt.Errorf("device not configured"), "travel requires device access")
-	}
-
-	if len(step.Points) < 2 {
-		return errorResult(fmt.Errorf("at least 2 points required"), "Travel requires at least 2 waypoints")
-	}
-
-	speed := step.Speed
-	if speed <= 0 {
-		speed = 50 // default 50 km/h
-	}
-
-	// Simulate travel by updating location at each point
-	for _, point := range step.Points {
-		// Parse "lat, lon" format
-		parts := strings.Split(point, ",")
-		if len(parts) != 2 {
-			continue
-		}
-		lat := strings.TrimSpace(parts[0])
-		lon := strings.TrimSpace(parts[1])
-
-		cmd := fmt.Sprintf("am broadcast -a android.intent.action.MOCK_LOCATION --ef lat %s --ef lon %s", lat, lon)
-		if _, err := d.device.Shell(cmd); err != nil {
-			return errorResult(err, fmt.Sprintf("Failed to set location during travel: %v", err))
-		}
-
-		// Wait based on speed (simplified - assumes ~1km between points)
-		delay := time.Duration(3600/speed) * time.Second
-		time.Sleep(delay)
-	}
-
-	return successResult(fmt.Sprintf("Traveled through %d points", len(step.Points)), nil)
 }
 
 // ============================================================================

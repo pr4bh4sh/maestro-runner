@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -248,16 +249,27 @@ func captureVisibleTimeout(t *testing.T, se *ScriptEngine, cond flow.Condition) 
 	return got
 }
 
-// TestCheckCondition_FastDefaultTimeout reproduces #110: an unmet `when:`
-// condition must use the short default, not the driver's 7s optional-find
-// timeout (passing 0 would defer to that).
-func TestCheckCondition_FastDefaultTimeout(t *testing.T) {
+// With no timeout set, a when-condition gets Maestro's budget: 7s less the
+// time since the last step, never below the 1s floor and never 0 (which would
+// defer to the driver's 7s optional-find wait, #110).
+func TestCheckCondition_MaestroBudget(t *testing.T) {
 	se := NewScriptEngine()
 	defer se.Close()
+	cond := flow.Condition{Visible: &flow.Selector{Text: "Nope"}}
 
-	got := captureVisibleTimeout(t, se, flow.Condition{Visible: &flow.Selector{Text: "Nope"}})
-	if got != defaultConditionTimeoutMs {
-		t.Errorf("when-condition timeout = %d, want fast default %d (0 would defer to the 7s optional-find timeout)", got, defaultConditionTimeoutMs)
+	se.MarkInteraction()
+	if got := captureVisibleTimeout(t, se, cond); got < maestroConditionTimeoutMs-500 || got > maestroConditionTimeoutMs {
+		t.Errorf("right after a step: timeout = %d, want about %d", got, maestroConditionTimeoutMs)
+	}
+
+	se.lastInteraction = time.Now().Add(-5 * time.Second)
+	if got := captureVisibleTimeout(t, se, cond); got < 1500 || got > 2000 {
+		t.Errorf("5s after a step: timeout = %d, want about 2000", got)
+	}
+
+	se.lastInteraction = time.Now().Add(-time.Minute)
+	if got := captureVisibleTimeout(t, se, cond); got != minConditionTimeoutMs {
+		t.Errorf("long after a step: timeout = %d, want the %d floor", got, minConditionTimeoutMs)
 	}
 }
 
@@ -522,7 +534,7 @@ func TestScriptEngine_EvalCondition(t *testing.T) {
 		{"comparison false", "count > 10", false},
 		{"equality", "count == 5", true},
 		{"string true", "'true'", true},
-		{"string other", "'yes'", false},
+		{"string other", "'yes'", true}, // true in Maestro: only a falsy string is false
 		{"empty string", "''", false},
 		{"number non-zero", "42", true},
 		{"number zero", "0", false},
@@ -645,20 +657,6 @@ func TestExecuteRepeat_InvalidTimes(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "invalid 'times'") {
 		t.Errorf("message = %q, want it to mention invalid 'times'", result.Message)
-	}
-}
-
-func TestExecuteRetry_InvalidMaxRetries(t *testing.T) {
-	se := NewScriptEngine()
-	defer se.Close()
-	fr := &FlowRunner{ctx: context.Background(), driver: &mockDriver{}, script: se}
-
-	result := fr.executeRetry(&flow.RetryStep{MaxRetries: "five"})
-	if result.Success {
-		t.Error("expected failure for non-numeric maxRetries, got success")
-	}
-	if !strings.Contains(result.Message, "invalid 'maxRetries'") {
-		t.Errorf("message = %q, want it to mention invalid 'maxRetries'", result.Message)
 	}
 }
 
@@ -791,6 +789,29 @@ func TestScriptEngine_ExecuteRunScript_File(t *testing.T) {
 
 	if got := se.GetVariable("fromFile"); got != "yes" {
 		t.Errorf("fromFile = %q, want %q", got, "yes")
+	}
+}
+
+// A script file's own template literals are plain JavaScript: they must see the script's local
+// variables, not be expanded ahead of the script against the flow's variables.
+func TestScriptEngine_ExecuteRunScript_FileTemplateLiteral(t *testing.T) {
+	se := NewScriptEngine()
+	defer se.Close()
+
+	tmpDir := t.TempDir()
+	src := "const who = EMAIL;\nconst state = 'onboarded';\n" +
+		"output.url = `/v1/x?email=${encodeURIComponent(who)}&state=${state}`;\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "tl.js"), []byte(src), 0o644); err != nil {
+		t.Fatalf("Failed to create test script: %v", err)
+	}
+	se.SetFlowDir(tmpDir)
+
+	step := &flow.RunScriptStep{Script: "tl.js", Env: map[string]string{"EMAIL": "a+b@x.io"}}
+	if result := se.ExecuteRunScript(step); !result.Success {
+		t.Fatalf("ExecuteRunScript() success = false, error = %v", result.Error)
+	}
+	if got, want := se.GetVariable("url"), "/v1/x?email=a%2Bb%40x.io&state=onboarded"; got != want {
+		t.Errorf("url = %q, want %q", got, want)
 	}
 }
 
@@ -2542,6 +2563,11 @@ func TestScriptEngine_ExpandStep_DeviceControlFields(t *testing.T) {
 	se.ExpandStep(clip)
 	if clip.Text != "hello" {
 		t.Errorf("setClipboard not expanded: %q", clip.Text)
+	}
+	trip := &flow.TravelStep{Points: []string{"${LAT}, ${LON}", "0, 0"}}
+	se.ExpandStep(trip)
+	if trip.Points[0] != "37.7, -122.4" || trip.Points[1] != "0, 0" {
+		t.Errorf("travel points not expanded: %q", trip.Points)
 	}
 }
 

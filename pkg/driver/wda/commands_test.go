@@ -1,6 +1,7 @@
 package wda
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -474,9 +475,7 @@ func TestCopyTextFromByID(t *testing.T) {
 
 // TestScrollScreenSizeNotAvailable tests scroll when screen size is not cached.
 func TestScrollWindowSizeError(t *testing.T) {
-	client := &Client{}
-	// No screen size in PlatformInfo
-	driver := NewDriver(client, &core.PlatformInfo{Platform: "ios"}, "")
+	driver := noSizeDriver(t)
 
 	step := &flow.ScrollStep{Direction: "down"}
 	result := driver.scroll(step)
@@ -501,10 +500,9 @@ func TestScrollVerifiesSwipeCoordinates(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(r.URL.Path, "/dragfromtoforduration") {
+		if strings.Contains(r.URL.Path, "/actions") {
 			body, _ := io.ReadAll(r.Body)
-			var payload map[string]interface{}
-			_ = json.Unmarshal(body, &payload)
+			payload := swipePayload(body)
 			fromX, _ = payload["fromX"].(float64)
 			fromY, _ = payload["fromY"].(float64)
 			toX, _ = payload["toX"].(float64)
@@ -599,7 +597,7 @@ func TestScrollUntilVisibleUpDirection(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			scrollCount++
 			jsonResponse(w, map[string]interface{}{"status": 0})
 			return
@@ -660,7 +658,7 @@ func TestScrollUntilVisibleSkipsOffScreenElement(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			scrollCount++
 			jsonResponse(w, map[string]interface{}{"status": 0})
 			return
@@ -722,7 +720,7 @@ func TestScrollUntilVisibleCaseInsensitiveDirection(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			scrollCount++
 			jsonResponse(w, map[string]interface{}{"status": 0})
 			return
@@ -886,6 +884,13 @@ func TestInputTextWithSelectorElementIDDirectSend(t *testing.T) {
 		if strings.HasSuffix(path, "/element") && r.Method == "POST" {
 			jsonResponse(w, map[string]interface{}{
 				"value": map[string]interface{}{"ELEMENT": "text-field-1"},
+			})
+			return
+		}
+		// Id lookups list every match
+		if strings.HasSuffix(path, "/elements") && r.Method == "POST" {
+			jsonResponse(w, map[string]interface{}{
+				"value": []map[string]interface{}{{"ELEMENT": "text-field-1"}},
 			})
 			return
 		}
@@ -1275,25 +1280,47 @@ func TestOpenBrowserEmptyURL(t *testing.T) {
 // tapOn keyboard key tests
 // =============================================================================
 
-// TestTapOnKeyboardKey tests tapOn with a text selector matching a keyboard key.
-func TestTapOnKeyboardKey(t *testing.T) {
-	var sendKeysCalled bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// keyboardKeyServer answers a key-named tapOn: no element has the label, the
+// keyboard is up only when keyboardShown, and /wda/keys answers keysStatus.
+func keyboardKeyServer(keyboardShown bool, keysStatus int, sendKeys *bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/wda/keys") {
-			sendKeysCalled = true
+			*sendKeys = true
+			if keysStatus != http.StatusOK {
+				jsonResponse(w, map[string]interface{}{"value": map[string]interface{}{"error": "send keys failed"}})
+				return
+			}
 			jsonResponse(w, map[string]interface{}{"status": 0})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/elements") {
+			body, _ := io.ReadAll(r.Body)
+			if keyboardShown && strings.Contains(string(body), "XCUIElementTypeKeyboard") {
+				jsonResponse(w, map[string]interface{}{"value": []map[string]interface{}{{"ELEMENT": "kb"}}})
+				return
+			}
+			jsonResponse(w, map[string]interface{}{"value": []interface{}{}})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/element") {
+			w.WriteHeader(http.StatusNotFound)
+			jsonResponse(w, map[string]interface{}{"value": map[string]interface{}{"error": "no such element"}})
 			return
 		}
 		jsonResponse(w, map[string]interface{}{"status": 0})
 	}))
+}
+
+// TestTapOnKeyboardKey: a key name with no element of that label, and a
+// keyboard up, is sent as the key.
+func TestTapOnKeyboardKey(t *testing.T) {
+	var sendKeysCalled bool
+	server := keyboardKeyServer(true, http.StatusOK, &sendKeysCalled)
 	defer server.Close()
 	driver := createTestDriver(server)
 
-	step := &flow.TapOnStep{
-		Selector: flow.Selector{Text: "Return"},
-	}
-	result := driver.tapOn(step)
+	result := driver.tapOn(&flow.TapOnStep{Selector: flow.Selector{Text: "Return"}})
 
 	if !result.Success {
 		t.Errorf("Expected success, got: %s", result.Message)
@@ -1306,26 +1333,37 @@ func TestTapOnKeyboardKey(t *testing.T) {
 	}
 }
 
-// TestTapOnKeyboardKeySendKeysFails tests tapOn when SendKeys fails for a keyboard key.
-func TestTapOnKeyboardKeySendKeysFails(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "/wda/keys") {
-			jsonResponse(w, map[string]interface{}{
-				"value": map[string]interface{}{"error": "send keys failed"},
-			})
-			return
-		}
-		jsonResponse(w, map[string]interface{}{"status": 0})
-	}))
+// TestTapOnKeyboardKeyNoKeyboard: with no element and no keyboard, a key
+// name is looked up like any text and fails; it is never sent as a key and
+// reported as a success (#179).
+func TestTapOnKeyboardKeyNoKeyboard(t *testing.T) {
+	var sendKeysCalled bool
+	server := keyboardKeyServer(false, http.StatusOK, &sendKeysCalled)
 	defer server.Close()
 	driver := createTestDriver(server)
 
-	step := &flow.TapOnStep{
-		Selector: flow.Selector{Text: "Return"},
-	}
-	result := driver.tapOn(step)
+	result := driver.tapOn(&flow.TapOnStep{BaseStep: flow.BaseStep{TimeoutMs: 1000}, Selector: flow.Selector{Text: "Delete"}})
 
+	if result.Success {
+		t.Errorf("Expected failure, got success: %s", result.Message)
+	}
+	if sendKeysCalled {
+		t.Error("SendKeys must not be called when no keyboard is shown")
+	}
+}
+
+// TestTapOnKeyboardKeySendKeysFails tests tapOn when SendKeys fails for a keyboard key.
+func TestTapOnKeyboardKeySendKeysFails(t *testing.T) {
+	var sendKeysCalled bool
+	server := keyboardKeyServer(true, http.StatusInternalServerError, &sendKeysCalled)
+	defer server.Close()
+	driver := createTestDriver(server)
+
+	result := driver.tapOn(&flow.TapOnStep{Selector: flow.Selector{Text: "Return"}})
+
+	if !sendKeysCalled {
+		t.Fatal("Expected SendKeys to be attempted")
+	}
 	if result.Success {
 		t.Error("Expected failure when SendKeys fails for keyboard key")
 	}
@@ -2363,13 +2401,13 @@ func TestSwipeStartEndCoordinates(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			body, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
 				t.Fatalf("Failed to read body: %v", readErr)
 			}
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("Failed to unmarshal body: %v", err)
 			}
 			fromX, _ = payload["fromX"].(float64)
@@ -2424,13 +2462,13 @@ func TestSwipeDirectPixelCoordinates(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			body, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
 				t.Fatalf("Failed to read body: %v", readErr)
 			}
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("Failed to unmarshal body: %v", err)
 			}
 			fromX, _ = payload["fromX"].(float64)
@@ -2483,13 +2521,13 @@ func TestSwipeDirectionLeftCoords(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			body, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
 				t.Fatalf("Failed to read body: %v", readErr)
 			}
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("Failed to unmarshal body: %v", err)
 			}
 			fromX, _ = payload["fromX"].(float64)
@@ -2527,13 +2565,13 @@ func TestSwipeDirectionRightCoords(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			body, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
 				t.Fatalf("Failed to read body: %v", readErr)
 			}
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("Failed to unmarshal body: %v", err)
 			}
 			fromX, _ = payload["fromX"].(float64)
@@ -2597,13 +2635,13 @@ func TestSwipeCustomDuration(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			body, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
 				t.Fatalf("Failed to read body: %v", readErr)
 			}
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("Failed to unmarshal body: %v", err)
 			}
 			sentDuration, _ = payload["duration"].(float64)
@@ -2790,9 +2828,7 @@ func TestTapOnPointDirectPixelCoordinates(t *testing.T) {
 
 // TestTapOnPointPercentageScreenSizeNotAvailable tests tapOnPointWithCoords when screen size not cached.
 func TestTapOnPointPercentageWindowSizeFails(t *testing.T) {
-	client := &Client{}
-	// No screen size in PlatformInfo
-	driver := NewDriver(client, &core.PlatformInfo{Platform: "ios"}, "")
+	driver := noSizeDriver(t)
 
 	result := driver.tapOnPointWithCoords("50%, 50%")
 
@@ -2917,11 +2953,11 @@ func TestInputTextEmpty(t *testing.T) {
 	step := &flow.InputTextStep{Text: ""}
 	result := driver.inputText(step)
 
-	if result.Success {
-		t.Fatalf("Expected failure for empty text")
+	if !result.Success {
+		t.Fatalf("Expected empty text to pass as a no-op, got: %s", result.Message)
 	}
-	if !strings.Contains(result.Message, "No text") {
-		t.Errorf("Expected 'No text' in message, got: %s", result.Message)
+	if !strings.Contains(result.Message, "Nothing to input") {
+		t.Errorf("Expected 'Nothing to input' in message, got: %s", result.Message)
 	}
 }
 
@@ -3238,13 +3274,13 @@ func TestScrollLeftDirection(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(r.URL.Path, "/dragfromtoforduration") {
+		if strings.Contains(r.URL.Path, "/actions") {
 			body, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
 				t.Fatalf("Failed to read body: %v", readErr)
 			}
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("Failed to unmarshal body: %v", err)
 			}
 			fromX, _ = payload["fromX"].(float64)
@@ -3280,13 +3316,13 @@ func TestScrollRightDirection(t *testing.T) {
 			})
 			return
 		}
-		if strings.Contains(r.URL.Path, "/dragfromtoforduration") {
+		if strings.Contains(r.URL.Path, "/actions") {
 			body, readErr := io.ReadAll(r.Body)
 			if readErr != nil {
 				t.Fatalf("Failed to read body: %v", readErr)
 			}
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("Failed to unmarshal body: %v", err)
 			}
 			fromX, _ = payload["fromX"].(float64)
@@ -4515,7 +4551,7 @@ func TestScrollUntilVisibleRespectsMaxScrolls(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 
-		if strings.Contains(path, "/dragfromtoforduration") {
+		if strings.Contains(path, "/actions") {
 			scrollCount++
 			jsonResponse(w, map[string]interface{}{"status": 0})
 			return
@@ -5213,10 +5249,10 @@ func TestSwipeFromElementPointStartsAtPoint(t *testing.T) {
 </AppiumAUT>`})
 		case strings.HasSuffix(path, "/element") && r.Method == "POST":
 			jsonResponse(w, map[string]interface{}{"value": map[string]interface{}{"error": "not found"}})
-		case strings.Contains(path, "/dragfromtoforduration"):
+		case strings.Contains(path, "/actions"):
 			body, _ := io.ReadAll(r.Body)
 			var payload map[string]interface{}
-			if err := json.Unmarshal(body, &payload); err != nil {
+			if err := json.Unmarshal(swipeBody(body), &payload); err != nil {
 				t.Fatalf("bad body: %v", err)
 			}
 			fromX, _ = payload["fromX"].(float64)
@@ -5247,16 +5283,19 @@ func TestSwipeFromElementPointStartsAtPoint(t *testing.T) {
 }
 
 func TestScrollUntilVisibleStopsWhenScreenStopsMoving(t *testing.T) {
-	// The same source on every read: a list at its end. Two scrolls that
-	// change nothing are proof enough — the loop must not spend the other 18.
+	// The same picture after every scroll: a list at its end. Three settled
+	// screenshots that match are proof enough — the loop must not spend the
+	// other 17 scrolls.
 	scrollCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 		switch {
-		case strings.Contains(path, "/dragfromtoforduration"):
+		case strings.Contains(path, "/actions"):
 			scrollCount++
 			jsonResponse(w, map[string]interface{}{"status": 0})
+		case strings.HasSuffix(path, "/screenshot"):
+			jsonResponse(w, map[string]interface{}{"value": base64.StdEncoding.EncodeToString([]byte("end of list"))})
 		case strings.HasSuffix(path, "/source"):
 			jsonResponse(w, map[string]interface{}{
 				"value": `<AppiumAUT>
@@ -5285,8 +5324,8 @@ func TestScrollUntilVisibleStopsWhenScreenStopsMoving(t *testing.T) {
 	if result.Success {
 		t.Fatal("expected failure when the element is not in the list")
 	}
-	if scrollCount != 2 {
-		t.Errorf("expected 2 scrolls before the no-progress stop, got %d", scrollCount)
+	if scrollCount != 3 {
+		t.Errorf("expected 3 scrolls before the no-progress stop, got %d", scrollCount)
 	}
 	if !strings.Contains(result.Message, "made no progress") {
 		t.Errorf("message should name the reason, got %q", result.Message)
