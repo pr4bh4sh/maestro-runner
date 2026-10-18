@@ -36,6 +36,19 @@ Examples:
 	Action: runServer,
 }
 
+// resolveDriver picks the driver for a session: an explicit driver on the
+// request wins, then --driver from the command line, then "" so the platform
+// default applies. The --driver fallback is what the E2E matrix relies on --
+// without it the flag was silently dropped and every session fell back to the
+// platform default (devicelab on Android), so `--driver uiautomator2 server`
+// quietly ran a devicelab driver.
+func resolveDriver(requestDriver, flagDriver string) string {
+	if requestDriver != "" {
+		return requestDriver
+	}
+	return flagDriver
+}
+
 func runServer(c *cli.Context) error {
 	// Helper to get flag value from current or parent context
 	getString := func(name string) string {
@@ -71,9 +84,13 @@ func runServer(c *cli.Context) error {
 	srv := server.New(func(req server.SessionRequest) (core.Driver, func(), error) {
 		platform := strings.ToLower(req.PlatformName)
 
+		// The per-request driver wins; --driver on the command line is the
+		// fallback. Without the fallback the flag was silently ignored and every
+		// session fell back to the platform default (devicelab on Android), so
+		// `--driver uiautomator2 server` started a devicelab driver anyway.
 		cfg := &RunConfig{
 			Platform: platform,
-			Driver:   req.Driver,
+			Driver:   resolveDriver(req.Driver, getString("driver")),
 			AppID:    req.AppID,
 		}
 		if req.DeviceID != "" {
