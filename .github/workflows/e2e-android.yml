@@ -102,7 +102,7 @@ jobs:
         run: cd e2e/android-animation-app && ./gradlew :app:assembleDebug --no-daemon
 
   e2e-android:
-    name: E2E Android (API 36)
+    name: E2E Android (API 35)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect-changes]
@@ -266,7 +266,7 @@ jobs:
       - name: Run Android E2E tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 36
+          api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_6
