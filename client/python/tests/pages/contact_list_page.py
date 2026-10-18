@@ -25,4 +25,7 @@ class ContactListPage(BasePage):
         return EditContactPage(self.client)
 
     def assert_contact_visible(self, name: str) -> ExecutionResult:
+        # The list can come back with a one-time "Some menu items have moved"
+        # nag over it. Dismiss it when it shows; not every run gets it.
+        self.client.tap(id="android:id/closeButton", optional=True)
         return self.client.assert_visible(text=name)

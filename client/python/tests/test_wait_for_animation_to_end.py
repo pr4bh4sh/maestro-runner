@@ -15,6 +15,10 @@ Run:
 
 from maestro_runner import MaestroClient
 
+# API 35 titles the screen row "Display, interaction, audio"; the sub-screen it
+# opens is still called Display.
+DISPLAY_ROW = "Display, interaction, audio"
+
 # ---------------------------------------------------------------------------
 # Tests  (all use the session-scoped `client` fixture from conftest.py)
 # ---------------------------------------------------------------------------
@@ -42,7 +46,12 @@ def test_wait_for_animation_settles_after_navigation(client: MaestroClient) -> N
     Tap into a sub-screen to trigger a slide-in animation, then call
     waitForAnimationToEnd and confirm it settles without error.
     """
-    client.tap(text="Display")
+    # On API 35 the Settings entry is titled "Display, interaction, audio"
+    # (there is no bare "Display" row), and it sits below the fold of the home
+    # list, so scroll to it first. `text` is a whole-value match, so the full
+    # title is required.
+    client.scroll_until_visible(element=DISPLAY_ROW, direction="down")
+    client.tap(text=DISPLAY_ROW)
 
     result = client.wait_for_animation_to_end()
     assert result.success is True, f"waitForAnimationToEnd failed: {result.message}"
