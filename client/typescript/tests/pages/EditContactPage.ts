@@ -18,10 +18,9 @@ export class EditContactPage extends BasePage {
 
   async setPhone(number: string): Promise<void> {
     await this.waitForAnimation();
-    // Contacts ships two editors: the older one labels the row "Phone", the
-    // newer one "Phone (Mobile)" next to an "Add phone" row. `text` is a
-    // whole-value regex, so this alternation matches either build.
-    await this.client.tap({ text: "Phone.*|Add phone" });
+    // On API 35 the phone row is an EditText labelled "Phone"; the old
+    // "Phone (Mobile)|Add phone" label belonged to the pre-API-33 editor.
+    await this.client.tap({ text: "Phone" });
     await this.client.inputText(number);
     await this.hideKeyboard("back");
   }
