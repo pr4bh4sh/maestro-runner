@@ -150,10 +150,14 @@ install_apk() {
   adb -s "$SERIAL" install -r -g "$2"
 }
 install_apk io.appium.uiautomator2.server drivers/android/appium-uiautomator2-server-v9.11.1.apk
-adb -s "$SERIAL" install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
+install_apk io.appium.uiautomator2.server.test drivers/android/appium-uiautomator2-server-debug-androidTest.apk
 install_apk io.appium.settings drivers/android/settings_apk-debug.apk
 adb -s "$SERIAL" install -r -g drivers/android/animation-test-app-debug.apk
 ```
+
+The instrumentation pair has to move together: the server APK and its `androidTest` APK must come
+from the same build. Replacing only the server leaves the `.test` package stale, and the session
+then dies at start with `UIAutomator2 server not ready after 30s`.
 
 The `google_apis` image **pre-installs** `io.appium.uiautomator2.server` 9.9.0 and
 `io.appium.settings` 7.0.6, both Google-signed. The pinned APKs are Appium-signed, so

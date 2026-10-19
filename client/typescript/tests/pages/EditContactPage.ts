@@ -18,7 +18,10 @@ export class EditContactPage extends BasePage {
 
   async setPhone(number: string): Promise<void> {
     await this.waitForAnimation();
-    await this.client.tap({ text: "Phone (Mobile)|Add phone" });
+    // Contacts ships two editors: the older one labels the row "Phone", the
+    // newer one "Phone (Mobile)" next to an "Add phone" row. `text` is a
+    // whole-value regex, so this alternation matches either build.
+    await this.client.tap({ text: "Phone.*|Add phone" });
     await this.client.inputText(number);
     await this.hideKeyboard("back");
   }

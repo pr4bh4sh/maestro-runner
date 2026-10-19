@@ -202,6 +202,21 @@ export class MaestroClient {
     return this.exec(commands.scroll(label));
   }
 
+  async scrollUntilVisible(opts: {
+    element: string | { text?: string; id?: string; selector?: ElementSelector };
+    from?: string | { text?: string; id?: string; selector?: ElementSelector };
+    direction?: string;
+    maxScrolls?: number;
+    speed?: number;
+    visibilityPercentage?: number;
+    centerElement?: boolean;
+    waitToSettleTimeoutMs?: number;
+    optional?: boolean;
+    label?: string;
+  }): Promise<ExecutionResult> {
+    return this.exec(commands.scrollUntilVisible(opts));
+  }
+
   async swipe(
     direction: string,
     durationMs: number = 400,
