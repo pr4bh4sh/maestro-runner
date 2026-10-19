@@ -24,6 +24,9 @@ export class ContactListPage extends BasePage {
   }
 
   async assertContactVisible(name: string): Promise<ExecutionResult> {
+    // The list can come back with a one-time "Some menu items have moved"
+    // nag over it. Dismiss it when it shows; not every run gets it.
+    await this.client.tap({ id: "android:id/closeButton", optional: true });
     return this.client.assertVisible({ text: name });
   }
 }

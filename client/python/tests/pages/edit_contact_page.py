@@ -22,9 +22,10 @@ class EditContactPage(BasePage):
 
     def set_phone(self, number: str) -> None:
         self.wait_for_animation()
-        # On API 35 the phone row is an EditText labelled "Phone"; the old
-        # "Phone (Mobile)|Add phone" label belonged to the pre-API-33 editor.
-        self.client.tap(text="Phone")
+        # Contacts ships two editors: the older one labels the row "Phone", the
+        # newer one "Phone (Mobile)" next to an "Add phone" row. `text` is a
+        # whole-value regex, so this alternation matches either build.
+        self.client.tap(text=r"Phone.*|Add phone")
         self.client.input_text(number)
         self.hide_keyboard(strategy="back")
 

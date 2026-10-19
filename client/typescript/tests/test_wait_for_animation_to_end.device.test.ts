@@ -22,6 +22,10 @@ import { afterAll, describe, expect, it } from "@jest/globals";
 
 import { getClient, teardown } from "./setup";
 
+// API 35 titles the screen row "Display, interaction, audio"; the sub-screen it
+// opens is still called Display.
+const DISPLAY_ROW = "Display, interaction, audio";
+
 afterAll(async () => {
   await teardown();
 });
@@ -42,7 +46,11 @@ describe("WaitForAnimationToEnd (settles)", () => {
   it("should settle after navigation", async () => {
     const client = await getClient();
 
-    await client.tap({ text: "Display" });
+    // API 35 titles the Settings row "Display, interaction, audio" (there is no
+    // bare "Display" row) and it sits below the fold of the home list, so scroll
+    // to it first. `text` is a whole-value match, so the full title is required.
+    await client.scrollUntilVisible({ element: DISPLAY_ROW, direction: "down" });
+    await client.tap({ text: DISPLAY_ROW });
 
     const result = await client.waitForAnimationToEnd();
     expect(result.success).toBe(true);

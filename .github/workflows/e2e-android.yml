@@ -210,21 +210,49 @@ jobs:
           echo "Using device: $DEVICE"
           adb devices
 
+          # Gboard on API 35 opens as a floating "Write in text fields" toolbar
+          # (backspace/tab/emoji down the left edge) instead of a QWERTY layout.
+          # It occludes the left of the screen, so taps miss their target, and it
+          # never presents a keyboard window, so hideKeyboard cannot confirm the
+          # IME is down. Disabling the stylus feature restores the docked
+          # keyboard; the secure setting is the adb equivalent of Gboard >
+          # Settings > Write in text fields > Use stylus to write in text fields.
+          echo "::group::IME setup"
+          adb shell settings put secure show_ime_with_hard_keyboard 1
+          adb shell settings put secure stylus_handwriting_enabled 0
+          adb shell ime set com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME || true
+          adb shell settings get secure default_input_method
+          echo "::endgroup::"
+
+          # The google_apis image pre-installs io.appium.uiautomator2.server 9.9.0
+          # and io.appium.settings 7.0.6, signed by Google. The pinned APKs in
+          # drivers/android are Appium-signed, so `install -r` is refused with
+          # INSTALL_FAILED_UPDATE_INCOMPATIBLE and the run silently proceeds
+          # against the image's older server. Uninstall first so the pinned
+          # versions actually land.
+          install_apk() {
+            local pkg="$1" apk="$2"
+            # Best-effort: uninstalling a package that isn't there fails, which
+            # is the normal first-run case and must not abort the run.
+            adb uninstall "$pkg" >/dev/null 2>&1 || true
+            adb install -r -g "$apk"
+          }
+
           # Driver-specific APK installs
           case "${MAESTRO_DRIVER:-uiautomator2}" in
             uiautomator2)
-              adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+              install_apk io.appium.uiautomator2.server drivers/android/appium-uiautomator2-server-v9.11.1.apk
               adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
-              adb install -r -g drivers/android/settings_apk-debug.apk
+              install_apk io.appium.settings drivers/android/settings_apk-debug.apk
               ;;
             devicelab)
               # DeviceLab driver wraps uiautomator2.Driver, so the UIAutomator2
               # server APK(s) must also be present on the device.
               adb install -r -g drivers/android/devicelab-android-driver.apk
               adb install -r -g drivers/android/devicelab-android-driver-test.apk
-              adb install -r -g drivers/android/appium-uiautomator2-server-v9.11.1.apk
+              install_apk io.appium.uiautomator2.server drivers/android/appium-uiautomator2-server-v9.11.1.apk
               adb install -r -g drivers/android/appium-uiautomator2-server-debug-androidTest.apk
-              adb install -r -g drivers/android/settings_apk-debug.apk
+              install_apk io.appium.settings drivers/android/settings_apk-debug.apk
               ;;
             appium)
               # Appium manages the UIAutomator2 server itself; only the test

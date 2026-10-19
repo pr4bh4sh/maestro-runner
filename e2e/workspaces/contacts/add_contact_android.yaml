@@ -25,13 +25,14 @@ tags:
 - inputText: Tester
 
 # Fill in the phone number
-# On API 35 the editor has no separate country-code prefix to tap: the phone
-# row is an EditText labelled "Phone", with a separate "Mobile" spinner below
-# it that only picks the label type. Tap the field itself.
+# Contacts ships two editors and the image decides which one you get: the older
+# build labels the row "Phone", the newer one "Phone (Mobile)" with a separate
+# "+1" prefix and an "Add phone" row. `text` is a whole-value regex, so one
+# alternation covers every build.
 - hideKeyboard:
     strategy: "back"
 - tapOn:
-    text: "Phone"
+    text: "Phone.*|Add phone"
 - inputText:
     text: "5550100"
     keyPress: true
