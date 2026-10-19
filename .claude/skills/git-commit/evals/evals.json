@@ -16,12 +16,12 @@
     },
     {
       "id": 2,
-      "prompt": "only commit the skill changes, not the evals",
-      "expected_output": "Stages only the .github/skills/*/SKILL.md files (and .gitignore), explicitly excluding the evals/ directories, and commits with an appropriate message.",
+      "prompt": "commit just the client/python changes, leave the skills and workflows alone",
+      "expected_output": "Stages only the client/python paths by explicit file path, leaves .claude/skills and .github/workflows untouched, and commits with a Conventional Commits message.",
       "files": [],
       "assertions": [
         "Response stages specific files rather than using git add . or git add -u blindly",
-        "Response does NOT stage or commit files under evals/ directories",
+        "Response does NOT stage files under .claude/skills/ or .github/workflows/",
         "Response uses Conventional Commits format for the message",
         "Response shows or confirms what will be staged before committing (git diff --cached --stat or equivalent)"
       ]
