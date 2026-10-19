@@ -1,0 +1,52 @@
+{
+  "skill_name": "device-integration-testing",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My device test fails with 'device emulator-5554 is already in use' but nothing else is running against it.",
+      "expected_output": "Explains the per-server uiautomator2 device lock via /tmp/uia2-<serial>.pid, and that a leftover .pid pointing at a still-alive (possibly reused) PID makes IsOwnerAlive() return true. Clears the stale guard rather than opening a second session.",
+      "files": [],
+      "assertions": [
+        "Response explains the guard file /tmp/uia2-<serial>.pid and IsOwnerAlive()",
+        "Response notes that a stale .pid whose PID has been reused by another process still trips the lock",
+        "Response removes both /tmp/uia2-<serial>.sock and /tmp/uia2-<serial>.pid",
+        "Response reuses the existing shared session fixture rather than opening a second session"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "My test run left a server running and the next run won't start — I tried pkill -f maestro-runner and now my shell died.",
+      "expected_output": "Flags pkill -f maestro-runner as the trap (the pattern matches the invoking shell's own argv and kills it), and kills by port with lsof instead. Also clears leaked adb forwards.",
+      "files": [],
+      "assertions": [
+        "Response warns that pkill -f maestro-runner matches the shell running it and can kill that shell",
+        "Response kills the server by port, e.g. lsof -ti tcp:9999 | xargs -r kill -9",
+        "Response does NOT recommend pkill -f maestro-runner as the cleanup step",
+        "Response clears leaked adb forwards with adb -s <serial> forward --remove-all"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "My TS device tests pass, then the process crashes at exit with 'write after end'. What happened?",
+      "expected_output": "Identifies the teardown stream race: the child server is killed and its log stream ended before the dying process flushes its final output. Fixes by unpiping child stdout/stderr before ending the log stream.",
+      "files": [],
+      "assertions": [
+        "Response explains that the dying child flushed into an already-closed log stream",
+        "Response unpipes child.stdout and child.stderr before ending the log stream",
+        "Response orders the fix as: unpipe, then kill, then logStream.end()",
+        "Response notes this surfaces after tests have already passed"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Should I start the maestro-runner server by hand before running the device tests?",
+      "expected_output": "Says no — both harnesses auto-start the server when none is reachable. If one is started manually it must use a unique port, and the harness must not also start a second one on the same port.",
+      "files": [],
+      "assertions": [
+        "Response says the harness auto-starts the server and manual start is usually unnecessary",
+        "Response mentions the auto-start behaviour (maestro_server fixture / ensureServer() in setup.ts)",
+        "Response warns that a manual server must use a unique port to avoid conflicting with the harness"
+      ]
+    }
+  ]
+}

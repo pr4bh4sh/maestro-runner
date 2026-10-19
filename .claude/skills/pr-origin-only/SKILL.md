@@ -51,21 +51,33 @@ above by name.
    URLs:
    ```bash
    ORIGIN_URL=$(git remote get-url origin)
-   REPO=$(printf '%s' "$ORIGIN_URL" \
-     | sed -E 's#.*[:/]([^/:]+)/([^/]+?)(\.git)?$#\1/\2#')
+   REPO=$(printf '%s' "${ORIGIN_URL%.git}" | sed -E 's#.*[/|:]([^/]+)/([^/]+)$#\1/\2#')
    echo "origin repo = $REPO"
    ```
    (For `git@github.com:owner/repo.git` or `https://github.com/owner/repo`, this
    yields `owner/repo`.)
 
-1b. **Reject forbidden targets.** Before doing anything else, abort if the
-    resolved repo is one of the forbidden ones:
+   Two traps this avoids. The `(?:` non-capturing group is PCRE, not POSIX ERE:
+   BSD `sed` on macOS rejects it outright (`RE error: repetition-operator operand
+   invalid`) and leaves `REPO` **empty**. And splitting on `/` alone loses the
+   owner on SSH URLs, which separate host from path with `:` not `/` --
+   `${ORIGIN_URL##*/}` turns `git@github.com:owner/repo.git` into just `repo`.
+   The `[/|]` character class above covers both separators, so it works for
+   `git@`, `https://` and `ssh://` forms alike.
+
+1b. **Reject an unresolved or forbidden target.** Before doing anything else,
+    abort if the resolved repo is forbidden -- or if it could not be resolved:
    ```bash
    FORBIDDEN="devicelab-dev/maestro-runner prabhash-nw/maestro-runner"
+   [ -n "$REPO" ] || { echo "ABORT: could not resolve origin repo from '$ORIGIN_URL'"; exit 1; }
    for f in $FORBIDDEN; do
      [ "$REPO" = "$f" ] && { echo "ABORT: refusing to open PR against forbidden repo $REPO"; exit 1; }
    done
+   echo "target verified: $REPO"
    ```
+   The `[ -n "$REPO" ]` guard matters: an empty `REPO` makes the loop compare `""`
+   against each forbidden name, never match, and pass silently. The hard rule
+   would be unenforced exactly when it is needed.
 
 2. **Resolve the origin base branch** — the branch on `origin` you want to target
    (default: `origin`'s default branch):

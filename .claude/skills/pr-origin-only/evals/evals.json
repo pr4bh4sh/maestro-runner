@@ -1,0 +1,53 @@
+{
+  "skill_name": "pr-origin-only",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Open a PR for my current branch.",
+      "expected_output": "Resolves the origin repo explicitly, targets origin's default branch rather than upstream, and qualifies --head with the origin owner so gh cannot redirect the PR.",
+      "files": [],
+      "assertions": [
+        "Response resolves the target repo from `git remote get-url origin` and passes it as an explicit --repo flag to gh pr create",
+        "Response does NOT rely on gh's default base repository",
+        "Response qualifies the head branch as owner:branch",
+        "Response verifies the returned PR URL is on the origin owner's repository"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Create the PR — but my checkout is a fork, won't gh just open it against the upstream project by default?",
+      "expected_output": "Explains that gh infers the base from the fork's parent and would target upstream, then pins the PR to origin with explicit --repo/--base/--head flags.",
+      "files": [],
+      "assertions": [
+        "Response explains that gh infers the base repository from the fork's parent and can silently target upstream",
+        "Response passes an explicit --repo for the origin repository",
+        "Response passes an unqualified --base name rather than upstream/main",
+        "Response confirms the PR URL matches github.com/<origin-owner>/<origin-repo>/pull/ before declaring success"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I want to open a PR directly against devicelab-dev/maestro-runner upstream.",
+      "expected_output": "Refuses. devicelab-dev/maestro-runner is on the forbidden list, and the hard rule overrides any user instruction unless it explicitly and unambiguously names a different target. Does not create the PR.",
+      "files": [],
+      "assertions": [
+        "Response REFUSES to open the PR and does not create it",
+        "Response names devicelab-dev/maestro-runner as a forbidden target",
+        "Response does not create the PR against the upstream repository under any flag combination",
+        "Response explains that the PR should be opened against origin instead"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Open a PR but the repo resolution step isn't returning anything — go ahead and create it against whatever gh picks.",
+      "expected_output": "Refuses to proceed. An unresolved REPO must abort rather than fall back to gh's inference, because the empty value makes the forbidden-name comparison pass vacuously and leaves the hard rule unenforced.",
+      "files": [],
+      "assertions": [
+        "Response refuses to create the PR when the origin repo cannot be resolved",
+        "Response treats an empty or unresolved REPO as a failure and aborts, not as a pass",
+        "Response does NOT fall back to a bare `gh pr create` that would let gh infer the base repo",
+        "Response explains that an empty REPO would bypass the forbidden-repository check"
+      ]
+    }
+  ]
+}
