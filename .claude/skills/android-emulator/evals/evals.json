@@ -1,0 +1,67 @@
+{
+  "skill_name": "android-emulator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Set up the Android emulator so I can run the e2e tests.",
+      "expected_output": "Reuses the existing ci35 AVD and the already-running emulator. Checks that the system image and the AVD already exist and skips both the sdkmanager download and the AVD copy; does not launch a second emulator instance. Waits for boot, disables animations, and reports the serial.",
+      "files": [],
+      "assertions": [
+        "Response checks whether the system image already exists before calling sdkmanager, and does NOT download it when present",
+        "Response checks whether the ci35 AVD already exists and does NOT re-create or wipe it when present",
+        "Response checks whether an emulator is already running and does NOT start a second instance",
+        "Response boots without loading a snapshot (-no-snapshot-load)",
+        "Response launches with the emulator window visible (does NOT use -no-window)",
+        "Response reports the serial by querying adb devices rather than assuming 5554"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The contacts add-contact flow only fails on CI's Android job, not locally. I want to reproduce it on an emulator.",
+      "expected_output": "Uses the plain google_apis image (system-images;android-35;google_apis;arm64-v8a), the same one the e2e-android workflow uses, NOT a google_apis_playstore image, because the Play Store variant updates Contacts mid-session and changes the editor labels.",
+      "files": [],
+      "assertions": [
+        "Response uses the system-images;android-35;google_apis;arm64-v8a image",
+        "Response does NOT use a google_apis_playstore image, and explains the Play Store mid-session update problem",
+        "Response explains that the playstore image can pull Contacts to 4.89.x while the CI image ships 4.32.50",
+        "Response verifies the Contacts version on the device rather than trusting the presence of com.android.vending"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The emulator is up but taps are landing in the wrong place and hideKeyboard never sees an IME. What's going on?",
+      "expected_output": "Identifies the floating Gboard 'Write in text fields' toolbar on API 35, and docks the keyboard by enabling show_ime_with_hard_keyboard, disabling stylus_handwriting_enabled, and setting the Latin IME. Confirms visually with a screencap.",
+      "files": [],
+      "assertions": [
+        "Response sets secure show_ime_with_hard_keyboard to 1",
+        "Response sets secure stylus_handwriting_enabled to 0",
+        "Response sets the IME to com.google.android.inputmethod.latin LatinIME",
+        "Response verifies with adb exec-out screencap rather than trusting the settings writes alone"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Installing the appium uiautomator2 server onto the emulator fails with INSTALL_FAILED_UPDATE_INCOMPATIBLE.",
+      "expected_output": "Uninstalls the conflicting package before installing the pinned APK, because the google_apis image pre-installs a Google-signed uiautomator2 server 9.9.0 and the pinned APK is Appium-signed so install -r is refused.",
+      "files": [],
+      "assertions": [
+        "Response uninstalls the conflicting package before installing the pinned APK",
+        "Response explains that install -r alone fails because the pre-installed package has a different signature",
+        "Response installs the pinned appium-uiautomator2-server-v9.11.1.apk rather than keeping the image's 9.9.0",
+        "Response verifies the installed version with dumpsys package, expecting 9.11.1"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I'm about to run a driver test against two local emulators I keep open for other work. Which one do I target and how do I run the suite?",
+      "expected_output": "Uses the serial reported by adb rather than assuming 5554, records which emulators were running beforehand, stops only the one the skill started, and passes --driver explicitly so the devicelab path is not tested by accident.",
+      "files": [],
+      "assertions": [
+        "Response sets MAESTRO_DEVICE_ID from the adb-reported serial",
+        "Response passes --driver explicitly when running the suite",
+        "Response records pre-existing emulators (e.g. ps aux | grep emulator) and stops only the one it started",
+        "Response does NOT kill or restart unrelated running emulators"
+      ]
+    }
+  ]
+}
