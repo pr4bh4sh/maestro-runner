@@ -2,6 +2,8 @@ package wda
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
@@ -19,6 +21,9 @@ type Driver struct {
 	client *Client
 	info   *core.PlatformInfo
 	udid   string // Device UDID for simctl commands
+
+	// Guards the screen size kept in info when screenSize reads it again.
+	sizeMu sync.Mutex
 
 	// In-flight --record capture (simulators only)
 	recording *simulator.Recording
@@ -50,6 +55,14 @@ type Driver struct {
 	appDeathCount    int
 	appDeathFirstAt  time.Time
 	crashAbortReason string
+
+	// The last step could have set the screen moving (a tap, a swipe, a
+	// scroll), so the next action waits for it to settle first
+	screenMayMove bool
+
+	// settleOff is set by a wait-for-idle timeout of 0: actions no longer
+	// wait for the screen to settle first (#212).
+	settleOff bool
 }
 
 // Crash-loop detection thresholds.
@@ -129,16 +142,36 @@ func (d *Driver) EnsureSession(appID string) error {
 	_ = d.client.UpdateSettings(map[string]interface{}{
 		"shouldWaitForQuiescence": false,
 		"waitForIdleTimeout":      0,
+		"animationCoolOffTimeout": 0,
 	})
 	return nil
 }
 
 // screenSize returns cached screen dimensions from PlatformInfo.
+// screenSize is the screen size WDA reports, read at startup and kept. When
+// that read failed (WDA not answering yet), it is read again here, and kept
+// once it succeeds: one failed read at startup no longer fails every point
+// tap, percentage swipe and scroll of the run (#201).
 func (d *Driver) screenSize() (int, int, error) {
+	d.sizeMu.Lock()
+	defer d.sizeMu.Unlock()
 	if d.info != nil && d.info.ScreenWidth > 0 && d.info.ScreenHeight > 0 {
 		return d.info.ScreenWidth, d.info.ScreenHeight, nil
 	}
-	return 0, 0, fmt.Errorf("screen dimensions not available")
+	if d.client == nil {
+		return 0, 0, fmt.Errorf("screen dimensions not available")
+	}
+	w, h, err := d.client.WindowSize()
+	if err != nil {
+		return 0, 0, fmt.Errorf("screen dimensions not available: %w", err)
+	}
+	if w <= 0 || h <= 0 {
+		return 0, 0, fmt.Errorf("screen dimensions not available: WDA reported %dx%d", w, h)
+	}
+	if d.info != nil {
+		d.info.ScreenWidth, d.info.ScreenHeight = w, h
+	}
+	return w, h, nil
 }
 
 // SetContext sets the parent context for element-finding operations.
@@ -175,7 +208,12 @@ func (d *Driver) SetAppFile(path string) {
 // sets a timeout > 200ms (the CLI default), indicating they want idle waiting.
 // Negative values and 0 disable quiescence. Values 1-200 are a no-op (keep session default).
 // Values > 200 enable quiescence — minimum effective value is 200ms.
+//
+// 0 also turns off the settle before an action (#212): on a screen that never
+// stops changing (a looping Rive or Lottie view) it cost its full 3s cap on
+// every action, and 0 is documented as "disabled".
 func (d *Driver) SetWaitForIdleTimeout(ms int) error {
+	d.settleOff = ms <= 0
 	if ms > 200 {
 		return d.client.UpdateSettings(map[string]interface{}{
 			"shouldWaitForQuiescence": true,
@@ -204,6 +242,10 @@ const (
 	QuickFindTimeout    = 1000  // 1 second for quick checks
 )
 
+// WaitsAroundTaps reports that a tap settles first when the step before it
+// moved the screen (see flow.RepeatTapAfterFirst).
+func (d *Driver) WaitsAroundTaps() bool { return true }
+
 // Execute runs a single step and returns the result.
 func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	start := time.Now()
@@ -219,6 +261,18 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 			Duration: time.Since(start),
 		}
 	}
+
+	// An action right after one that moved the screen (a tap, a swipe, a
+	// scroll) waits for the screen to settle. WDA's own wait for quiescence
+	// is off (it crashed XCTest), so a tap went out while the previous one's
+	// push was still running (#179), while a list was still coasting after a
+	// scroll (iOS takes that tap as "stop scrolling"), or while a menu was
+	// still animating in — and WDA reported success for a tap that did
+	// nothing. Maestro settles before every tap in the same way.
+	if d.screenMayMove && !d.settleOff && actsOnScreen(step) && !flow.RepeatTapAfterFirst(step) {
+		d.settleScreen()
+	}
+	d.screenMayMove = movesScreen(step)
 
 	var result *core.CommandResult
 	switch s := step.(type) {
@@ -343,6 +397,61 @@ func (d *Driver) Execute(step flow.Step) *core.CommandResult {
 	result.Duration = time.Since(start)
 	d.trackCrashLoop(result)
 	return result
+}
+
+// actsOnScreen reports whether a step acts on what is on screen, so it must
+// not run while the screen is still changing. Asserts are not in it: they
+// poll until their own timeout anyway.
+func actsOnScreen(step flow.Step) bool {
+	switch step.(type) {
+	case *flow.TapOnStep, *flow.DoubleTapOnStep, *flow.LongPressOnStep, *flow.TapOnPointStep,
+		*flow.DragAndDropStep, *flow.SwipeStep, *flow.ScrollStep, *flow.ScrollUntilVisibleStep,
+		*flow.BackStep, *flow.PressKeyStep, *flow.InputTextStep, *flow.CopyTextFromStep:
+		return true
+	}
+	return false
+}
+
+// movesScreen reports whether a step can set the screen moving, so the next
+// action has to wait for it to settle.
+func movesScreen(step flow.Step) bool {
+	switch step.(type) {
+	case *flow.TapOnStep, *flow.DoubleTapOnStep, *flow.LongPressOnStep, *flow.TapOnPointStep,
+		*flow.DragAndDropStep, *flow.SwipeStep, *flow.ScrollStep, *flow.ScrollUntilVisibleStep,
+		*flow.BackStep, *flow.PressKeyStep, *flow.InputTextStep, *flow.LaunchAppStep:
+		return true
+	}
+	return false
+}
+
+// screenSettleLimit caps a settle, as Maestro's iOS driver caps its own at 3s:
+// a screen that never stops changing (a video, a spinner) costs this, no more.
+var screenSettleLimit = 3 * time.Second
+
+// settleScreen waits until two screenshots taken back to back are identical,
+// Maestro's iOS test for a static screen. Each screenshot takes as long as it
+// takes, so there is no fixed sleep: a still screen settles after two. It
+// returns the last screenshot's hash (empty when none could be taken), which
+// callers can compare to tell whether the screen moved at all.
+func (d *Driver) settleScreen() string {
+	start := time.Now()
+	prev := ""
+	for {
+		shot, err := d.client.Screenshot()
+		if err != nil || len(shot) == 0 {
+			return prev
+		}
+		sum := sha256.Sum256(shot)
+		cur := hex.EncodeToString(sum[:])
+		if cur == prev {
+			return cur
+		}
+		prev = cur
+		if time.Since(start) >= screenSettleLimit {
+			logger.Debug("[wda] screen still changing after %v — continuing", screenSettleLimit)
+			return cur
+		}
+	}
 }
 
 // trackCrashLoop counts consecutive "app died on launch" failures and trips a
@@ -521,6 +630,12 @@ func (d *Driver) findElementForTap(sel flow.Selector, optional bool, stepTimeout
 		return d.findElement(sel, optional, stepTimeoutMs)
 	}
 
+	// checked is only known from the page source, which findElement reaches;
+	// the text strategies below would tap a switch in either state.
+	if sel.Checked != nil {
+		return d.findElement(sel, optional, stepTimeoutMs)
+	}
+
 	// For ID-based selectors, use standard findElement (IDs are usually unique)
 	if sel.ID != "" {
 		return d.findElement(sel, optional, stepTimeoutMs)
@@ -577,8 +692,11 @@ func (d *Driver) findElementForTapWithContext(ctx context.Context, sel flow.Sele
 
 			// Step 2a: Try exact-match predicate first.
 			// This prevents "Password" from matching "Forgot Password?" etc.
-			exactPredicate := fmt.Sprintf("(label == '%s' OR name == '%s' OR value == '%s')%s",
-				sel.Text, sel.Text, sel.Text, stateFilter)
+			// Text matches what the element shows (label, value), never its
+			// accessibility identifier: XCUITest reports the identifier as
+			// name, and Maestro matches ids only through id: (#178).
+			exactPredicate := fmt.Sprintf("(label == '%s' OR value == '%s')%s",
+				sel.Text, sel.Text, stateFilter)
 			exactElemID, _ := d.client.FindElement("predicate string", exactPredicate)
 
 			// If exact predicate found element, try getElementInfo directly — avoids
@@ -590,8 +708,8 @@ func (d *Driver) findElementForTapWithContext(ctx context.Context, sel flow.Sele
 			}
 
 			// Step 2b: Check if text exists via substring WDA predicate
-			predicateBase := fmt.Sprintf("label CONTAINS[c] '%s' OR name CONTAINS[c] '%s' OR value CONTAINS[c] '%s'",
-				sel.Text, sel.Text, sel.Text)
+			predicateBase := fmt.Sprintf("label CONTAINS[c] '%s' OR value CONTAINS[c] '%s'",
+				sel.Text, sel.Text)
 			predicate := "(" + predicateBase + ")" + stateFilter
 			containsElemID, textExistsErr := d.client.FindElement("predicate string", predicate)
 
@@ -636,13 +754,13 @@ func (d *Driver) findInteractiveElementByWDA(sel flow.Selector, stateFilter stri
 
 	textFieldChain := fmt.Sprintf("**/XCUIElementTypeTextField[`(label CONTAINS[c] '%s' OR value CONTAINS[c] '%s' OR placeholderValue CONTAINS[c] '%s')%s`]", sel.Text, sel.Text, sel.Text, stateFilter)
 	secureFieldChain := fmt.Sprintf("**/XCUIElementTypeSecureTextField[`(label CONTAINS[c] '%s' OR value CONTAINS[c] '%s' OR placeholderValue CONTAINS[c] '%s')%s`]", sel.Text, sel.Text, sel.Text, stateFilter)
-	buttonChain := fmt.Sprintf("**/XCUIElementTypeButton[`(label ==[c] '%s' OR name ==[c] '%s')%s`]", sel.Text, sel.Text, stateFilter)
+	buttonChain := fmt.Sprintf("**/XCUIElementTypeButton[`(label ==[c] '%s')%s`]", sel.Text, stateFilter)
 
 	// Fallback: combined predicate for all interactive types.
 	// Class chain can fail due to quiescence while predicate queries may succeed.
 	fallbackPred := fmt.Sprintf(
-		"((type == 'XCUIElementTypeTextField' OR type == 'XCUIElementTypeSecureTextField' OR type == 'XCUIElementTypeSearchField') AND (label CONTAINS[c] '%s' OR value CONTAINS[c] '%s')) OR (type == 'XCUIElementTypeButton' AND (label ==[c] '%s' OR name ==[c] '%s'))",
-		sel.Text, sel.Text, sel.Text, sel.Text,
+		"((type == 'XCUIElementTypeTextField' OR type == 'XCUIElementTypeSecureTextField' OR type == 'XCUIElementTypeSearchField') AND (label CONTAINS[c] '%s' OR value CONTAINS[c] '%s')) OR (type == 'XCUIElementTypeButton' AND label ==[c] '%s')",
+		sel.Text, sel.Text, sel.Text,
 	)
 	if stateFilter != "" {
 		fallbackPred = fmt.Sprintf("(%s)%s", fallbackPred, stateFilter)
@@ -822,6 +940,11 @@ func (d *Driver) findElementByWDA(sel flow.Selector) (*core.ElementInfo, error) 
 	if sel.ID != "" && sel.Text != "" {
 		return nil, fmt.Errorf("combined id+text selector requires page-source AND matching")
 	}
+	// checked is read from the page source (type and value); the queries
+	// below would match a switch in either state.
+	if sel.Checked != nil {
+		return nil, fmt.Errorf("checked selector requires page-source matching")
+	}
 
 	// Try class chain for accessibility ID
 	if sel.ID != "" {
@@ -839,12 +962,12 @@ func (d *Driver) findElementByWDA(sel flow.Selector) (*core.ElementInfo, error) 
 			// CONTAINS fallback preserves the lenient Maestro-compat behavior
 			// for callers that rely on partial-id matching.
 			exact := fmt.Sprintf("**/XCUIElementTypeAny[`name == '%s'%s`]", sel.ID, stateFilter)
-			if elemID, err := d.client.FindElement("class chain", exact); err == nil && elemID != "" {
-				return d.getElementInfo(elemID)
+			if info, err, found := d.findByIDQuery(exact); found {
+				return info, err
 			}
 			contains := fmt.Sprintf("**/XCUIElementTypeAny[`name CONTAINS '%s'%s`]", sel.ID, stateFilter)
-			if elemID, err := d.client.FindElement("class chain", contains); err == nil && elemID != "" {
-				return d.getElementInfo(elemID)
+			if info, err, found := d.findByIDQuery(contains); found {
+				return info, err
 			}
 		}
 	}
@@ -852,8 +975,8 @@ func (d *Driver) findElementByWDA(sel flow.Selector) (*core.ElementInfo, error) 
 	if sel.Text != "" {
 		// Try generic predicate first — most assertions target StaticText/labels,
 		// so this avoids 3 wasted type-specific queries (TextField, SecureTextField, Button)
-		predicateBase := fmt.Sprintf("label CONTAINS[c] '%s' OR name CONTAINS[c] '%s' OR value CONTAINS[c] '%s'",
-			sel.Text, sel.Text, sel.Text)
+		predicateBase := fmt.Sprintf("label CONTAINS[c] '%s' OR value CONTAINS[c] '%s'",
+			sel.Text, sel.Text)
 		predicate := "(" + predicateBase + ")" + stateFilter
 		if elemID, err := d.client.FindElement("predicate string", predicate); err == nil && elemID != "" {
 			return d.getElementInfo(elemID)
@@ -946,6 +1069,94 @@ func (d *Driver) getElementInfo(elemID string) (*core.ElementInfo, error) {
 	return info, nil
 }
 
+// findByIDQuery resolves a class-chain id query, preferring an on-screen
+// element when several match (onScreenOf). found is false when nothing
+// matched. A WDA that cannot list elements gets the single-element query.
+func (d *Driver) findByIDQuery(query string) (*core.ElementInfo, error, bool) { //nolint:revive,staticcheck // found last reads naturally at call sites
+	ids, err := d.client.FindElements("class chain", query)
+	if err != nil {
+		elemID, ferr := d.client.FindElement("class chain", query)
+		if ferr != nil || elemID == "" {
+			return nil, nil, false
+		}
+		info, ierr := d.getElementInfo(elemID)
+		return info, ierr, true
+	}
+	if len(ids) == 0 {
+		return nil, nil, false
+	}
+	info, ierr := d.onScreenOf(ids)
+	return info, ierr, true
+}
+
+// maxIDCandidates caps how many same-id elements are inspected; each costs
+// the element calls in getElementInfo.
+const maxIDCandidates = 5
+
+// onScreenOf picks among elements sharing an id: the first XCUITest reports
+// displayed, else the first the viewport check in getElementInfo accepts.
+// While a push animates, the outgoing screen and the incoming one both hold
+// an element with the same id, and the outgoing copy comes first in tree
+// order; taking it tapped the screen being left (#179).
+//
+// Of the displayed ones, an element that contains another match is skipped
+// for the one inside it, as Maestro takes the deepest match: a SwiftUI
+// Toggle is a row-wide switch holding the real switch, both with the same
+// id, and the row's centre is its label, where a tap flips nothing.
+func (d *Driver) onScreenOf(ids []string) (*core.ElementInfo, error) {
+	var fallback *core.ElementInfo
+	var visible []*core.ElementInfo
+	var lastErr error
+	for i, id := range ids {
+		if i == maxIDCandidates {
+			break
+		}
+		info, err := d.getElementInfo(id)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if info.Visible {
+			visible = append(visible, info)
+			continue
+		}
+		if fallback == nil {
+			fallback = info
+		}
+	}
+	if len(visible) > 0 {
+		return deepestOf(visible), nil
+	}
+	if fallback != nil {
+		return fallback, nil
+	}
+	return nil, lastErr
+}
+
+// deepestOf returns the first element that contains none of the others:
+// bounds containment stands in for ancestry, which the element API does not
+// expose.
+func deepestOf(infos []*core.ElementInfo) *core.ElementInfo {
+	for _, a := range infos {
+		inner := false
+		for _, b := range infos {
+			if a != b && a.Bounds != b.Bounds && contains(a.Bounds, b.Bounds) {
+				inner = true
+				break
+			}
+		}
+		if !inner {
+			return a
+		}
+	}
+	return infos[0]
+}
+
+// contains reports whether b lies entirely within a.
+func contains(a, b core.Bounds) bool {
+	return b.X >= a.X && b.Y >= a.Y && b.X+b.Width <= a.X+a.Width && b.Y+b.Height <= a.Y+a.Height
+}
+
 // findElementRelativeWithContext handles relative selectors with context-based timeout.
 func (d *Driver) findElementRelativeWithContext(ctx context.Context, sel flow.Selector) (*core.ElementInfo, error) {
 	var lastErr error
@@ -1005,7 +1216,7 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 
 	// Get candidates
 	var candidates []*ParsedElement
-	if baseSel.Text != "" || baseSel.ID != "" || baseSel.Width > 0 || baseSel.Height > 0 {
+	if baseSel.Text != "" || baseSel.ID != "" || baseSel.Width > 0 || baseSel.Height > 0 || baseSel.Checked != nil {
 		candidates = FilterBySelector(allElements, baseSel)
 	} else {
 		candidates = allElements
@@ -1016,7 +1227,7 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 	if anchorSelector != nil {
 		anchors := FilterBySelector(allElements, *anchorSelector)
 		if len(anchors) == 0 {
-			return nil, fmt.Errorf("anchor element not found")
+			return nil, notFound("anchor element not found")
 		}
 
 		var matchingCandidates []*ParsedElement
@@ -1038,7 +1249,7 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 	// Bounds-based visibility (FilterOutOfBounds already applied above);
 	// XCUITest's `visible="false"` is unreliable on RN testID wrappers.
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no elements match selector")
+		return nil, notFound("no elements match selector")
 	}
 
 	// Prioritize clickable/interactive elements
@@ -1050,11 +1261,14 @@ func (d *Driver) resolveRelativeSelector(sel flow.Selector, allElements []*Parse
 		// (first) element to match Maestro's .firstOrNull() behavior.
 		selected = candidates[0]
 	} else {
+		if err := core.IndexError(len(candidates), sel.Index); err != nil {
+			return nil, err
+		}
 		selected = SelectByIndex(candidates, sel.Index)
 	}
 
 	info := &core.ElementInfo{
-		Text:    selected.Label,
+		Text:    elementText(selected),
 		Bounds:  selected.Bounds,
 		Enabled: selected.Enabled,
 		Visible: selected.Displayed,
@@ -1094,15 +1308,18 @@ func (d *Driver) findElementByPageSourceOnce(sel flow.Selector) (*core.ElementIn
 	if len(candidates) == 0 {
 		if sel.Text != "" {
 			if closest := ClosestTexts(allElements, sel.Text, 3); len(closest) > 0 {
-				return nil, fmt.Errorf("no elements match selector; closest on-screen texts: %s", strings.Join(closest, ", "))
+				return nil, notFound("no elements match selector; closest on-screen texts: %s", strings.Join(closest, ", "))
 			}
 		}
-		return nil, fmt.Errorf("no elements match selector")
+		return nil, notFound("no elements match selector")
 	}
 
 	// Prioritize clickable/interactive elements
 	candidates = SortClickableFirst(candidates)
 
+	if err := core.IndexError(len(candidates), sel.Index); err != nil {
+		return nil, err
+	}
 	selected := SelectByIndex(candidates, sel.Index)
 
 	// If element isn't a clickable type, try to find a clickable parent
@@ -1110,7 +1327,7 @@ func (d *Driver) findElementByPageSourceOnce(sel flow.Selector) (*core.ElementIn
 	clickableElem := GetClickableElement(selected)
 
 	info := &core.ElementInfo{
-		Text:    selected.Label,
+		Text:    elementText(selected),
 		Bounds:  clickableElem.Bounds,
 		Enabled: selected.Enabled,
 		Visible: selected.Displayed,

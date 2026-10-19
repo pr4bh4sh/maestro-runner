@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	"github.com/devicelab-dev/maestro-runner/pkg/flow"
@@ -18,37 +19,64 @@ import (
 // envVarPattern matches ALL_CAPS identifiers that look like env variables
 var envVarPattern = regexp.MustCompile(`\b([A-Z][A-Z0-9_]{2,})\b`)
 
-// defaultConditionTimeoutMs is the budget for a `when:`/`while:` condition's
-// visible/notVisible check when the condition (or its selector) sets no explicit
-// timeout. It is deliberately short: a condition that isn't met should resolve
-// quickly rather than blocking on the 7s optional-find timeout. Vanilla Maestro
-// is effectively fast here too (it shrinks the budget by time already elapsed
-// since the last interaction). A present element still resolves immediately;
-// this only bounds how long an unmet condition waits. Tunable via
-// SetConditionTimeout / the --condition-timeout flag, and overridable per
-// condition with `timeout:`. (#110)
-const defaultConditionTimeoutMs = 1000
+// A `when:`/`while:` visible/notVisible check with no timeout of its own gets
+// Maestro's budget: the 7s optional-find timeout less the time since the last
+// step ended, so a check right after a slow step resolves quickly while one
+// right after a quick step still waits for UI that is on its way (duckduckgo
+// shows its saved-login prompt more than 1s after the page loads). The budget
+// never drops below minConditionTimeoutMs. A present element resolves at
+// once either way. --condition-timeout / SetConditionTimeout sets a fixed
+// budget instead, and `timeout:` overrides per condition. (#110)
+const (
+	maestroConditionTimeoutMs = 7000
+	minConditionTimeoutMs     = 1000
+)
 
 // ScriptEngine handles JavaScript execution and variable management.
 type ScriptEngine struct {
 	js                 *jsengine.Engine
 	variables          map[string]string
 	flowDir            string // Directory of current flow (for resolving relative paths)
-	conditionTimeoutMs int    // default timeout for when/while condition checks
+	conditionTimeoutMs int    // fixed timeout for when/while condition checks; 0 = Maestro's budget
+	lastInteraction    time.Time
+	// external names the variables that came from outside the flow files
+	// (-e, --env-file, workspace config, the shell). Step names never show
+	// their values, which may be secrets.
+	external map[string]bool
 }
 
 // NewScriptEngine creates a new script engine.
 func NewScriptEngine() *ScriptEngine {
 	return &ScriptEngine{
-		js:                 jsengine.New(),
-		variables:          make(map[string]string),
-		conditionTimeoutMs: defaultConditionTimeoutMs,
+		js:        jsengine.New(),
+		variables: make(map[string]string),
 	}
 }
 
-// SetConditionTimeout overrides the default timeout (ms) used for `when:`/
-// `while:` condition checks that don't specify their own. A non-positive value
-// is ignored (keeps the current default).
+// MarkInteraction records that a step just ended, the point Maestro measures
+// a condition's budget from.
+func (se *ScriptEngine) MarkInteraction() {
+	se.lastInteraction = time.Now()
+}
+
+// conditionBudgetMs is the timeout for a when/while check with none of its own.
+func (se *ScriptEngine) conditionBudgetMs() int {
+	if se.conditionTimeoutMs > 0 {
+		return se.conditionTimeoutMs
+	}
+	budget := maestroConditionTimeoutMs
+	if !se.lastInteraction.IsZero() {
+		budget -= int(time.Since(se.lastInteraction).Milliseconds())
+	}
+	if budget < minConditionTimeoutMs {
+		return minConditionTimeoutMs
+	}
+	return budget
+}
+
+// SetConditionTimeout sets a fixed timeout (ms) for `when:`/`while:` condition
+// checks that don't specify their own. A non-positive value keeps Maestro's
+// budget.
 func (se *ScriptEngine) SetConditionTimeout(ms int) {
 	if ms > 0 {
 		se.conditionTimeoutMs = ms
@@ -96,6 +124,61 @@ func (se *ScriptEngine) SetVariables(vars map[string]string) {
 	}
 }
 
+// SetExternalVariables sets variables that came from outside the flow files
+// (-e, --env-file, workspace config). Step names never show their values.
+func (se *ScriptEngine) SetExternalVariables(vars map[string]string) {
+	for k, v := range vars {
+		se.SetVariable(k, v)
+		se.markExternal(k)
+	}
+}
+
+func (se *ScriptEngine) markExternal(name string) {
+	if se.external == nil {
+		se.external = map[string]bool{}
+	}
+	se.external[name] = true
+}
+
+// displayVarRef is a plain ${NAME} reference, the only kind step names expand.
+var displayVarRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// DisplayText expands the plain ${NAME} references in a step's name whose
+// values were defined in the flow files: a flow's env:, a runFlow's env:,
+// defineVariables, a command's output. A variable from outside the flow
+// (-e, --env-file, workspace config, the shell) stays ${NAME}, and so does a
+// flow value that contains one of their values (env: {PASS: ${PASSWORD}}),
+// since either may be a secret. Expressions other than a plain name are left
+// as written.
+func (se *ScriptEngine) DisplayText(text string) string {
+	if se == nil || !strings.Contains(text, "${") {
+		return text
+	}
+	return displayVarRef.ReplaceAllStringFunc(text, func(ref string) string {
+		name := ref[2 : len(ref)-1]
+		value, ok := se.variables[name]
+		if !ok || se.external[name] || se.carriesExternal(value) {
+			return ref
+		}
+		return value
+	})
+}
+
+// carriesExternal reports whether value holds the value of an external
+// variable: all of it, or (for values long enough to be a secret) part of it.
+func (se *ScriptEngine) carriesExternal(value string) bool {
+	for name := range se.external {
+		ext := se.variables[name]
+		if ext == "" {
+			continue
+		}
+		if value == ext || (len(ext) >= 6 && strings.Contains(value, ext)) {
+			return true
+		}
+	}
+	return false
+}
+
 // UnsetVariable removes a variable from both the Go map and the JS engine.
 func (se *ScriptEngine) UnsetVariable(name string) {
 	delete(se.variables, name)
@@ -113,6 +196,7 @@ func (se *ScriptEngine) ImportSystemEnv() {
 			// Import if it matches env var pattern (uppercase like THING, MY_VAR)
 			if envVarPattern.MatchString(name) {
 				se.SetVariable(name, value)
+				se.markExternal(name)
 			}
 		}
 	}
@@ -227,8 +311,10 @@ func expandDollarVar(text, name, value string) string {
 // outlive a single runScript call still goes through the global `output`
 // bag, exactly as documented.
 func (se *ScriptEngine) RunScript(script string, env map[string]string) error {
-	// Expand variables in script
-	script = se.ExpandVariables(script)
+	// The script runs as written. Flow variables reach it as plain names
+	// (testID, platform); ${...} in a script is JavaScript, a template
+	// literal, as in Maestro. Expanding it as a flow variable turned Expo's
+	// `${SERVER_URL}/process` into "/process" before the script ran.
 
 	// Apply env variables for the duration of THIS script only, expanded so
 	// values like "mockoon-cli start --port ${output.port}" resolve before the
@@ -344,9 +430,9 @@ func (se *ScriptEngine) EvalCondition(script string) (bool, error) {
 	// Expand any remaining $VAR style variables
 	script = se.expandDollarVars(script)
 
-	// Pre-define potential env variables as undefined to avoid ReferenceError
-	matches := envVarPattern.FindAllString(script, -1)
-	for _, name := range matches {
+	// An undeclared name is undefined, not a ReferenceError, as in Maestro's
+	// JS engine (GraalJsEngine.kt:198-204).
+	for _, name := range referencedIdentifiers(script) {
 		se.js.DefineUndefinedIfMissing(name)
 	}
 
@@ -360,7 +446,7 @@ func (se *ScriptEngine) EvalCondition(script string) (bool, error) {
 	case bool:
 		return v, nil
 	case string:
-		return v == "true", nil
+		return maestroTruthy(v), nil
 	case int64:
 		return v != 0, nil
 	case float64:
@@ -368,6 +454,42 @@ func (se *ScriptEngine) EvalCondition(script string) (bool, error) {
 	default:
 		return result != nil, nil
 	}
+}
+
+// maestroTruthy is how Maestro reads the value of a `true:` condition or an
+// assertTrue: false when it is blank, "false" in any case, "undefined",
+// "null" or a number equal to zero, and true otherwise, so "abc" is true
+// (Orchestra.kt:1030-1052).
+func maestroTruthy(value string) bool {
+	if strings.TrimSpace(value) == "" || strings.EqualFold(value, "false") ||
+		value == "undefined" || value == "null" {
+		return false
+	}
+	if f, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && f == 0 {
+		return false
+	}
+	return true
+}
+
+// isWholeExpression reports whether text is one ${...} and nothing else.
+func isWholeExpression(text string) bool {
+	s := strings.TrimSpace(text)
+	if !strings.HasPrefix(s, "${") {
+		return false
+	}
+	depth := 0
+	for i := 1; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i == len(s)-1
+			}
+		}
+	}
+	return false
 }
 
 // ResolvePath resolves a relative path against the flow directory.
@@ -398,7 +520,8 @@ func (se *ScriptEngine) ExecuteRunScript(step *flow.RunScriptStep) *core.Command
 	script := step.ScriptPath()
 
 	// Check if it's a file path (ends with .js)
-	if strings.HasSuffix(script, ".js") {
+	isFile := strings.HasSuffix(script, ".js")
+	if isFile {
 		filePath := se.ResolvePath(script)
 		content, err := os.ReadFile(filePath)
 		if err != nil {
@@ -499,6 +622,15 @@ func (se *ScriptEngine) ExecuteAssertTrue(step *flow.AssertTrueStep) *core.Comma
 	}
 }
 
+// TakeConsoleLogs returns the console.log/warn/error lines scripts printed
+// since the last call, for the step that ran them.
+func (se *ScriptEngine) TakeConsoleLogs() []string {
+	if se == nil || se.js == nil {
+		return nil
+	}
+	return se.js.TakeLogs()
+}
+
 // ExecuteAssertCondition handles assertCondition step.
 func (se *ScriptEngine) ExecuteAssertCondition(ctx context.Context, step *flow.AssertConditionStep, driver core.Driver) *core.CommandResult {
 	cond := step.Condition
@@ -584,7 +716,7 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 	if cond.Visible != nil {
 		visibleStep := &flow.AssertVisibleStep{Selector: *cond.Visible}
 		// when/while: an unmet condition should fail fast (#110).
-		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible, se.conditionTimeoutMs)
+		visibleStep.TimeoutMs = conditionTimeout(cond, cond.Visible, se.conditionBudgetMs())
 		visibleStep.Optional = true
 		result := driver.Execute(visibleStep)
 		if !result.Success {
@@ -595,7 +727,7 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 	// Check notVisible
 	if cond.NotVisible != nil {
 		notVisibleStep := &flow.AssertNotVisibleStep{Selector: *cond.NotVisible}
-		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible, se.conditionTimeoutMs)
+		notVisibleStep.TimeoutMs = conditionTimeout(cond, cond.NotVisible, se.conditionBudgetMs())
 		notVisibleStep.Optional = true
 		result := driver.Execute(notVisibleStep)
 		if !result.Success {
@@ -618,7 +750,7 @@ func (se *ScriptEngine) CheckCondition(ctx context.Context, cond flow.Condition,
 // Priority: 1) Condition.Timeout, 2) Selector.Timeout, 3) the caller's fallback.
 // A fallback of 0 lets the driver apply its OptionalFindTimeout (7s) — used for
 // assertCondition, where an asserted element should be waited for. The when/
-// while path passes the short conditionTimeoutMs so an unmet condition fails
+// while path passes conditionBudgetMs() so an unmet condition fails
 // fast instead of blocking 7s (#110).
 func conditionTimeout(cond flow.Condition, sel *flow.Selector, fallback int) int {
 	if cond.Timeout > 0 {
@@ -632,17 +764,11 @@ func conditionTimeout(cond flow.Condition, sel *flow.Selector, fallback int) int
 
 // withEnvVars applies environment variables and returns a restore function.
 // Values are expanded through ExpandVariables to support ${VAR || "default"} syntax.
+// The restore puts back what each key held and removes a key that was not set
+// before, as Maestro's leaveEnvScope does (GraalJsEngine.kt:223-238), rather
+// than leaving it set to "".
 func (se *ScriptEngine) withEnvVars(env map[string]string) func() {
-	oldVars := make(map[string]string)
-	for k, v := range env {
-		oldVars[k] = se.GetVariable(k)
-		se.SetVariable(k, se.ExpandVariables(v))
-	}
-	return func() {
-		for k, v := range oldVars {
-			se.SetVariable(k, v)
-		}
-	}
+	return se.applyScopedEnv(env)
 }
 
 // parseBoolExpr converts the resolved value of an `enabled:` argument into a
@@ -822,6 +948,10 @@ func (se *ScriptEngine) ExpandStep(step flow.Step) {
 		s.Longitude = se.ExpandVariables(s.Longitude)
 	case *flow.SetClipboardStep:
 		s.Text = se.ExpandVariables(s.Text)
+	case *flow.TravelStep:
+		for i, p := range s.Points {
+			s.Points[i] = se.ExpandVariables(p)
+		}
 	case *flow.SwipeStep:
 		s.Direction = se.ExpandVariables(s.Direction)
 		s.Start = se.ExpandVariables(s.Start)
@@ -850,7 +980,10 @@ func (se *ScriptEngine) ExpandCondition(cond *flow.Condition) {
 	if cond.NotVisible != nil {
 		cond.NotVisible = se.expandSelector(cond.NotVisible)
 	}
-	if cond.Script != "" {
+	// A script that is one ${...} is left for EvalCondition, which judges its
+	// value as Maestro does. Expanded here, the value was then run as JS
+	// itself: "abc" became a ReferenceError, and "" no condition at all.
+	if cond.Script != "" && !isWholeExpression(cond.Script) {
 		cond.Script = se.ExpandVariables(cond.Script)
 	}
 	if cond.Platform != "" {

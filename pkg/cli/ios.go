@@ -3,18 +3,19 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	goios "github.com/danielpaulus/go-ios/ios"
-	"github.com/danielpaulus/go-ios/ios/zipconduit"
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
 	wdadriver "github.com/devicelab-dev/maestro-runner/pkg/driver/wda"
 	"github.com/devicelab-dev/maestro-runner/pkg/flutter"
+	"github.com/devicelab-dev/maestro-runner/pkg/iosinstall"
 	"github.com/devicelab-dev/maestro-runner/pkg/logger"
 )
 
@@ -37,17 +38,38 @@ type iosDeviceInfo struct {
 	IsSimulator bool
 }
 
-// CreateIOSDriver creates an iOS driver using WebDriverAgent.
-// Exported for library use.
+// wdaAttach reports whether the run attaches to a running WebDriverAgent:
+// --wda-attach with --driver wda. Other drivers ignore the flag.
+func wdaAttach(cfg *RunConfig) bool {
+	return cfg.WDAAttach && iosDriverName(cfg.Driver) == "wda"
+}
+
+// getIOSDeviceInfoFn is getIOSDeviceInfo, as a variable so tests can run
+// CreateIOSDriver without a device.
+var getIOSDeviceInfoFn = getIOSDeviceInfo
+
+// CreateIOSDriver creates the iOS driver cfg.Driver names. Exported for
+// library use.
 func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
-	// Phase 4 — devicelab driver branch. Mirrors --driver devicelab on Android.
-	// Routes to the XCUITest-based runner (pkg/driver/devicelab_ios) instead
-	// of WebDriverAgent. Simulator-only in Phase 4.
-	if strings.EqualFold(cfg.Driver, "devicelab") {
+	// The default is devicelab, the prebuilt devicelab-ios-agent
+	// (pkg/driver/devicelab_ios), on simulators and real iPhones.
+	// --driver wda selects WebDriverAgent. --driver devicelab-legacy is the
+	// previous runner built from source (pkg/driver/devicelab_ios_legacy),
+	// simulator-only.
+	switch iosDriverName(cfg.Driver) {
+	case "devicelab-legacy":
+		return createDevicelabLegacyIOSDriver(cfg)
+	case "devicelab":
 		return createDevicelabIOSDriver(cfg)
 	}
 
 	udid := getFirstDevice(cfg)
+
+	// Auto-detection skips a device whose WDA port is bound, and an attached
+	// WDA binds it, so attaching names its device.
+	if udid == "" && wdaAttach(cfg) {
+		return nil, nil, fmt.Errorf("--wda-attach needs the device named with --device <UDID>")
+	}
 
 	if udid == "" {
 		// Try to find booted simulator or connected physical device
@@ -66,9 +88,10 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		logger.Info("Using specified iOS device: %s", udid)
 	}
 
-	// Check if device port is already in use (another instance using this device)
+	// Check if device port is already in use (another instance using this device).
+	// With --wda-attach it is bound on purpose, by the WDA the run attaches to.
 	port := wdadriver.PortFromUDID(udid)
-	if isPortInUse(port) {
+	if !wdaAttach(cfg) && isPortInUse(port) {
 		return nil, nil, fmt.Errorf("device %s is in use (port %d already bound)\n"+
 			"Another maestro-runner instance may be using this device.\n"+
 			"Hint: Wait for it to finish or use a different device with --device <UDID>", udid, port)
@@ -94,47 +117,73 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		printSetupSuccess("App installed")
 	}
 
-	// 2. Verify bundled WDA is present (no auto-download — releases ship WDA)
-	if !cfg.NoDriverInstall {
-		printSetupStep("Checking WDA installation...")
-		if _, err := wdadriver.Setup(); err != nil {
-			return nil, nil, fmt.Errorf("WDA setup failed: %w", err)
+	// 2-4. Attach to the WDA already running on the device's port, or install,
+	// build and start our own.
+	var runner *wdadriver.Runner
+	wdaPort := port
+	if wdaAttach(cfg) {
+		printSetupStep(fmt.Sprintf("Attaching to the running WDA on port %d...", port))
+		if err := wdadriver.WaitForRunning(wdadriver.NewClient(port), wdadriver.AttachTimeout); err != nil {
+			return nil, nil, fmt.Errorf("--wda-attach: %w", err)
 		}
-		printSetupSuccess("WDA installed")
-	}
+		printSetupSuccess("WDA attached")
+	} else {
+		// 2. Verify bundled WDA is present (no auto-download — releases ship WDA)
+		if !cfg.NoDriverInstall {
+			printSetupStep("Checking WDA installation...")
+			if _, err := wdadriver.Setup(); err != nil {
+				return nil, nil, fmt.Errorf("WDA setup failed: %w", err)
+			}
+			printSetupSuccess("WDA installed")
+		}
 
-	// 3. Create WDA runner
-	printSetupStep("Building WDA...")
-	logger.Info("Building WDA for device %s (team ID: %s)", udid, cfg.TeamID)
-	runner := wdadriver.NewRunner(udid, cfg.TeamID, cfg.WDABundleID)
-	ctx := context.Background()
+		// 3. Create WDA runner
+		printSetupStep("Building WDA...")
+		logger.Info("Building WDA for device %s (team ID: %s)", udid, cfg.TeamID)
+		runner = wdadriver.NewRunner(udid, cfg.TeamID, cfg.WDABundleID)
+		ctx := context.Background()
 
-	if err := runner.Build(ctx); err != nil {
-		logger.Error("WDA build failed: %v", err)
-		return nil, nil, fmt.Errorf("WDA build failed: %w", err)
-	}
-	logger.Info("WDA build completed successfully")
-	printSetupSuccess("WDA built")
+		if err := runner.Build(ctx); err != nil {
+			logger.Error("WDA build failed: %v", err)
+			return nil, nil, fmt.Errorf("WDA build failed: %w", err)
+		}
+		logger.Info("WDA build completed successfully")
+		printSetupSuccess("WDA built")
 
-	// 4. Start WDA
-	printSetupStep("Starting WDA...")
-	logger.Info("Starting WDA on device %s (port: %d)", udid, runner.Port())
-	if err := runner.Start(ctx); err != nil {
-		logger.Error("WDA start failed: %v", err)
-		runner.Cleanup()
-		return nil, nil, fmt.Errorf("WDA start failed: %w", err)
+		// 4. Start WDA
+		printSetupStep("Starting WDA...")
+		logger.Info("Starting WDA on device %s (port: %d)", udid, runner.Port())
+		if err := runner.Start(ctx); err != nil {
+			logger.Error("WDA start failed: %v", err)
+			runner.Cleanup()
+			return nil, nil, fmt.Errorf("WDA start failed: %w", err)
+		}
+		logger.Info("WDA started successfully on port %d", runner.Port())
+		printSetupSuccess("WDA started")
+		wdaPort = runner.Port()
 	}
-	logger.Info("WDA started successfully on port %d", runner.Port())
-	printSetupSuccess("WDA started")
 
 	// 5. Create WDA client
-	printSetupSuccess(fmt.Sprintf("WDA port: %d", runner.Port()))
-	client := wdadriver.NewClient(runner.Port())
+	printSetupSuccess(fmt.Sprintf("WDA port: %d", wdaPort))
+	client := wdadriver.NewClient(wdaPort)
+
+	// stopWDA stops the WDA this run started. An attached WDA belongs to
+	// whatever started it, so only this run's session is ended and the WDA is
+	// left running for the next run.
+	stopWDA := func() {
+		if runner != nil {
+			runner.Cleanup()
+			return
+		}
+		if err := client.DeleteSession(); err != nil {
+			logger.Debug("ending the session on the attached WDA: %v", err)
+		}
+	}
 
 	// 6. Get device info
-	deviceInfo, err := getIOSDeviceInfo(udid)
+	deviceInfo, err := getIOSDeviceInfoFn(udid)
 	if err != nil {
-		runner.Cleanup()
+		stopWDA()
 		return nil, nil, fmt.Errorf("get device info: %w", err)
 	}
 
@@ -152,10 +201,12 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 		appVersion, appBuild = readBundleVersionAndBuild(cfg.AppFile)
 	}
 
-	// 8. Get screen size
+	// 8. Get screen size (read again on first use if this read fails)
 	var screenW, screenH int
 	if w, h, err := client.WindowSize(); err == nil {
 		screenW, screenH = w, h
+	} else {
+		logger.Warn("WDA did not report the screen size at startup (read again when needed): %v", err)
 	}
 
 	platformInfo := &core.PlatformInfo{
@@ -176,9 +227,7 @@ func CreateIOSDriver(cfg *RunConfig) (core.Driver, func(), error) {
 	wdaDrv.SetAppFile(cfg.AppFile)
 
 	// Cleanup function
-	cleanup := func() {
-		runner.Cleanup()
-	}
+	cleanup := stopWDA
 
 	var driver core.Driver = wdaDrv
 
@@ -378,35 +427,32 @@ func getIOSDeviceInfo(udid string) (*iosDeviceInfo, error) {
 	return getPhysicalDeviceInfo(udid)
 }
 
+// installOnDevice installs on a physical device; a variable so tests can
+// replace it.
+var installOnDevice = iosinstall.Install
+
 // installIOSApp installs an app on an iOS device (simulator or physical).
 //
-// Strategy for physical devices:
-//  1. Prefer `xcrun devicectl device install app` (Apple's modern CoreDevice
-//     installer, iOS 17+ friendly) — set MAESTRO_RUNNER_IOS_INSTALLER=zipconduit
-//     to skip.
-//  2. Fall back to go-ios zipconduit for older Xcode / macOS or on devicectl
-//     failure. Both paths run with installTimeout so an unresponsive install
-//     service surfaces as an error instead of hanging forever.
+// A physical device goes through iosinstall: `xcrun devicectl device install
+// app` (Apple's CoreDevice installer, iOS 17+ friendly), falling back to the
+// go-ios zip conduit when devicectl is missing or fails.
+// MAESTRO_RUNNER_IOS_INSTALLER=zipconduit skips devicectl and =devicectl
+// returns devicectl's error instead of falling back. The install itself is
+// time-bounded, so an unresponsive install service surfaces as an error instead
+// of hanging forever.
 func installIOSApp(udid string, appPath string, isSimulator bool) error {
 	if isSimulator {
 		return installViaSimctl(udid, appPath)
 	}
-
-	installer := strings.ToLower(strings.TrimSpace(os.Getenv("MAESTRO_RUNNER_IOS_INSTALLER")))
-
-	// Default: prefer devicectl, fall back to zipconduit.
-	if installer != "zipconduit" && devicectlAvailable() {
-		if err := installViaDevicectl(udid, appPath); err == nil {
-			return nil
-		} else if installer == "devicectl" {
-			// User explicitly forced devicectl — propagate the error, don't silently fall back.
-			return err
-		} else {
-			logger.Warn("devicectl install failed, falling back to zipconduit: %v", err)
-		}
+	path, err := installOnDevice(udid, appPath)
+	if errors.Is(err, iosinstall.ErrTimeout) && path == iosinstall.GoIOS {
+		return fmt.Errorf("app install: %w (try: xcrun devicectl device install app --device %s %s)", err, udid, appPath)
 	}
-
-	return installViaZipconduit(udid, appPath)
+	if err != nil {
+		return fmt.Errorf("app install: %w", err)
+	}
+	logger.Debug("installed %s on %s with %s", appPath, udid, path)
+	return nil
 }
 
 // installViaSimctl installs on a simulator. Wrapped in a timeout so a stuck
@@ -422,60 +468,6 @@ func installViaSimctl(udid, appPath string) error {
 		return fmt.Errorf("simctl install failed: %w\nOutput: %s", err, out)
 	}
 	return nil
-}
-
-// devicectlAvailable reports whether `xcrun devicectl` works on this host.
-// Requires macOS 14 / Xcode 15+.
-func devicectlAvailable() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := exec.CommandContext(ctx, "xcrun", "devicectl", "--version").Run()
-	return err == nil
-}
-
-// installViaDevicectl uses Apple's modern CoreDevice installer.
-// Supported on iOS 17+ real devices; also works on earlier iOS via Xcode 15+.
-func installViaDevicectl(udid, appPath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), installTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "xcrun", "devicectl", "device", "install", "app",
-		"--device", udid, appPath).CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("devicectl install timed out after %v", installTimeout)
-	}
-	if err != nil {
-		return fmt.Errorf("devicectl install failed: %w\nOutput: %s", err, string(out))
-	}
-	return nil
-}
-
-// installViaZipconduit uses the go-ios Go-native installer. Kept as a fallback
-// for hosts without devicectl (older macOS / Xcode). Wrapped in a timeout —
-// without it, SendFile can hang indefinitely when the install service accepts
-// the connection but never acks completion (observed on iOS 26 / iPhone 13).
-func installViaZipconduit(udid, appPath string) error {
-	entry, err := goios.GetDevice(udid)
-	if err != nil {
-		return fmt.Errorf("device %s not found: %w", udid, err)
-	}
-	conn, err := zipconduit.New(entry)
-	if err != nil {
-		return fmt.Errorf("failed to connect to device install service: %w", err)
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- conn.SendFile(appPath) }()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("failed to install app: %w", err)
-		}
-		return nil
-	case <-time.After(installTimeout):
-		return fmt.Errorf("app install timed out after %v (try: xcrun devicectl device install app --device %s %s)",
-			installTimeout, udid, appPath)
-	}
 }
 
 // getSimulatorInfo gets information about an iOS simulator.
@@ -622,6 +614,27 @@ func autoDetectIOSDevices(count int) ([]string, error) {
 	return devices, nil
 }
 
+// isIOSDeviceID reports whether id is an iOS simulator or a connected
+// iPhone, for a --device given without --platform. Only macOS has either.
+var isIOSDeviceID = func(id string) bool {
+	if runtime.GOOS != "darwin" || id == "" {
+		return false
+	}
+	if isIOSSimulator(id) {
+		return true
+	}
+	udids, err := listPhysicalIOSUDIDs()
+	if err != nil {
+		return false
+	}
+	for _, u := range udids {
+		if strings.EqualFold(u, id) {
+			return true
+		}
+	}
+	return false
+}
+
 // listPhysicalIOSUDIDs returns the UDIDs of every physical iOS device attached
 // over usbmux. Unlike findConnectedDevice it does not stop at the first one —
 // the `devices` command needs the whole list.
@@ -637,4 +650,15 @@ func listPhysicalIOSUDIDs() ([]string, error) {
 		}
 	}
 	return udids, nil
+}
+
+// iosDriverName returns the iOS driver a --driver value selects. Unset means
+// the iOS default, devicelab; "uiautomator2" is the Android driver and on iOS
+// is taken as unset too, as it always was.
+func iosDriverName(driver string) string {
+	d := strings.ToLower(driver)
+	if d == "" || d == "uiautomator2" {
+		return "devicelab"
+	}
+	return d
 }

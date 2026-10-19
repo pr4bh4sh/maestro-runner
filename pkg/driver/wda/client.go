@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/devicelab-dev/maestro-runner/pkg/core"
@@ -23,16 +26,70 @@ type Client struct {
 	baseURL    string
 	sessionID  string
 	httpClient *http.Client
+
+	// What the last page-source reads gave: when one last succeeded, and the
+	// error of the last that failed. A wait that never found its element can
+	// then say the screen could not be read at all.
+	sourceMu     sync.Mutex
+	sourceOKAt   time.Time
+	sourceErr    error
+	sourceErrsAt time.Time
+}
+
+// SourceUnreadableSince returns the last page-source error when no read
+// succeeded since t and at least one failed; nil otherwise.
+func (c *Client) SourceUnreadableSince(t time.Time) error {
+	c.sourceMu.Lock()
+	defer c.sourceMu.Unlock()
+	if c.sourceErr == nil || c.sourceErrsAt.Before(t) || !c.sourceOKAt.Before(t) {
+		return nil
+	}
+	return c.sourceErr
+}
+
+func (c *Client) noteSource(err error) {
+	c.sourceMu.Lock()
+	defer c.sourceMu.Unlock()
+	if err == nil {
+		c.sourceOKAt = time.Now()
+		return
+	}
+	c.sourceErr, c.sourceErrsAt = err, time.Now()
 }
 
 // NewClient creates a new WDA client.
+//
+// The address is 127.0.0.1, not localhost: WDA (and the go-ios forward to a
+// device) listen on IPv4, while localhost resolves to ::1 first, so any other
+// server bound to [::1] on the same port answered every WDA call.
 func NewClient(port uint16) *Client {
 	return &Client{
-		baseURL: fmt.Sprintf("http://localhost:%d", port),
+		baseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout:   60 * time.Second,
+			Transport: newWDATransport(),
 		},
 	}
+}
+
+// wdaIdleConnsPerHost is how many idle connections the client keeps open to WebDriverAgent.
+// The driver sends up to four requests at once (an element's name, rect, text and displayed;
+// a tap's four lookups), and Go keeps two idle connections per host by default, so every such
+// burst closed two connections and opened two new ones. On a real iPhone reached through a
+// forward (SSH, then iproxy), a new connection took about 300 ms, and the two opened together
+// failed at once with EOF in 297 of 996 bursts of one 44-flow run, always both of them and
+// never a kept connection. Kept for every request of a burst, no new ones are needed.
+const wdaIdleConnsPerHost = 8
+
+// newWDATransport is Go's default transport with room to keep a whole burst's connections.
+func newWDATransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	t := base.Clone()
+	t.MaxIdleConnsPerHost = wdaIdleConnsPerHost
+	return t
 }
 
 // Session management
@@ -85,12 +142,13 @@ func (c *Client) CreateSession(bundleID string, alertAction string) error {
 }
 
 // wdaSnapshotMaxDepth is the WebDriverAgent accessibility-snapshot depth cap.
-// The default of 100 clears the deep native wrapper nesting a React Native
-// screen produces while staying well under XCAXClient's INT_MAX (which
-// WebDriverAgent avoids because it can hang on pathological trees). Override
-// with MAESTRO_WDA_SNAPSHOT_MAX_DEPTH for an unusually deep app.
+// With a cap above 62, XCTest returns no elements at all for a screen nested
+// deeper than 62 levels, so a deep screen came back blank at the old default
+// of 100 (#171, measured on iOS 27). 62 is the deepest cap that still returns
+// it, and is the same as 100 for any screen 100 worked on. Override with
+// MAESTRO_WDA_SNAPSHOT_MAX_DEPTH.
 func wdaSnapshotMaxDepth() int {
-	const defaultDepth = 100
+	const defaultDepth = 62
 	if v := os.Getenv("MAESTRO_WDA_SNAPSHOT_MAX_DEPTH"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
@@ -115,6 +173,7 @@ func (c *Client) DisableQuiescence() error {
 	return c.UpdateSettings(map[string]interface{}{
 		"shouldWaitForQuiescence": false,
 		"waitForIdleTimeout":      0,
+		"animationCoolOffTimeout": 0,
 	})
 }
 
@@ -211,14 +270,37 @@ func (c *Client) LongPress(x, y float64, durationSec float64) error {
 	return err
 }
 
-// Swipe performs a swipe gesture.
+// swipeMoveMs is how long the finger takes to travel from start to end.
+const swipeMoveMs = 100
+
+// Swipe touches (fromX, fromY), moves to (toX, toY) in swipeMoveMs, rests
+// there for durationSec, then lifts — Maestro's iOS swipe shape. It goes
+// through W3C actions, which WDA turns into an XCPointerEventPath.
+//
+// It used to be /wda/dragfromtoforduration, where the duration is a hold
+// before the move: the finger sat still on whatever row was under it, and in
+// a list iOS took that as a tap on the row (DDG Settings opened a link in
+// Safari mid-scroll).
 func (c *Client) Swipe(fromX, fromY, toX, toY float64, durationSec float64) error {
-	_, err := c.post(c.sessionPath("/wda/dragfromtoforduration"), map[string]interface{}{
-		"fromX":    fromX,
-		"fromY":    fromY,
-		"toX":      toX,
-		"toY":      toY,
-		"duration": durationSec,
+	restMs := int(durationSec * 1000)
+	if restMs < 0 {
+		restMs = 0
+	}
+	_, err := c.post(c.sessionPath("/actions"), map[string]interface{}{
+		"actions": []interface{}{
+			map[string]interface{}{
+				"type":       "pointer",
+				"id":         "finger1",
+				"parameters": map[string]interface{}{"pointerType": "touch"},
+				"actions": []interface{}{
+					map[string]interface{}{"type": "pointerMove", "duration": 0, "x": fromX, "y": fromY},
+					map[string]interface{}{"type": "pointerDown", "button": 0},
+					map[string]interface{}{"type": "pointerMove", "duration": swipeMoveMs, "x": toX, "y": toY},
+					map[string]interface{}{"type": "pause", "duration": restMs},
+					map[string]interface{}{"type": "pointerUp", "button": 0},
+				},
+			},
+		},
 	})
 	return err
 }
@@ -264,6 +346,26 @@ func (c *Client) ElementSendKeys(elementID, text string, frequency int) error {
 	return err
 }
 
+// isDroppedConnection reports a request that died on its connection before any
+// response came back: an EOF, a reset or a broken pipe. Over a forwarded WDA port
+// this happens. On a physical iPhone reached through usbmux and an SSH tunnel, WDA
+// began dropping about one request in fourteen, 90 minutes into a run, each
+// within about 10 ms and nearly all of them element reads sent in parallel; one
+// such dropped text read made a copyTextFrom come back empty. net/http sends a
+// request again by itself only when it is a GET on a connection that had been
+// used before, so a fresh connection that is hung up on, and a POST, are not.
+func isDroppedConnection(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+}
+
+// isLookupPath reports a POST that only finds elements, from the root or from an
+// element (/element, /elements, /element/{id}/element(s)), so repeating it changes
+// nothing on the device.
+func isLookupPath(path string) bool {
+	return strings.HasSuffix(path, "/element") || strings.HasSuffix(path, "/elements")
+}
+
 // ElementClear clears an element's text.
 func (c *Client) ElementClear(elementID string) error {
 	_, err := c.post(c.sessionPath(fmt.Sprintf("/element/%s/clear", elementID)), nil)
@@ -287,6 +389,12 @@ func (c *Client) Screenshot() ([]byte, error) {
 
 // Source returns the UI hierarchy as XML.
 func (c *Client) Source() (string, error) {
+	source, err := c.source()
+	c.noteSource(err)
+	return source, err
+}
+
+func (c *Client) source() (string, error) {
 	resp, err := c.get(c.sessionPath("/source"))
 	if err != nil {
 		// A snapshot taken while the accessibility tree is mutating can fail
@@ -582,6 +690,11 @@ func (c *Client) get(path string) (map[string]interface{}, error) {
 	logger.Debug("WDA GET %s", path)
 
 	resp, err := c.httpClient.Get(c.baseURL + path)
+	if err != nil && isDroppedConnection(err) {
+		// A read is safe to send twice.
+		logger.Warn("WDA GET %s: the connection dropped before a response (%v), sending it again", path, err)
+		resp, err = c.httpClient.Get(c.baseURL + path)
+	}
 	duration := time.Since(start).Milliseconds()
 
 	if err != nil {
@@ -600,23 +713,35 @@ func (c *Client) get(path string) (map[string]interface{}, error) {
 
 func (c *Client) post(path string, body interface{}) (map[string]interface{}, error) {
 	start := time.Now()
-	var reqBody io.Reader
+	var data []byte
 	bodyStr := ""
 	if body != nil {
-		data, err := json.Marshal(body)
+		var err error
+		data, err = json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		reqBody = bytes.NewReader(data)
 		bodyStr = string(data)
 		if len(bodyStr) > 100 {
 			bodyStr = bodyStr[:100] + "..."
 		}
 	}
+	newBody := func() io.Reader {
+		if data == nil {
+			return nil
+		}
+		return bytes.NewReader(data)
+	}
 
 	logger.Debug("WDA POST %s body=%s", path, core.RedactTypedText(path, bodyStr))
 
-	resp, err := c.httpClient.Post(c.baseURL+path, "application/json", reqBody)
+	resp, err := c.httpClient.Post(c.baseURL+path, "application/json", newBody())
+	if err != nil && isDroppedConnection(err) && isLookupPath(path) {
+		// A lookup changes nothing, so it is as safe to repeat as a GET. An action is
+		// not sent twice: it may have reached WDA before the connection went.
+		logger.Warn("WDA POST %s: the connection dropped before a response (%v), sending it again", path, err)
+		resp, err = c.httpClient.Post(c.baseURL+path, "application/json", newBody())
+	}
 	duration := time.Since(start).Milliseconds()
 
 	if err != nil {
@@ -675,6 +800,13 @@ func (c *Client) parseResponse(resp *http.Response) (map[string]interface{}, err
 			if msg, ok := value["message"].(string); ok {
 				message = msg
 			}
+			// The status alone said nothing: a page source that failed on
+			// every read showed only "status: 404" in the log.
+			logged := message
+			if len(logged) > 300 {
+				logged = logged[:300] + "..."
+			}
+			logger.Debug("WDA error (HTTP %d, %s): %s", resp.StatusCode, errMsg, logged)
 			return nil, fmt.Errorf("WDA error: %s", message)
 		}
 	}

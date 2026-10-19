@@ -11,7 +11,7 @@ import (
 
 // Build info — set at build time via -ldflags.
 var (
-	Version   = "1.1.25"
+	Version   = "1.1.29"
 	Commit    = "unknown"
 	BuildDate = "unknown"
 )
@@ -33,9 +33,9 @@ var GlobalFlags = []cli.Flag{
 	&cli.StringFlag{
 		Name:    "driver",
 		Aliases: []string{"d"},
-		Usage:   "Driver to use. Android: devicelab (default) or uiautomator2 or appium; iOS: wda (default) or devicelab or appium; web: cdp. Leave unset to take each platform's default.",
+		Usage:   "Driver to use. Android: devicelab (default) or uiautomator2 or appium; iOS: devicelab (default) or wda or appium (devicelab-legacy: the previous devicelab runner, kept for comparison); web: cdp. Leave unset to take each platform's default.",
 		// Empty means "not chosen" — each platform then picks its default
-		// (Android: devicelab, iOS: wda, web: cdp). Do not set a value here, or
+		// (Android: devicelab, iOS: devicelab, web: cdp). Do not set a value here, or
 		// it would leak in as an explicit choice on every platform.
 		Value:   "",
 		EnvVars: []string{"MAESTRO_DRIVER"},
@@ -87,6 +87,7 @@ var GlobalFlags = []cli.Flag{
 	},
 	&cli.StringFlag{
 		Name:    "team-id",
+		Aliases: []string{"apple-team-id"},
 		Usage:   "Apple Development Team ID for WDA code signing (iOS)",
 		EnvVars: []string{"MAESTRO_TEAM_ID", "DEVELOPMENT_TEAM"},
 	},
@@ -94,6 +95,11 @@ var GlobalFlags = []cli.Flag{
 		Name:    "wda-bundle-id",
 		Usage:   "Custom WDA bundle identifier for code signing (iOS)",
 		EnvVars: []string{"MAESTRO_WDA_BUNDLE_ID"},
+	},
+	&cli.BoolFlag{
+		Name:    "wda-attach",
+		Usage:   "Use the WebDriverAgent already running on the device's WDA port instead of building and starting one; it is left running (iOS, --driver wda)",
+		EnvVars: []string{"MAESTRO_WDA_ATTACH"},
 	},
 	&cli.StringFlag{
 		Name:    "start-emulator",
@@ -133,6 +139,12 @@ var GlobalFlags = []cli.Flag{
 		Usage:   "Set appium:newCommandTimeout (seconds) for the Appium session when it is not already set in --caps. 0 = leave unset (honor the caps-file value, else the Appium server default). Raise this for cloud farms where --parallel pre-creates sessions that sit idle during setup and would otherwise be reaped.",
 		EnvVars: []string{"MAESTRO_NEW_COMMAND_TIMEOUT"},
 	},
+
+	// Maestro's driver connection options; maestro-runner manages its own
+	// driver, so they are accepted and ignored.
+	&cli.StringFlag{Name: "host", Hidden: true},
+	&cli.StringFlag{Name: "port", Hidden: true},
+	&cli.StringFlag{Name: "driver-host-port", Hidden: true},
 }
 
 // Execute runs the CLI.
@@ -185,7 +197,7 @@ Examples:
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
+	if err := app.Run(normalizeArgs(os.Args, GlobalFlags, testCommand.Flags, app.Commands)); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

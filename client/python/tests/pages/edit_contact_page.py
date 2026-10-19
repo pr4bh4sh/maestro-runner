@@ -22,7 +22,9 @@ class EditContactPage(BasePage):
 
     def set_phone(self, number: str) -> None:
         self.wait_for_animation()
-        self.client.tap(text="Phone (Mobile)|Add phone")
+        # On API 35 the phone row is an EditText labelled "Phone"; the old
+        # "Phone (Mobile)|Add phone" label belonged to the pre-API-33 editor.
+        self.client.tap(text="Phone")
         self.client.input_text(number)
         self.hide_keyboard(strategy="back")
 

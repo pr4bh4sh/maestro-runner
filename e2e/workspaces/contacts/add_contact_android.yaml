@@ -25,11 +25,13 @@ tags:
 - inputText: Tester
 
 # Fill in the phone number
+# On API 35 the editor has no separate country-code prefix to tap: the phone
+# row is an EditText labelled "Phone", with a separate "Mobile" spinner below
+# it that only picks the label type. Tap the field itself.
 - hideKeyboard:
-    strategy: "escape"
-- waitForAnimationToEnd
+    strategy: "back"
 - tapOn:
-    text: "+1"
+    text: "Phone"
 - inputText:
     text: "5550100"
     keyPress: true
@@ -42,4 +44,9 @@ tags:
 - waitForAnimationToEnd
 
 # Verify the contact now appears in the list
+# The list can come back with a one-time "Some menu items have moved" nag over
+# it. Dismiss it when it shows; it is not on every run, so the tap is optional.
+- tapOn:
+    id: "android:id/closeButton"
+    optional: true
 - assertVisible: "Alice Tester"
