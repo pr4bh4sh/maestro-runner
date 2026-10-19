@@ -1,3 +1,15 @@
+---
+name: device-integration-testing
+description: >
+  Shared harness guidance for any maestro-runner integration test that drives a
+  real device or emulator — the single-session device lock, stale guard cleanup,
+  server auto-start, and the teardown stream race. Use this when a device or
+  emulator test fails with "device ... already in use", "Connection refused", a
+  hang at session creation, a "write after end" crash at exit, or an orphaned
+  server. The python-test-runner and typescript-test-runner skills both defer
+  here for this knowledge.
+---
+
 # Skill: device-integration-testing
 
 # Device Integration Testing — shared harness guidance
